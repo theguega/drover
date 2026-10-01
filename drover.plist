@@ -6,7 +6,6 @@
   <key>WorkingDirectory</key><string>/Users/theo/Developer/herdr-discord</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/usr/bin/caffeinate</string><string>-i</string>
     <string>/opt/homebrew/bin/bun</string><string>--env-file=.env</string><string>src/index.ts</string>
   </array>
   <key>EnvironmentVariables</key>

@@ -1,0 +1,13 @@
+[Unit]
+Description=drover, Discord bridge for herdr
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/Developer/herdr-discord
+ExecStart=%h/.bun/bin/bun --env-file=.env src/index.ts
+Environment=PATH=%h/.local/bin:%h/.bun/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

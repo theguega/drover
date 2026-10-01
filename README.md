@@ -17,12 +17,25 @@ New tasks get up to 2 KB of related journal entries with their first prompt.
 
 ## run
 
-    cp .env.example .env    # token, guild, channel, your user id
+    cp .env.example .env    # token, guild, channel, your user id, HOST_NAME, REMOTES
     bun install
+
+macOS (launchd):
+
     cp drover.plist ~/Library/LaunchAgents/dev.theo.drover.plist
     launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.theo.drover.plist
 
-Logs: `logs/drover.log`. Restart: `launchctl kickstart -k gui/$(id -u)/dev.theo.drover`.
+Linux (systemd user unit, survives logout with linger):
+
+    loginctl enable-linger
+    cp drover.service ~/.config/systemd/user/ && systemctl --user enable --now drover
+
+Logs: `logs/drover.log` or `journalctl --user -u drover`.
+
+## move host
+
+Run one host at a time, since two would answer every message. Stop the old one, copy
+`.env`, `state.json` and `journal.db`, set `HOST_NAME` to the new host and `REMOTES` to the
+others, then start. Every remote must be a saved herdr machine and an ssh host of the same name.
 
 Worktrees go through `herdr-wt` from the dotfiles, the same script as `⌃b ⇧g`.
-Remotes are saved herdr machines reachable over ssh under the same name.
