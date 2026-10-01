@@ -46,7 +46,7 @@ Sessions are throwaway; what carries over is small and curated.
    `applications.commands` (send messages, threads, reactions). With developer mode on,
    copy the server, channel and your user id.
 2. `cp .env.example .env` and fill it in. Only `ALLOWED_USER_IDS` can use the bot.
-3. `bun install`
+3. `cargo build --release`. Reads `.env` from the working directory.
 
 Each machine needs herdr, `claude`, and `herdr-wt` from the dotfiles (`stow herdr`).
 The host needs every remote saved as a herdr machine and reachable by ssh under the same
@@ -76,9 +76,9 @@ tasks offline.
 ## files
 
 ```
-src/index.ts    discord: commands, threads, reactions, the poll loop
-src/herdr.ts    herdr and ssh per machine, transcript replies
-src/journal.ts  journal store, search, context for new tasks
+src/main.rs     discord: commands, threads, reactions, the poll loop
+src/herdr.rs    herdr and ssh per machine, transcript replies
+src/journal.rs  journal store, search, context for new tasks
 state.json      thread → pane map (gitignored)
 journal.db      journal (gitignored)
 ```
