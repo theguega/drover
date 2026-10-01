@@ -95,8 +95,8 @@ work.
 
 | where you are | what you run |
 |---|---|
-| at meerkat | `herdr`, the local session |
-| on chicken | `herdr --remote meerkat`, the same session over SSH (or `ssh -t meerkat herdr`) |
+| at meerkat | `herdr`: meerkat as Local, chicken as a saved machine |
+| on chicken | `herdr`: chicken as Local, meerkat as a saved machine, the same workspaces and agents. Not `herdr --remote meerkat`, which shows only meerkat's session |
 | on the phone | drover threads, or SSH + `herdr` for hands-on |
 
 - **Why not the laptop.** A closed lid stops every agent on it, and drover too if it lived
@@ -203,7 +203,8 @@ directory; real environment variables win.
 | `REMOTES` | comma-separated other machines, driven over ssh | `meerkat` |
 | `POLL_MS` | how often herdr is polled | `4000` |
 
-**3. Machines.** Each machine needs herdr, the agent CLIs, and `herdr-wt` from the dotfiles
+**3. Machines.** Each machine needs herdr (`brew install herdr`, not `herdr update`, which
+installs a second copy in `~/.local/bin`), the agent CLIs, and `herdr-wt` from the dotfiles
 (`stow herdr`). Repos live in `~/Developer`. The host needs every remote saved as a herdr
 machine and reachable by ssh under the same name, without a password prompt:
 
@@ -211,10 +212,14 @@ machine and reachable by ssh under the same name, without a password prompt:
 # on meerkat, the host: drover drives chicken through these
 herdr machine add chicken --label chicken
 ssh -o BatchMode=yes chicken true
+herdr --machine chicken agent list
 
-# on chicken: herdr --machine meerkat … from the laptop
+# on chicken: both machines in one window from the laptop
 herdr machine add meerkat --label meerkat
 ```
+
+A saved machine never starts its server. If chicken's herdr server is stopped, `/new chicken`
+fails until `herdr` is opened on chicken again.
 
 **4. Build.** Current stable Rust (edition 2024).
 
