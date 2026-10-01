@@ -10,6 +10,7 @@ Discord bridge for herdr. One thread is one worktree, one pane, one fresh agent 
     /done     journal entry, then close (remove: delete the checkout)
     /recall   search the journal
     /agents   everything running
+    /worktrees  every worktree, same as `wt ls`
 
 State is a reaction on your latest prompt: 👀 working, ⏸️ needs you, ✅ done.
 New tasks get up to 2 KB of related journal entries with their first prompt.
