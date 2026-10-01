@@ -419,7 +419,7 @@ impl App {
             self.machines()
                 .fold(string("machine", "where it runs").required(true), |o, m| o.add_string_choice(&m.name, &m.name))
         };
-        let kinds = ["claude", "codex", "opencode", "pi"];
+        let kinds = ["claude", "codex", "cursor", "opencode", "pi"];
         vec![
             CreateCommand::new("new")
                 .description("Worktree + agent in a new thread")
