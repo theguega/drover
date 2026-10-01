@@ -111,6 +111,7 @@ const commands = [
     .addStringOption(machineOpt)
     .addStringOption((o) => o.setName("agent").setDescription("running agent").setRequired(true).setAutocomplete(true)),
   new SlashCommandBuilder().setName("agents").setDescription("Agents on every machine"),
+  new SlashCommandBuilder().setName("worktrees").setDescription("Worktrees on every machine"),
   new SlashCommandBuilder().setName("screen").setDescription("This thread's terminal"),
   new SlashCommandBuilder().setName("keys").setDescription("Send keys to this thread's agent")
     .addStringOption((o) => o.setName("keys").setDescription("e.g. esc, shift+tab enter").setRequired(true)),
@@ -200,6 +201,13 @@ async function cmdAgents(i: ChatInputCommandInteraction) {
   await i.editReply(tail(lines.join("\n"), 1990));
 }
 
+async function cmdWorktrees(i: ChatInputCommandInteraction) {
+  await i.deferReply();
+  const parts = await Promise.all(MACHINES.map(async (m) =>
+    `**${m.name}**\n\`\`\`\n${await herdr.worktrees(m).catch((e) => `unreachable: ${e.message}`) || "none"}\n\`\`\``));
+  await i.editReply(tail(parts.join("\n"), 1990));
+}
+
 function taskIn(channelId: string) {
   const t = tasks[channelId];
   if (!t) throw new Error("run this inside a task thread");
@@ -234,6 +242,7 @@ async function onCommand(i: ChatInputCommandInteraction) {
     case "new": return cmdNew(i);
     case "attach": return cmdAttach(i);
     case "agents": return cmdAgents(i);
+    case "worktrees": return cmdWorktrees(i);
     case "done": return cmdDone(i);
     case "screen": return void i.reply(await screen(taskIn(i.channelId)));
     case "keys": {

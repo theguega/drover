@@ -101,6 +101,12 @@ export const close = (m: Machine, workspaceId: string) => json(m, ["workspace", 
 export const remove = (m: Machine, workspaceId: string) =>
   json(m, ["worktree", "remove", "--workspace", workspaceId, "--force"]);
 
+// Same view as `wt ls` at the desk: every repo's worktrees with their herdr state.
+export async function worktrees(m: Machine) {
+  const { out, err } = await sh(m, "cd ~ && ~/.local/bin/herdr-wt ls", 30_000);
+  return (out || err).trimEnd();
+}
+
 // Main clones only: a worktree has a .git file, a clone a .git directory.
 export async function repos(m: Machine): Promise<string[]> {
   const { out } = await sh(m, `for d in ${ROOT}/*/; do [ -d "$d.git" ] && basename "$d"; done`, 15_000);
