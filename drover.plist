@@ -3,20 +3,20 @@
 <plist version="1.0">
 <dict>
   <key>Label</key><string>dev.drover</string>
-  <key>WorkingDirectory</key><string>/Users/you/Developer/drover</string>
+  <key>WorkingDirectory</key><string>/Users/YOU/Developer/drover</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/you/Developer/drover/target/release/drover</string>
+    <string>/Users/YOU/Developer/drover/target/release/drover</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>PATH</key><string>/Users/you/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
-    <key>HOME</key><string>/Users/you</string>
+    <key>PATH</key><string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>HOME</key><string>/Users/YOU</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>/Users/you/Developer/drover/logs/drover.log</string>
-  <key>StandardErrorPath</key><string>/Users/you/Developer/drover/logs/drover.log</string>
+  <key>StandardOutPath</key><string>/Users/YOU/Developer/drover/logs/drover.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/Developer/drover/logs/drover.log</string>
 </dict>
 </plist>

@@ -187,6 +187,13 @@ impl Error {
 type Result<T> = std::result::Result<T, Error>;
 
 const ROOT: &str = "~/Developer";
+
+// The script ships in this repo. ~/.local/bin/herdr-wt is the same file, stowed from the dotfiles.
+fn wt(args: &str) -> String {
+    format!(
+        r#"b="$HOME/Developer/drover/bin/herdr-wt"; [ -x "$b" ] || b="$HOME/.local/bin/herdr-wt"; "$b" {args}"#
+    )
+}
 const SHORT: Duration = Duration::from_secs(15);
 const LIST: Duration = Duration::from_secs(20);
 const LONG: Duration = Duration::from_secs(120);
@@ -299,7 +306,7 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
         branch: String,
     }
 
-    let script = format!("cd {ROOT}/{} && ~/.local/bin/herdr-wt '{}' --no-focus", repo.as_str(), r#ref.as_str());
+    let script = format!("cd {ROOT}/{} && {}", repo.as_str(), wt(&format!("'{}' --no-focus", r#ref.as_str())));
     let c: Created = parse(&sh(m, &script, LONG).await?)?;
     Ok(Worktree {
         workspace_id: c.workspace.workspace_id,
@@ -346,7 +353,7 @@ pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
 
 // Same view as `wt ls` at the desk: every repo's worktrees with their herdr state.
 pub async fn worktrees(m: &Machine) -> Result<String> {
-    let o = sh(m, "cd ~ && ~/.local/bin/herdr-wt ls", Duration::from_secs(30)).await?;
+    let o = sh(m, &format!("cd ~ && {}", wt("ls")), Duration::from_secs(30)).await?;
     Ok(or(&o.out, &o.err).trim_end().into())
 }
 
