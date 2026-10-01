@@ -3,3 +3,4 @@ node_modules
 state.json
 journal.db
 logs
+.DS_Store
