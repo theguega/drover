@@ -95,8 +95,8 @@ work.
 
 | where you are | what you run |
 |---|---|
-| at host | `herdr`, the local session |
-| on remote | `herdr --remote host`, the same session over SSH (or `ssh -t host herdr`) |
+| at host | `herdr`: host as Local, remote as a saved machine |
+| on remote | `herdr`: remote as Local, host as a saved machine, the same workspaces and agents. Not `herdr --remote host`, which shows only host's session |
 | on the phone | drover threads, or SSH + `herdr` for hands-on |
 
 - **Why not the laptop.** A closed lid stops every agent on it, and drover too if it lived
@@ -203,7 +203,8 @@ directory; real environment variables win.
 | `REMOTES` | comma-separated other machines, driven over ssh | `host` |
 | `POLL_MS` | how often herdr is polled | `4000` |
 
-**3. Machines.** Each machine needs herdr, the agent CLIs, and `herdr-wt` from the dotfiles
+**3. Machines.** Each machine needs herdr (`brew install herdr`, not `herdr update`, which
+installs a second copy in `~/.local/bin`), the agent CLIs, and `herdr-wt` from the dotfiles
 (`stow herdr`). Repos live in `~/Developer`. The host needs every remote saved as a herdr
 machine and reachable by ssh under the same name, without a password prompt:
 
@@ -211,10 +212,14 @@ machine and reachable by ssh under the same name, without a password prompt:
 # on host, the host: drover drives remote through these
 herdr machine add remote --label remote
 ssh -o BatchMode=yes remote true
+herdr --machine remote agent list
 
-# on remote: herdr --machine host … from the laptop
+# on remote: both machines in one window from the laptop
 herdr machine add host --label host
 ```
+
+A saved machine never starts its server. If remote's herdr server is stopped, `/new remote`
+fails until `herdr` is opened on remote again.
 
 **4. Build.** Current stable Rust (edition 2024).
 
