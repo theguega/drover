@@ -181,7 +181,7 @@ impl App {
             .filter(|s| !s.trim().is_empty())
             .map(id)
             .collect::<Result<_>>()?;
-        let remotes = env("REMOTES", Some("meerkat"))?
+        let remotes = env("REMOTES", Some(""))?
             .split(',')
             .filter(|s| !s.is_empty())
             .map(|name| Machine { name: name.into(), reach: Reach::Ssh })
@@ -199,7 +199,7 @@ impl App {
             channel: id(&env("DISCORD_CHANNEL_ID", None)?)?,
             allowed,
             poll: Duration::from_millis(env("POLL_MS", Some("4000"))?.parse().context("POLL_MS")?),
-            host: Machine { name: env("HOST_NAME", Some("mac"))?, reach: Reach::Local },
+            host: Machine { name: env("HOST_NAME", Some("host"))?, reach: Reach::Local },
             remotes,
             tasks: StdMutex::new(tasks.into_iter().map(|(k, t)| (k, Arc::new(Mutex::new(t)))).collect()),
             journal: Journal::open("journal.db")?,
@@ -933,9 +933,32 @@ impl EventHandler for Handler {
     }
 }
 
+fn on_path(cmd: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
+}
+
+// A bare clone still needs these on PATH, plus bin/herdr-wt from this repo.
+fn require_runtime() -> Result<()> {
+    let missing: Vec<_> = ["herdr", "git", "jq", "ssh"].into_iter().filter(|cmd| !on_path(cmd)).collect();
+    if !missing.is_empty() {
+        bail!("missing on PATH: {}", missing.join(", "));
+    }
+    let home = std::env::var("HOME").context("HOME")?;
+    let shipped = std::path::PathBuf::from(&home).join("Developer/drover/bin/herdr-wt");
+    let stowed = std::path::PathBuf::from(&home).join(".local/bin/herdr-wt");
+    if !shipped.is_file() && !stowed.is_file() {
+        bail!("herdr-wt is not at {} (this repo) or {}", shipped.display(), stowed.display());
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let _ = dotenvy::dotenv();
+    require_runtime()?;
     let app = Arc::new(App::load()?);
     let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
     let mut client = Client::builder(&app.token, intents).event_handler(Handler(app.clone())).await?;
