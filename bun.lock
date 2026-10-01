@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "herdr-discord",
+      "name": "drover",
       "dependencies": {
         "discord.js": "^14.27.0",
       },

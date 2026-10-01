@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
   <key>Label</key><string>dev.theo.drover</string>
-  <key>WorkingDirectory</key><string>/Users/theo/Developer/herdr-discord</string>
+  <key>WorkingDirectory</key><string>/Users/theo/Developer/drover</string>
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/bun</string><string>--env-file=.env</string><string>src/index.ts</string>
@@ -16,7 +16,7 @@
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>/Users/theo/Developer/herdr-discord/logs/drover.log</string>
-  <key>StandardErrorPath</key><string>/Users/theo/Developer/herdr-discord/logs/drover.log</string>
+  <key>StandardOutPath</key><string>/Users/theo/Developer/drover/logs/drover.log</string>
+  <key>StandardErrorPath</key><string>/Users/theo/Developer/drover/logs/drover.log</string>
 </dict>
 </plist>
