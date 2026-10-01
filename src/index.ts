@@ -308,8 +308,8 @@ async function onMessage(msg: Message) {
 async function tick() {
   const lists = new Map<string, herdr.Agent[] | null>();
   for (const [id, t] of Object.entries(tasks)) {
-    if (t.gone) continue;
-    const m = machine(t.machine);
+    const m = MACHINES.find((x) => x.name === t.machine);
+    if (t.gone || !m) continue; // a machine this host doesn't drive
     if (!lists.has(m.name)) lists.set(m.name, await herdr.agents(m).catch(() => null));
     const list = lists.get(m.name);
     if (!list) continue; // unreachable, try again next tick
