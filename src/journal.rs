@@ -103,8 +103,7 @@ what: <one line>
 why: <one line>
 outcome: <one line, include commit or PR if any>
 decisions: <non-obvious choices and their reason>
-next: <follow-ups, or none>
-If you learned something durable about this repo, also save it to your project memory before replying.";
+next: <follow-ups, or none>";
 
 #[cfg(test)]
 mod tests {
