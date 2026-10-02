@@ -29,6 +29,56 @@ Work **with** agents, close to them — not a background farm.
 
 Review and git stay at the desk. Discord is the remote keyboard for the same pane.
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/install.sh | bash
+```
+
+Clones to `$REPOS_ROOT/drover` (default `~/Developer/drover`), builds release, links `herdr-wt` on `PATH`, seeds `.env`, and writes a user service unit. Override with `DROVER_HOME=…`.
+
+<details>
+<summary><strong>Setup</strong></summary>
+
+Needs Rust, plus `herdr` (≥ 0.9.3), `git`, `jq`, and `ssh` on `PATH`. Remotes also need `python3` (event stream relay). Prefer Homebrew herdr (`brew install herdr`); `herdr update` can shadow it in `~/.local/bin`.
+
+```sh
+# or by hand:
+git clone https://github.com/theguega/drover.git
+cd drover && cp .env.example .env && cargo build --release
+ln -sf "$PWD/bin/herdr-wt" ~/.local/bin/herdr-wt
+```
+
+Create the bot at [discord.com/developers](https://discord.com/developers/applications), enable **Message Content Intent**, invite with `bot` + `applications.commands`. Developer mode → copy server, channel, and user ids. Fill `.env`:
+
+| Variable | Default |
+|---|---|
+| `DISCORD_TOKEN` · `DISCORD_GUILD_ID` · `DISCORD_CHANNEL_ID` · `ALLOWED_USER_IDS` | required |
+| `HOST_NAME` | `host` |
+| `REMOTES` | empty |
+| `REPOS_ROOT` | `~/Developer` |
+| `POLL_MS` | `1000` (transcript retry while waiting) |
+| `HERDR_WT` | auto (PATH, then this repo’s `bin/`, then `~/.local/bin`) |
+
+For each remote: `herdr machine add <name>`, passwordless `ssh <name>`, and `herdr-wt` on that machine’s `PATH`.
+
+**Run** from the install dir so `.env`, `state.json`, and `journal.db` sit next to the binary. One host only.
+
+```sh
+# Linux (linger keeps it after logout)
+loginctl enable-linger
+systemctl --user enable --now drover
+journalctl --user -u drover -f
+
+# macOS (install.sh already wrote the plist)
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.drover.plist
+tail -f ~/Developer/drover/logs/drover.log
+```
+
+Merge [`desk/herdr.toml`](desk/herdr.toml) into your herdr config for the desk keys.
+
+</details>
+
 ## Discord
 
 | | |
@@ -59,47 +109,6 @@ Put `bin/herdr-wt` on `PATH`, then merge [`desk/herdr.toml`](desk/herdr.toml) in
 ## Machines
 
 `HOST_NAME` is where drover runs. `REMOTES` are other machines, each a saved herdr machine reached over ssh under the same name. Run one drover host. On the phone, use a Discord thread.
-
-<details>
-<summary><strong>Setup</strong></summary>
-
-Needs Rust, plus `herdr` (≥ 0.9.3), `git`, `jq`, and `ssh` on `PATH`. Remotes also need `python3` (event stream relay). Prefer Homebrew herdr (`brew install herdr`); `herdr update` can shadow it in `~/.local/bin`.
-
-```sh
-git clone https://github.com/theguega/drover.git
-cd drover
-cp .env.example .env   # fill token, guild, channel, allowed user ids
-cargo build --release
-ln -sf "$PWD/bin/herdr-wt" ~/.local/bin/herdr-wt
-```
-
-Create the bot at [discord.com/developers](https://discord.com/developers/applications), enable **Message Content Intent**, invite with `bot` + `applications.commands`. Developer mode → copy server, channel, and user ids.
-
-| Variable | Default |
-|---|---|
-| `DISCORD_TOKEN` · `DISCORD_GUILD_ID` · `DISCORD_CHANNEL_ID` · `ALLOWED_USER_IDS` | required |
-| `HOST_NAME` | `host` |
-| `REMOTES` | empty |
-| `REPOS_ROOT` | `~/Developer` |
-| `POLL_MS` | `1000` (transcript retry while waiting) |
-| `HERDR_WT` | auto (PATH, then this repo’s `bin/`, then `~/.local/bin`) |
-
-For each remote: `herdr machine add <name>`, passwordless `ssh <name>`, and `herdr-wt` on that machine’s `PATH`.
-
-**Run** from the repo so `.env`, `state.json`, and `journal.db` sit next to the binary. One host only.
-
-```sh
-# Linux (linger keeps it after logout)
-loginctl enable-linger
-cp drover.service ~/.config/systemd/user/   # edit WorkingDirectory if the clone is not ~/Developer/drover
-systemctl --user enable --now drover
-
-# macOS — replace /Users/YOU in drover.plist first
-cp drover.plist ~/Library/LaunchAgents/dev.drover.plist
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.drover.plist
-```
-
-</details>
 
 ## Trust
 
