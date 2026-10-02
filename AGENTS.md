@@ -28,7 +28,7 @@ phone ─ discord ─▶ drover  (Rust, a user service on the host)
 
 `bin/herdr-wt` is the one entry point for the desk popup, the `wt` shell alias, and `/new`. Do not switch those to native `herdr worktree create`.
 
-Put it on `PATH` (`ln -sf …/drover/bin/herdr-wt ~/.local/bin/herdr-wt`). drover resolves it via `HERDR_WT`, then `PATH`, then `bin/herdr-wt` next to the checkout, then `~/.local/bin`. New branch names are used as-is. `HERDR_WORKTREE_PREFIX` adds a prefix when set. `REPOS_ROOT` (default `~/Developer`) is where clones and `repo.branch` checkouts live.
+Put it on `PATH` (`ln -sf …/drover/bin/herdr-wt ~/.local/bin/herdr-wt`). drover resolves it via `HERDR_WT`, then `PATH`, then `bin/herdr-wt` next to the binary’s checkout, then `~/.local/bin`. New branch names are used as-is. `HERDR_WORKTREE_PREFIX` adds a prefix when set. `REPOS_ROOT` (default `~/Developer`) is where *your* clones and `repo.branch` checkouts live — not the drover install (that is `~/.local/share/drover` from `install.sh`).
 
 Native herdr worktree (0.9.3):
 

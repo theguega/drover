@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
-# Install drover: clone (or update), build, put herdr-wt on PATH, seed .env.
+# Install drover under XDG data home, put binaries on PATH, seed .env.
 #   curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/install.sh | bash
 set -euo pipefail
 
 REPO="${DROVER_REPO:-https://github.com/theguega/drover.git}"
 REF="${DROVER_REF:-main}"
-ROOT="${DROVER_HOME:-}"
-if [[ -z "$ROOT" ]]; then
-  repos="${REPOS_ROOT:-$HOME/Developer}"
-  repos="${repos/#\~/$HOME}"
-  ROOT="$repos/drover"
-fi
+DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+ROOT="${DROVER_HOME:-$DATA_HOME/drover}"
 ROOT="${ROOT/#\~/$HOME}"
 
 need() {
@@ -39,6 +35,7 @@ fi
 cargo build --release --manifest-path "$ROOT/Cargo.toml"
 
 mkdir -p "$HOME/.local/bin"
+ln -sfn "$ROOT/target/release/drover" "$HOME/.local/bin/drover"
 ln -sfn "$ROOT/bin/herdr-wt" "$HOME/.local/bin/herdr-wt"
 
 if [[ ! -f "$ROOT/.env" ]]; then
@@ -106,5 +103,7 @@ echo "next:"
 echo "  1. edit $ROOT/.env"
 echo "  2. merge $ROOT/desk/herdr.toml into ~/.config/herdr/config.toml"
 echo "  3. start the service (see above)"
-echo "  herdr-wt → $HOME/.local/bin/herdr-wt"
-echo "  binary   → $ROOT/target/release/drover"
+echo "  drover    → $HOME/.local/bin/drover"
+echo "  herdr-wt  → $HOME/.local/bin/herdr-wt"
+echo "  data dir  → $ROOT  (.env, state.json, journal.db)"
+echo "  repos     → \$REPOS_ROOT (default ~/Developer) — project clones, not this install"

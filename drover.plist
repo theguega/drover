@@ -3,10 +3,10 @@
 <plist version="1.0">
 <dict>
   <key>Label</key><string>dev.drover</string>
-  <key>WorkingDirectory</key><string>/Users/YOU/Developer/drover</string>
+  <key>WorkingDirectory</key><string>/Users/YOU/.local/share/drover</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/YOU/Developer/drover/target/release/drover</string>
+    <string>/Users/YOU/.local/share/drover/target/release/drover</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -16,7 +16,7 @@
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>/Users/YOU/Developer/drover/logs/drover.log</string>
-  <key>StandardErrorPath</key><string>/Users/YOU/Developer/drover/logs/drover.log</string>
+  <key>StandardOutPath</key><string>/Users/YOU/.local/share/drover/logs/drover.log</string>
+  <key>StandardErrorPath</key><string>/Users/YOU/.local/share/drover/logs/drover.log</string>
 </dict>
 </plist>

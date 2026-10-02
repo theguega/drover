@@ -3,9 +3,9 @@ Description=drover, Discord bridge for herdr
 After=network-online.target
 
 [Service]
-WorkingDirectory=%h/Developer/drover
-ExecStart=%h/Developer/drover/target/release/drover
-Environment=PATH=%h/.local/bin:/home/linuxbrew/.linuxbrew/bin:/usr/bin:/bin
+WorkingDirectory=%h/.local/share/drover
+ExecStart=%h/.local/share/drover/target/release/drover
+Environment=PATH=%h/.local/bin:/home/linuxbrew/.linuxbrew/bin:/opt/homebrew/bin:/usr/bin:/bin
 Restart=always
 RestartSec=10
 
