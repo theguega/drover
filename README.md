@@ -63,7 +63,7 @@ Put `bin/herdr-wt` on `PATH`, then merge [`desk/herdr.toml`](desk/herdr.toml) in
 <details>
 <summary><strong>Setup</strong></summary>
 
-Needs Rust, plus `herdr` (≥ 0.9.3), `git`, `jq`, and `ssh` on `PATH`. Prefer Homebrew herdr (`brew install herdr`); `herdr update` can shadow it in `~/.local/bin`.
+Needs Rust, plus `herdr` (≥ 0.9.3), `git`, `jq`, and `ssh` on `PATH`. Remotes also need `python3` (event stream relay). Prefer Homebrew herdr (`brew install herdr`); `herdr update` can shadow it in `~/.local/bin`.
 
 ```sh
 git clone https://github.com/theguega/drover.git
@@ -81,7 +81,7 @@ Create the bot at [discord.com/developers](https://discord.com/developers/applic
 | `HOST_NAME` | `host` |
 | `REMOTES` | empty |
 | `REPOS_ROOT` | `~/Developer` |
-| `POLL_MS` | `4000` |
+| `POLL_MS` | `1000` (transcript retry while waiting) |
 | `HERDR_WT` | auto (PATH, then this repo’s `bin/`, then `~/.local/bin`) |
 
 For each remote: `herdr machine add <name>`, passwordless `ssh <name>`, and `herdr-wt` on that machine’s `PATH`.
@@ -111,4 +111,4 @@ Only `ALLOWED_USER_IDS` on a private server. Repo and branch names are checked b
 cargo test && cargo clippy --all-targets
 ```
 
-Internals (poll loop, phases, journal) are in [`AGENTS.md`](AGENTS.md).
+Internals (event loop, phases, journal) are in [`AGENTS.md`](AGENTS.md).

@@ -1,3 +1,4 @@
+mod events;
 mod herdr;
 mod journal;
 
@@ -22,7 +23,7 @@ use serenity::all::{
     CreateThread, EditInteractionResponse, EditThread, EventHandler, GatewayIntents, GuildId, Http, Interaction,
     Message, MessageId, ReactionType, Ready, UserId, async_trait,
 };
-use tokio::{sync::Mutex, time::sleep};
+use tokio::{sync::{Mutex, Notify}, time::sleep};
 
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
@@ -176,6 +177,8 @@ struct App {
     tasks: StdMutex<Tasks>,
     journal: Journal,
     started: AtomicBool,
+    /// Watchers resubscribe when the set of panes for a machine changes.
+    wake: Notify,
 }
 
 impl App {
@@ -202,12 +205,13 @@ impl App {
             guild: id(&env("DISCORD_GUILD_ID", None)?)?,
             channel: id(&env("DISCORD_CHANNEL_ID", None)?)?,
             allowed,
-            poll: Duration::from_millis(env("POLL_MS", Some("4000"))?.parse().context("POLL_MS")?),
+            poll: Duration::from_millis(env("POLL_MS", Some("1000"))?.parse().context("POLL_MS")?),
             host: Machine { name: env("HOST_NAME", Some("host"))?, reach: Reach::Local },
             remotes,
             tasks: StdMutex::new(tasks.into_iter().map(|(k, t)| (k, Arc::new(Mutex::new(t)))).collect()),
             journal: Journal::open("journal.db")?,
             started: AtomicBool::new(false),
+            wake: Notify::new(),
         })
     }
 
@@ -230,10 +234,39 @@ impl App {
 
     fn insert(&self, id: ChannelId, t: Task) {
         self.map().insert(id, Arc::new(Mutex::new(t)));
+        self.wake.notify_waiters();
+    }
+
+    fn remove(&self, id: ChannelId) {
+        self.map().remove(&id);
+        self.wake.notify_waiters();
     }
 
     fn task_in(&self, channel: ChannelId) -> Result<Cell> {
         self.map().get(&channel).cloned().ok_or_else(|| anyhow!("run this inside a task thread"))
+    }
+
+    async fn panes_on(&self, machine: &str) -> Vec<PaneId> {
+        let mut panes = Vec::new();
+        for (_, cell) in self.cells() {
+            let t = cell.lock().await;
+            if t.machine == machine && t.phase != Phase::Gone {
+                panes.push(t.pane.clone());
+            }
+        }
+        panes.sort_by(|a, b| a.0.cmp(&b.0));
+        panes.dedup();
+        panes
+    }
+
+    async fn any_waiting(&self, machine: &str) -> bool {
+        for (_, cell) in self.cells() {
+            let t = cell.lock().await;
+            if t.machine == machine && (t.phase.waiting() || matches!(t.phase, Phase::Starting { .. })) {
+                return true;
+            }
+        }
+        false
     }
 
     // Never call while holding a task lock.
@@ -762,14 +795,20 @@ impl App {
         Ok(())
     }
 
-    // ── poller: herdr state changes become reactions and replies ──
+    // ── events: herdr pushes status changes; we reconcile with agent.list ──
 
-    async fn tick(&self, http: &Http) {
+    async fn tick_machine(&self, http: &Http, machine: &str) {
         let mut lists = HashMap::new();
         for (id, cell) in self.cells() {
+            {
+                let t = cell.lock().await;
+                if t.machine != machine {
+                    continue;
+                }
+            }
             match self.step(http, id, &cell, &mut lists).await {
                 Ok(Step::Keep) => {}
-                Ok(Step::Drop) => drop(self.map().remove(&id)),
+                Ok(Step::Drop) => self.remove(id),
                 Err(e) => eprintln!("tick {id}: {e:#}"),
             }
         }
@@ -964,14 +1003,77 @@ impl EventHandler for Handler {
         let names: Vec<&str> = app.machines().map(|m| m.name.as_str()).collect();
         println!("drover ready as {} on {}", ready.user.tag(), names.join(", "));
         let http = ctx.http.clone();
-        tokio::spawn(async move {
-            let mut every = tokio::time::interval(app.poll);
-            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            loop {
-                every.tick().await;
-                app.tick(&http).await;
+        let machines: Vec<Machine> = app.machines().cloned().collect();
+        for m in machines {
+            let app = app.clone();
+            let http = http.clone();
+            tokio::spawn(async move {
+                watch_machine(app, http, m).await;
+            });
+        }
+    }
+}
+
+async fn watch_machine(app: Arc<App>, http: Arc<Http>, m: Machine) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match watch_session(&app, &http, &m).await {
+            Ok(()) => backoff = Duration::from_secs(1),
+            Err(e) => {
+                eprintln!("events {}: {e:#}", m.name);
+                sleep(backoff).await;
+                backoff = (backoff.saturating_mul(2)).min(Duration::from_secs(30));
             }
-        });
+        }
+    }
+}
+
+async fn watch_session(app: &App, http: &Http, m: &Machine) -> Result<()> {
+    loop {
+        let panes = app.panes_on(&m.name).await;
+        if !panes.is_empty() {
+            break;
+        }
+        tokio::select! {
+            () = app.wake.notified() => {}
+            () = sleep(Duration::from_secs(5)) => {}
+        }
+    }
+
+    app.tick_machine(http, &m.name).await;
+
+    let panes = app.panes_on(&m.name).await;
+    let live = herdr::agents(m).await.ok();
+    let sub: Vec<PaneId> = match &live {
+        Some(list) => panes.iter().filter(|p| list.iter().any(|a| a.pane_id == **p)).cloned().collect(),
+        None => panes.clone(),
+    };
+
+    let mut conn = events::Conn::connect(m).await.map_err(|e| anyhow!(e))?;
+    conn.subscribe(&sub).await.map_err(|e| anyhow!(e))?;
+    let watched = panes;
+
+    loop {
+        let waiting = app.any_waiting(&m.name).await;
+        tokio::select! {
+            ev = conn.recv() => {
+                match ev.map_err(|e| anyhow!(e))? {
+                    events::Push::Lost => bail!("events_lost on {}", m.name),
+                    events::Push::Changed => {
+                        app.tick_machine(http, &m.name).await;
+                    }
+                }
+            }
+            () = app.wake.notified() => {
+                let now = app.panes_on(&m.name).await;
+                if now != watched {
+                    return Ok(()); // resubscribe with the new pane set
+                }
+            }
+            () = sleep(app.poll), if waiting => {
+                app.tick_machine(http, &m.name).await;
+            }
+        }
     }
 }
 
