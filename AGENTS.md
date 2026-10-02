@@ -8,6 +8,7 @@ Claude reads this when there is no `CLAUDE.md`. The user-facing guide is `README
 src/main.rs     discord: commands, threads, reactions, event watchers, prompt queue
 src/socket.rs   herdr socket: requests and `events.subscribe` (direct locally, one ssh relay per remote)
 src/herdr.rs    herdr calls per machine, herdr-wt and transcripts over sh / ssh
+src/format.rs   agent markdown to discord: tables, rules, fences cut across messages
 src/journal.rs  journal store, search, context for new tasks
 install.sh      build + user service (systemd or launchd) from this checkout
 state.json      thread → task map (gitignored)
