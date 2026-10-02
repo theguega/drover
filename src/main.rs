@@ -1,4 +1,5 @@
 mod herdr;
+mod format;
 mod socket;
 mod journal;
 
@@ -335,16 +336,17 @@ fn not_found(e: &serenity::Error) -> bool {
 }
 
 async fn post(http: &Http, th: ChannelId, text: &str) -> Result<()> {
-    let chars: Vec<char> = text.chars().collect();
-    if chars.len() > 6000 {
+    let parts = format::chunks(&format::discord(text), 1900);
+    if text.chars().count() > 6000 {
+        let preview = format::chunks(parts.first().map_or("", String::as_str), 1500);
         let msg = CreateMessage::new()
-            .content(format!("{}…", head(text, 1500)))
+            .content(format!("{}\n…", preview.first().map_or("", String::as_str)))
             .add_file(CreateAttachment::bytes(text.as_bytes().to_vec(), "reply.md"));
         th.send_message(http, msg).await?;
         return Ok(());
     }
-    for chunk in chars.chunks(1900) {
-        th.say(http, chunk.iter().collect::<String>()).await?;
+    for part in parts {
+        th.say(http, part).await?;
     }
     Ok(())
 }
