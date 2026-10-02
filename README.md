@@ -23,11 +23,11 @@ Remotes need only the dotfiles, a running herdr, `python3`, and passwordless `ss
 
 | | |
 |---|---|
-| `/new machine repo branch prompt [agent]` | Worktree + agent. `branch` is a new name, an existing branch, or `#pr` |
+| `/new machine repo branch prompt [agent] [scout]` | Worktree + agent. `branch` is a new name, an existing branch, or `#pr`. `scout` asks for a report and no changes. A new checkout gets the clone's untracked files matching `.worktreeinclude` |
 | a message in the thread | Next prompt (queued if the agent is busy) |
 | `/attach machine agent` | Follow an agent you started at the desk |
 | `/screen` · `/keys` | Terminal view and key buttons |
-| `/done [remove]` | Journal entry, close workspace; `remove` deletes a checkout drover opened |
+| `/done [remove]` | Journal entry, close workspace; `remove` runs `herdr-wt rm` on a checkout drover opened: a dirty checkout and an unmerged branch are kept |
 | `/recall` · `/agents` · `/worktrees` | Journal search and status |
 
 Default agent is `claude` (`codex`, `cursor`, `opencode`, `pi` also). State is one reaction: 👀 working · ⏸️ dialog · ✅ done.

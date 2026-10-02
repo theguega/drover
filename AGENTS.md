@@ -57,7 +57,7 @@ any ──pane gone──▶ Gone
 
 If Discord sends a prompt while the agent is busy (`agent_not_ready` / `agent_not_idle`), drover keeps one message in `queued` and sends it on the next idle push.
 
-`Origin::Opened` means drover created the worktree, so `/done remove` may delete the checkout. `Attached` is an agent that was started at the desk.
+`Origin::Opened` means drover created the worktree, so `/done remove` may run `herdr-wt rm` on it, which keeps a dirty checkout and an unmerged branch. `Attached` is an agent that was started at the desk.
 
 ## Memory
 

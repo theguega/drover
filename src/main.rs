@@ -66,6 +66,7 @@ fn id<T: From<NonZeroU64>>(s: &str) -> Result<T> {
 }
 
 const STATE: &str = "state.json";
+const SCOUT: &str = "Scout task: investigate and report back. Do not edit files, commit, or push.";
 
 // ── state: one thread per herdr pane ───────────────────────
 
@@ -479,7 +480,8 @@ impl App {
                 .add_option(string("repo", "repo under REPOS_ROOT").required(true).set_autocomplete(true))
                 .add_option(string("branch", "new name, existing branch, or #pr").required(true))
                 .add_option(string("prompt", "first instruction").required(true))
-                .add_option(kinds.iter().fold(string("agent", "default claude"), |o, k| o.add_string_choice(*k, *k))),
+                .add_option(kinds.iter().fold(string("agent", "default claude"), |o, k| o.add_string_choice(*k, *k)))
+                .add_option(CreateCommandOption::new(CommandOptionType::Boolean, "scout", "report only, no changes")),
             CreateCommand::new("attach")
                 .description("Follow an agent already running in herdr")
                 .add_option(machine())
@@ -495,7 +497,7 @@ impl App {
                 .add_option(CreateCommandOption::new(
                     CommandOptionType::Boolean,
                     "remove",
-                    "also delete the worktree checkout",
+                    "also delete the checkout, and the branch if merged",
                 )),
             CreateCommand::new("recall")
                 .description("Search the journal")
@@ -527,6 +529,7 @@ impl App {
         let r#ref = Name::parse(req(i, "branch")?)?;
         let text = req(i, "prompt")?;
         let kind = opt(i, "agent").unwrap_or("claude");
+        let scout = i.data.options.iter().any(|o| o.name == "scout" && o.value.as_bool() == Some(true));
 
         i.defer(http).await?;
         let wt = herdr::worktree(m, &repo, &r#ref).await?;
@@ -545,10 +548,10 @@ impl App {
         let head = th.say(http, format!("`{}`\n> {}", wt.path, tail(text, 1500).replace('\n', "\n> "))).await?;
 
         let memory = self.journal.context(repo, text, 2000)?;
-        let prompt = match memory.is_empty() {
-            true => text.into(),
-            false => format!("{text}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"),
-        };
+        let mut prompt = if scout { format!("{SCOUT}\n\n{text}") } else { text.into() };
+        if !memory.is_empty() {
+            prompt = format!("{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}");
+        }
         self.insert(th, Task {
             machine: m.name.clone(),
             pane: wt.pane_id.clone(),
@@ -690,12 +693,19 @@ impl App {
             text: entry.into(),
         })?;
         th.say(http, format!("```\n{}\n```", entry.replace("```", ""))).await?;
-        let closed = match teardown {
-            Teardown::Remove => herdr::remove(m, &t.workspace).await,
-            Teardown::Close => herdr::close(m, &t.workspace).await,
+        let removed = match teardown {
+            Teardown::Remove => herdr::remove(m, &t.workspace).await.map_err(|e| format!("kept the checkout: {e}")),
+            Teardown::Close => Err(String::new()),
         };
-        if let Err(e) = closed {
-            let _ = th.say(http, format!("close failed: {e}")).await;
+        let note = match removed {
+            Ok(said) => said,
+            Err(kept) => match herdr::close(m, &t.workspace).await {
+                Ok(()) => kept,
+                Err(e) => format!("{kept}\nclose failed: {e}"),
+            },
+        };
+        if !note.trim().is_empty() {
+            let _ = th.say(http, note.trim()).await;
         }
         let _ = th.edit_thread(http, EditThread::new().archived(true)).await;
         Ok(())
