@@ -35,7 +35,9 @@ Review and git stay at the desk. Discord is the remote keyboard for the same pan
 curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/install.sh | bash
 ```
 
-Clones to `$REPOS_ROOT/drover` (default `~/Developer/drover`), builds release, links `herdr-wt` on `PATH`, seeds `.env`, and writes a user service unit. Override with `DROVER_HOME=…`.
+Installs to `~/.local/share/drover` (or `$XDG_DATA_HOME/drover`), links `drover` and `herdr-wt` on `PATH`, seeds `.env`, and writes a user service unit. Override the install dir with `DROVER_HOME=…`.
+
+Project checkouts stay under `REPOS_ROOT` (default `~/Developer`) — that is not where drover itself lives.
 
 <details>
 <summary><strong>Setup</strong></summary>
@@ -43,26 +45,27 @@ Clones to `$REPOS_ROOT/drover` (default `~/Developer/drover`), builds release, l
 Needs Rust, plus `herdr` (≥ 0.9.3), `git`, `jq`, and `ssh` on `PATH`. Remotes also need `python3` (event stream relay). Prefer Homebrew herdr (`brew install herdr`); `herdr update` can shadow it in `~/.local/bin`.
 
 ```sh
-# or by hand:
-git clone https://github.com/theguega/drover.git
-cd drover && cp .env.example .env && cargo build --release
+# or by hand (same layout as install.sh):
+git clone https://github.com/theguega/drover.git ~/.local/share/drover
+cd ~/.local/share/drover && cp .env.example .env && cargo build --release
+ln -sf "$PWD/target/release/drover" ~/.local/bin/drover
 ln -sf "$PWD/bin/herdr-wt" ~/.local/bin/herdr-wt
 ```
 
-Create the bot at [discord.com/developers](https://discord.com/developers/applications), enable **Message Content Intent**, invite with `bot` + `applications.commands`. Developer mode → copy server, channel, and user ids. Fill `.env`:
+Create the bot at [discord.com/developers](https://discord.com/developers/applications), enable **Message Content Intent**, invite with `bot` + `applications.commands`. Developer mode → copy server, channel, and user ids. Fill `.env` in the install dir:
 
 | Variable | Default |
 |---|---|
 | `DISCORD_TOKEN` · `DISCORD_GUILD_ID` · `DISCORD_CHANNEL_ID` · `ALLOWED_USER_IDS` | required |
 | `HOST_NAME` | `host` |
 | `REMOTES` | empty |
-| `REPOS_ROOT` | `~/Developer` |
+| `REPOS_ROOT` | `~/Developer` (your git clones / worktrees) |
 | `POLL_MS` | `1000` (transcript retry while waiting) |
-| `HERDR_WT` | auto (PATH, then this repo’s `bin/`, then `~/.local/bin`) |
+| `HERDR_WT` | auto (PATH, then install `bin/`, then `~/.local/bin`) |
 
 For each remote: `herdr machine add <name>`, passwordless `ssh <name>`, and `herdr-wt` on that machine’s `PATH`.
 
-**Run** from the install dir so `.env`, `state.json`, and `journal.db` sit next to the binary. One host only.
+**Run** with WorkingDirectory set to the install dir so `.env`, `state.json`, and `journal.db` sit next to the checkout. One host only.
 
 ```sh
 # Linux (linger keeps it after logout)
@@ -72,10 +75,10 @@ journalctl --user -u drover -f
 
 # macOS (install.sh already wrote the plist)
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.drover.plist
-tail -f ~/Developer/drover/logs/drover.log
+tail -f ~/.local/share/drover/logs/drover.log
 ```
 
-Merge [`desk/herdr.toml`](desk/herdr.toml) into your herdr config for the desk keys.
+Merge [`desk/herdr.toml`](desk/herdr.toml) into your herdr config for the desk keys. Developing drover itself can live anywhere (e.g. a normal clone); use `cargo run` from that checkout.
 
 </details>
 
