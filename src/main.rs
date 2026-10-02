@@ -1,9 +1,9 @@
-mod events;
 mod herdr;
+mod socket;
 mod journal;
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, hash_map},
+    collections::{BTreeMap, HashMap, HashSet},
     hash::{BuildHasher, Hasher, RandomState},
     num::NonZeroU64,
     sync::{
@@ -13,8 +13,6 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context as _, Result, anyhow, bail};
-use futures::future::join_all;
 use serde::{Deserialize, Serialize};
 use serenity::all::{
     AutoArchiveDuration, ButtonStyle, Channel, ChannelId, ChannelType, Client, CommandInteraction, CommandOptionType,
@@ -28,14 +26,43 @@ use tokio::{sync::{Mutex, Notify}, time::sleep};
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
 
+// ── errors ─────────────────────────────────────────────────
+
+type Error = Box<dyn std::error::Error + Send + Sync>;
+type Result<T, E = Error> = std::result::Result<T, E>;
+
+macro_rules! err {
+    ($($t:tt)*) => { Error::from(format!($($t)*)) };
+}
+
+macro_rules! bail {
+    ($($t:tt)*) => { return Err(err!($($t)*)) };
+}
+
+trait WithContext<T> {
+    fn context(self, what: impl std::fmt::Display) -> Result<T>;
+}
+
+impl<T, E: std::fmt::Display> WithContext<T> for Result<T, E> {
+    fn context(self, what: impl std::fmt::Display) -> Result<T> {
+        self.map_err(|e| err!("{what}: {e}"))
+    }
+}
+
+impl<T> WithContext<T> for Option<T> {
+    fn context(self, what: impl std::fmt::Display) -> Result<T> {
+        self.ok_or_else(|| err!("{what}"))
+    }
+}
+
 // ── config ─────────────────────────────────────────────────
 
 fn env(k: &str, d: Option<&str>) -> Result<String> {
-    std::env::var(k).ok().or(d.map(String::from)).ok_or_else(|| anyhow!("missing env {k}"))
+    std::env::var(k).ok().or(d.map(String::from)).context(format!("missing env {k}"))
 }
 
 fn id<T: From<NonZeroU64>>(s: &str) -> Result<T> {
-    Ok(s.trim().parse::<NonZeroU64>().with_context(|| format!("{s:?} is not a discord id"))?.into())
+    Ok(s.trim().parse::<NonZeroU64>().context(format!("{s:?} is not a discord id"))?.into())
 }
 
 const STATE: &str = "state.json";
@@ -171,7 +198,6 @@ struct App {
     guild: GuildId,
     channel: ChannelId,
     allowed: HashSet<UserId>,
-    poll: Duration,
     host: Machine,
     remotes: Vec<Machine>,
     tasks: StdMutex<Tasks>,
@@ -191,11 +217,11 @@ impl App {
         let remotes = env("REMOTES", Some(""))?
             .split(',')
             .filter(|s| !s.is_empty())
-            .map(|name| Machine { name: name.into(), reach: Reach::Ssh })
+            .map(|name| Machine::new(name.into(), Reach::Ssh))
             .collect();
 
         let tasks: BTreeMap<ChannelId, Task> = match std::fs::read_to_string(STATE) {
-            Ok(s) => serde_json::from_str(&s).with_context(|| format!("{STATE} is not valid, fix or remove it"))?,
+            Ok(s) => serde_json::from_str(&s).context(format!("{STATE} is not valid, fix or remove it"))?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
             Err(e) => return Err(e).context(STATE),
         };
@@ -205,8 +231,7 @@ impl App {
             guild: id(&env("DISCORD_GUILD_ID", None)?)?,
             channel: id(&env("DISCORD_CHANNEL_ID", None)?)?,
             allowed,
-            poll: Duration::from_millis(env("POLL_MS", Some("1000"))?.parse().context("POLL_MS")?),
-            host: Machine { name: env("HOST_NAME", Some("host"))?, reach: Reach::Local },
+            host: Machine::new(env("HOST_NAME", Some("host"))?, Reach::Local),
             remotes,
             tasks: StdMutex::new(tasks.into_iter().map(|(k, t)| (k, Arc::new(Mutex::new(t)))).collect()),
             journal: Journal::open("journal.db")?,
@@ -220,7 +245,7 @@ impl App {
     }
 
     fn machine(&self, name: &str) -> Result<&Machine> {
-        self.machines().find(|m| m.name == name).ok_or_else(|| anyhow!("unknown machine {name}"))
+        self.machines().find(|m| m.name == name).context(format!("unknown machine {name}"))
     }
 
     // A poisoned lock only means a handler panicked; the map itself is fine.
@@ -243,7 +268,7 @@ impl App {
     }
 
     fn task_in(&self, channel: ChannelId) -> Result<Cell> {
-        self.map().get(&channel).cloned().ok_or_else(|| anyhow!("run this inside a task thread"))
+        self.map().get(&channel).cloned().context("run this inside a task thread")
     }
 
     async fn panes_on(&self, machine: &str) -> Vec<PaneId> {
@@ -259,16 +284,6 @@ impl App {
         panes
     }
 
-    async fn any_waiting(&self, machine: &str) -> bool {
-        for (_, cell) in self.cells() {
-            let t = cell.lock().await;
-            if t.machine == machine && (t.phase.waiting() || matches!(t.phase, Phase::Starting { .. })) {
-                return true;
-            }
-        }
-        false
-    }
-
     // Never call while holding a task lock.
     async fn save(&self) {
         let mut all = BTreeMap::new();
@@ -276,7 +291,7 @@ impl App {
             all.insert(id, cell.lock().await.clone());
         }
         let written = match serde_json::to_string_pretty(&all) {
-            Ok(json) => tokio::fs::write(STATE, json).await.map_err(anyhow::Error::from),
+            Ok(json) => tokio::fs::write(STATE, json).await.map_err(Error::from),
             Err(e) => Err(e.into()),
         };
         if let Err(e) = written {
@@ -378,7 +393,7 @@ fn opt<'a>(i: &'a CommandInteraction, name: &str) -> Option<&'a str> {
 }
 
 fn req<'a>(i: &'a CommandInteraction, name: &str) -> Result<&'a str> {
-    opt(i, name).ok_or_else(|| anyhow!("missing {name}"))
+    opt(i, name).context(format!("missing {name}"))
 }
 
 #[must_use]
@@ -519,6 +534,10 @@ impl App {
             i.edit_response(http, edit(format!("already open in <#{bound}>"))).await?;
             return Ok(());
         }
+        if herdr::agents(m).await?.iter().any(|a| a.pane_id == wt.pane_id) {
+            i.edit_response(http, edit(format!("an agent already runs in {}, /attach it", wt.pane_id.0))).await?;
+            return Ok(());
+        }
 
         let repo = repo.as_str();
         let th = self.open_thread(http, &format!("{repo} · {} · {}", wt.branch, m.name)).await?;
@@ -549,7 +568,7 @@ impl App {
         self.save().await;
         th.create_reaction(http, head.id, emoji("👀")).await?;
         // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
-        Ok(herdr::start(m, &agent_name(&wt.branch), kind, &wt.pane_id).await?)
+        Ok(herdr::start(m, &agent_name(&wt.branch), kind, &wt.pane_id, &wt.path).await?)
     }
 
     async fn cmd_attach(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
@@ -559,7 +578,7 @@ impl App {
             .await?
             .into_iter()
             .find(|x| x.pane_id == pane)
-            .ok_or_else(|| anyhow!("no agent in {} on {}", pane.0, m.name))?;
+            .context(format!("no agent in {} on {}", pane.0, m.name))?;
         if let Some(bound) = self.live(&m.name, &pane).await {
             i.create_response(http, reply(format!("already open in <#{bound}>"))).await?;
             return Ok(());
@@ -619,15 +638,24 @@ impl App {
 
     async fn cmd_worktrees(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
         i.defer(http).await?;
-        let parts = join_all(self.machines().map(|m| async move {
-            let s = match herdr::worktrees(m).await {
-                Ok(s) if s.is_empty() => "none".into(),
-                Ok(s) => s,
-                Err(e) => format!("unreachable: {e}"),
-            };
-            format!("**{}**\n```\n{s}\n```", m.name)
-        }))
-        .await;
+        let jobs: Vec<_> = self
+            .machines()
+            .cloned()
+            .map(|m| {
+                tokio::spawn(async move {
+                    let s = match herdr::worktrees(&m).await {
+                        Ok(s) if s.is_empty() => "none".into(),
+                        Ok(s) => s,
+                        Err(e) => format!("unreachable: {e}"),
+                    };
+                    format!("**{}**\n```\n{s}\n```", m.name)
+                })
+            })
+            .collect();
+        let mut parts = Vec::new();
+        for job in jobs {
+            parts.push(job.await?);
+        }
         i.edit_response(http, edit(tail(&parts.join("\n"), 1990))).await?;
         Ok(())
     }
@@ -795,59 +823,76 @@ impl App {
         Ok(())
     }
 
-    // ── events: herdr pushes status changes; we reconcile with agent.list ──
+    // ── events: herdr pushes status per pane; agent.list only on (re)connect ──
 
-    async fn tick_machine(&self, http: &Http, machine: &str) {
-        let mut lists = HashMap::new();
+    async fn reconcile(&self, http: &Http, machine: &str) {
+        let Ok(m) = self.machine(machine) else { return };
+        let Ok(list) = herdr::agents(m).await else { return }; // unreachable, the watcher retries
         for (id, cell) in self.cells() {
-            {
+            let seen = {
                 let t = cell.lock().await;
-                if t.machine != machine {
+                if t.machine != machine || t.phase == Phase::Gone {
                     continue;
                 }
-            }
-            match self.step(http, id, &cell, &mut lists).await {
-                Ok(Step::Keep) => {}
-                Ok(Step::Drop) => self.remove(id),
-                Err(e) => eprintln!("tick {id}: {e:#}"),
-            }
+                match list.iter().find(|a| a.pane_id == t.pane) {
+                    Some(a) => Seen::Agent(a.agent_status, a.session()),
+                    None if t.status.is_some() => Seen::Gone,
+                    None => continue, // still starting
+                }
+            };
+            self.run(http, id, &cell, seen).await;
         }
         self.save().await;
     }
 
+    async fn on_push(&self, http: &Http, machine: &str, push: socket::Push) {
+        let (pane, status) = match push {
+            socket::Push::Status(pane, s) if s != Status::Unknown => (pane, Some(s)),
+            socket::Push::Gone(pane) => (pane, None),
+            socket::Push::Status(pane, _) | socket::Push::Detected(pane) => {
+                if self.live(machine, &pane).await.is_some() {
+                    self.reconcile(http, machine).await; // the agent may have left or restarted
+                }
+                return;
+            }
+            socket::Push::Reconcile => return self.reconcile(http, machine).await,
+            socket::Push::Lost => return,
+        };
+        let Some(id) = self.live(machine, &pane).await else { return };
+        let Ok(cell) = self.task_in(id) else { return };
+        if status.is_some() && cell.lock().await.session.is_none() {
+            return self.reconcile(http, machine).await; // learn the session from agent.list
+        }
+        self.run(http, id, &cell, status.map_or(Seen::Gone, |s| Seen::Agent(s, None))).await;
+        self.save().await;
+    }
+
+    async fn run(&self, http: &Http, id: ChannelId, cell: &Cell, seen: Seen) {
+        match self.step(http, id, cell, seen).await {
+            Ok(Step::Keep) => {}
+            Ok(Step::Drop) => self.remove(id),
+            Err(e) => eprintln!("task {id}: {e}"),
+        }
+    }
+
     // One task's turn.
-    async fn step(
-        &self,
-        http: &Http,
-        th: ChannelId,
-        cell: &Cell,
-        lists: &mut HashMap<String, Option<Vec<Agent>>>,
-    ) -> Result<Step> {
+    async fn step(&self, http: &Http, th: ChannelId, cell: &Cell, seen: Seen) -> Result<Step> {
         let mut t = cell.lock().await;
         let Ok(m) = self.machine(&t.machine) else { return Ok(Step::Keep) }; // a machine this host doesn't drive
         if t.phase == Phase::Gone {
             return Ok(Step::Keep);
         }
-        let list = match lists.entry(m.name.clone()) {
-            hash_map::Entry::Occupied(o) => o.into_mut(),
-            hash_map::Entry::Vacant(v) => v.insert(herdr::agents(m).await.ok()),
-        };
-        let Some(list) = list else { return Ok(Step::Keep) }; // unreachable, try again next tick
-
         if let Err(e) = th.to_channel(http).await {
             return if not_found(&e) { Ok(Step::Drop) } else { Err(e.into()) };
         }
-        let Some(a) = list.iter().find(|x| x.pane_id == t.pane).cloned() else {
-            if t.status.is_some() {
-                t.phase = Phase::Gone;
-                th.say(http, "agent exited").await?;
-            }
-            return Ok(Step::Keep); // or still starting
+        let Seen::Agent(now, session) = seen else {
+            t.phase = Phase::Gone;
+            th.say(http, "agent exited").await?;
+            return Ok(Step::Keep);
         };
 
-        let now = a.agent_status;
         let prev = t.status.replace(now);
-        if let Some(s) = a.session() {
+        if let Some(s) = session {
             t.session = Some(s);
         }
 
@@ -885,11 +930,8 @@ impl App {
             return self.drain_queue(http, th, &mut t, m).await;
         }
         if t.kind == "claude" {
-            let Some(s) = &t.session else { return Ok(Step::Keep) };
-            let Some(r) = herdr::reply(m, s).await else { return Ok(Step::Keep) };
-            if t.last_reply.as_ref() == Some(&r.id) {
-                return Ok(Step::Keep);
-            }
+            let Some(s) = t.session.clone() else { return Ok(Step::Keep) };
+            let Some(r) = fresh_reply(m, &s, t.last_reply.as_deref()).await else { return Ok(Step::Keep) };
             t.last_reply = Some(r.id);
             mark(http, th, &t, "✅").await;
             if let Phase::Ending(teardown) = t.phase {
@@ -939,6 +981,23 @@ enum Step {
     Drop, // the task is over or its thread is gone
 }
 
+// What herdr says about a task's pane.
+enum Seen {
+    Agent(Status, Option<SessionId>),
+    Gone,
+}
+
+// The transcript can trail the status flip by a moment, so look again briefly.
+async fn fresh_reply(m: &Machine, s: &SessionId, last: Option<&str>) -> Option<herdr::Reply> {
+    for _ in 0..4 {
+        if let Some(r) = herdr::reply(m, s).await.filter(|r| Some(r.id.as_str()) != last) {
+            return Some(r);
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+    None
+}
+
 // ── wiring ─────────────────────────────────────────────────
 
 struct Handler(Arc<App>);
@@ -976,7 +1035,7 @@ impl EventHandler for Handler {
             _ => Ok(()),
         };
         let Err(e) = r else { return };
-        eprintln!("{e:#}");
+        eprintln!("{e}");
         let content = head(&e.to_string(), 1900);
         match &i {
             Interaction::Command(c) => fail!(c, http, content),
@@ -987,7 +1046,7 @@ impl EventHandler for Handler {
 
     async fn message(&self, ctx: Context, msg: Message) {
         if let Err(e) = self.0.on_message(&ctx.http, &msg).await {
-            eprintln!("{e:#}");
+            eprintln!("{e}");
             let _ = msg.reply(&ctx.http, head(&e.to_string(), 1900)).await;
         }
     }
@@ -1020,7 +1079,7 @@ async fn watch_machine(app: Arc<App>, http: Arc<Http>, m: Machine) {
         match watch_session(&app, &http, &m).await {
             Ok(()) => backoff = Duration::from_secs(1),
             Err(e) => {
-                eprintln!("events {}: {e:#}", m.name);
+                eprintln!("events {}: {e}", m.name);
                 sleep(backoff).await;
                 backoff = (backoff.saturating_mul(2)).min(Duration::from_secs(30));
             }
@@ -1029,50 +1088,37 @@ async fn watch_machine(app: Arc<App>, http: Arc<Http>, m: Machine) {
 }
 
 async fn watch_session(app: &App, http: &Http, m: &Machine) -> Result<()> {
-    loop {
+    let watched = loop {
         let panes = app.panes_on(&m.name).await;
         if !panes.is_empty() {
-            break;
+            break panes;
         }
         tokio::select! {
             () = app.wake.notified() => {}
             () = sleep(Duration::from_secs(5)) => {}
         }
-    }
-
-    app.tick_machine(http, &m.name).await;
-
-    let panes = app.panes_on(&m.name).await;
-    let live = herdr::agents(m).await.ok();
-    let sub: Vec<PaneId> = match &live {
-        Some(list) => panes.iter().filter(|p| list.iter().any(|a| a.pane_id == **p)).cloned().collect(),
-        None => panes.clone(),
     };
 
-    let mut conn = events::Conn::connect(m).await.map_err(|e| anyhow!(e))?;
-    conn.subscribe(&sub).await.map_err(|e| anyhow!(e))?;
-    let watched = panes;
+    // herdr rejects a subscription naming a pane that is gone; reconcile marks those
+    let sub: Vec<PaneId> = match herdr::panes(m).await {
+        Ok(live) => watched.iter().filter(|p| live.contains(p)).cloned().collect(),
+        Err(_) => watched.clone(),
+    };
+    let mut conn = socket::Events::subscribe(m.ssh(), &sub).await?;
+    // subscribe first, then read, so nothing between the two is missed
+    app.reconcile(http, &m.name).await;
 
     loop {
-        let waiting = app.any_waiting(&m.name).await;
         tokio::select! {
-            ev = conn.recv() => {
-                match ev.map_err(|e| anyhow!(e))? {
-                    events::Push::Lost => bail!("events_lost on {}", m.name),
-                    events::Push::Changed => {
-                        app.tick_machine(http, &m.name).await;
-                    }
-                }
-            }
-            () = app.wake.notified() => {
-                let now = app.panes_on(&m.name).await;
-                if now != watched {
-                    return Ok(()); // resubscribe with the new pane set
-                }
-            }
-            () = sleep(app.poll), if waiting => {
-                app.tick_machine(http, &m.name).await;
-            }
+            ev = conn.recv() => match ev? {
+                socket::Push::Lost => bail!("events_lost on {}", m.name),
+                push => app.on_push(http, &m.name, push).await,
+            },
+            () = app.wake.notified() => {}
+        }
+        // checked after every push too: a wake while busy above is not stored
+        if app.panes_on(&m.name).await != watched {
+            return Ok(()); // resubscribe with the new pane set
         }
     }
 }
@@ -1084,21 +1130,17 @@ fn on_path(cmd: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
 }
 
-// A bare clone still needs these on PATH, plus bin/herdr-wt from this repo (or HERDR_WT / PATH).
+// herdr-wt comes from the dotfiles and needs the rest.
 fn require_runtime() -> Result<()> {
-    let missing: Vec<_> = ["herdr", "git", "jq", "ssh"].into_iter().filter(|cmd| !on_path(cmd)).collect();
+    let missing: Vec<_> = ["herdr", "herdr-wt", "git", "jq", "ssh"].into_iter().filter(|cmd| !on_path(cmd)).collect();
     if !missing.is_empty() {
         bail!("missing on PATH: {}", missing.join(", "));
-    }
-    if herdr::herdr_wt().is_none() {
-        bail!("herdr-wt not found (set HERDR_WT, put it on PATH, or keep bin/herdr-wt next to this checkout)");
     }
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let _ = dotenvy::dotenv();
     require_runtime()?;
     let app = Arc::new(App::load()?);
     let intents = GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;

@@ -1,15 +1,12 @@
-// herdr and shell access per machine. The host runs commands directly;
-// other machines go through `herdr --machine <label>` and `ssh <label>`.
+// herdr and shell access per machine: herdr over its socket, git and transcripts over sh or ssh.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::LazyLock,
-    time::Duration,
-};
+use std::{process::Stdio, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde_json::json;
 use tokio::process::Command;
+
+use crate::socket::Link;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
@@ -17,10 +14,24 @@ pub enum Reach {
     Ssh,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Machine {
     pub name: String,
     pub reach: Reach,
+    pub link: Arc<Link>,
+}
+
+impl Machine {
+    #[must_use]
+    pub fn new(name: String, reach: Reach) -> Self {
+        let host = (reach == Reach::Ssh).then(|| name.clone());
+        Self { name, reach, link: Arc::new(Link::new(host)) }
+    }
+
+    #[must_use]
+    pub fn ssh(&self) -> Option<&str> {
+        (self.reach == Reach::Ssh).then_some(self.name.as_str())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -171,18 +182,39 @@ impl Code {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
 pub enum Error {
-    #[error("{message}")]
     Herdr { code: Code, message: String },
-    #[error("{0} timed out")]
     Timeout(String),
-    #[error("repo and branch may only use letters, digits, # . _ / -")]
     Unsafe,
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error("unexpected herdr output: {0}")]
-    Json(#[from] serde_json::Error),
+    Io(std::io::Error),
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Herdr { message, .. } => f.write_str(message),
+            Self::Timeout(what) => write!(f, "{what} timed out"),
+            Self::Unsafe => f.write_str("repo and branch may only use letters, digits, # . _ / -"),
+            Self::Io(e) => e.fmt(f),
+            Self::Json(e) => write!(f, "unexpected herdr output: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<std::io::Error> for Error {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Self::Json(e)
+    }
 }
 
 impl Error {
@@ -203,61 +235,11 @@ impl Error {
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
-// Clones and worktrees live here. Tilde form (`~/Developer`) expands in the shell.
-fn root() -> &'static str {
-    static ROOT: LazyLock<String> =
-        LazyLock::new(|| std::env::var("REPOS_ROOT").unwrap_or_else(|_| "~/Developer".into()));
-    ROOT.as_str()
-}
+// Clones and `repo.branch` worktrees. Set per machine in the dotfiles, expanded by that machine's shell.
+const ROOT: &str = r#""${REPOS_ROOT:-$HOME/Developer}""#;
 
-/// Path to `bin/herdr-wt`: `HERDR_WT`, then PATH, then this repo next to the binary, then `~/.local/bin`.
-#[must_use]
-pub fn herdr_wt() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("HERDR_WT") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    if let Some(path) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&path) {
-            let p = dir.join("herdr-wt");
-            if p.is_file() {
-                return Some(p);
-            }
-        }
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        // target/{debug,release}/drover → ../../bin/herdr-wt
-        if let Some(p) = exe.ancestors().nth(3).map(|repo| repo.join("bin/herdr-wt"))
-            && p.is_file()
-        {
-            return Some(p);
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        let p = Path::new(&home).join(".local/bin/herdr-wt");
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    None
-}
-
-// Prefer PATH / HERDR_WT so remotes need only a stowed copy, not this repo checkout.
-fn wt(args: &str) -> String {
-    format!(
-        r#"b="${{HERDR_WT:-}}"; [ -n "$b" ] || b="$(command -v herdr-wt 2>/dev/null || true)"; [ -n "$b" ] || b="$HOME/.local/bin/herdr-wt"; "$b" {args}"#
-    )
-}
 const SHORT: Duration = Duration::from_secs(15);
-const LIST: Duration = Duration::from_secs(20);
 const LONG: Duration = Duration::from_secs(120);
-
-#[must_use]
-fn or<'a>(a: &'a str, b: &'a str) -> &'a str {
-    if a.is_empty() { b } else { a }
-}
 
 struct Out {
     out: String,
@@ -265,17 +247,24 @@ struct Out {
     code: Option<i32>,
 }
 
-async fn run(prog: &str, args: &[&str], timeout: Duration) -> Result<Out> {
-    let child = Command::new(prog)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+// Shell work herdr has no method for: git via herdr-wt, transcripts. ssh runs the login shell, so the dotfiles' env applies.
+async fn sh(m: &Machine, script: &str, timeout: Duration) -> Result<Out> {
+    let mut cmd = match m.reach {
+        Reach::Ssh => {
+            let mut c = Command::new("ssh");
+            c.args(["-o", "BatchMode=yes", &m.name, script]);
+            c
+        }
+        Reach::Local => {
+            let mut c = Command::new("sh");
+            c.args(["-c", script]);
+            c
+        }
+    };
+    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
     let o = tokio::time::timeout(timeout, child.wait_with_output())
         .await
-        .map_err(|_| Error::Timeout(prog.into()))??;
+        .map_err(|_| Error::Timeout(m.name.clone()))??;
     Ok(Out {
         out: String::from_utf8_lossy(&o.stdout).into_owned(),
         err: String::from_utf8_lossy(&o.stderr).into_owned(),
@@ -283,53 +272,13 @@ async fn run(prog: &str, args: &[&str], timeout: Duration) -> Result<Out> {
     })
 }
 
-async fn sh(m: &Machine, script: &str, timeout: Duration) -> Result<Out> {
-    match m.reach {
-        Reach::Ssh => run("ssh", &["-o", "BatchMode=yes", &m.name, script], timeout).await,
-        Reach::Local => run("sh", &["-c", script], timeout).await,
-    }
-}
-
-#[derive(Deserialize)]
-struct Ok<T> {
-    result: T,
-}
-
-#[derive(Deserialize)]
-struct Failed {
-    error: Failure,
-}
-
-#[derive(Deserialize)]
-struct Failure {
-    code: String,
-    message: String,
-}
-
-fn parse<T: for<'de> Deserialize<'de>>(o: &Out) -> Result<T> {
-    if o.code == Some(0) {
-        return Ok(serde_json::from_str::<Ok<T>>(&o.out)?.result);
-    }
-    let text = or(&o.err, &o.out);
-    if let Ok(Failed { error }) = serde_json::from_str(text) {
-        return Err(Error::Herdr { code: error.code.into(), message: error.message });
-    }
-    Err(Error::failed(match (text.trim(), o.code) {
+fn failure(o: &Out) -> Error {
+    let text = if o.err.trim().is_empty() { &o.out } else { &o.err };
+    Error::failed(match (text.trim(), o.code) {
         ("", Some(c)) => format!("exit {c}"),
         ("", None) => "killed".into(),
         (t, _) => t.into(),
-    }))
-}
-
-async fn herdr(m: &Machine, args: &[&str], timeout: Duration) -> Result<Out> {
-    match m.reach {
-        Reach::Ssh => run("herdr", &[&["--machine", &m.name], args].concat(), timeout).await,
-        Reach::Local => run("herdr", args, timeout).await,
-    }
-}
-
-async fn call<T: for<'de> Deserialize<'de>>(m: &Machine, args: &[&str], timeout: Duration) -> Result<T> {
-    parse(&herdr(m, args, timeout).await?)
+    })
 }
 
 pub async fn agents(m: &Machine) -> Result<Vec<Agent>> {
@@ -337,11 +286,27 @@ pub async fn agents(m: &Machine) -> Result<Vec<Agent>> {
     struct List {
         agents: Vec<Agent>,
     }
-    Ok(call::<List>(m, &["agent", "list"], LIST).await?.agents)
+    Ok(m.link.call::<List>("agent.list", json!({}), SHORT).await?.agents)
 }
 
-// Same entry point as the ⌃b ⇧g popup: a new name, an existing branch, or #pr.
+pub async fn panes(m: &Machine) -> Result<Vec<PaneId>> {
+    #[derive(Deserialize)]
+    struct List {
+        panes: Vec<Pane>,
+    }
+    #[derive(Deserialize)]
+    struct Pane {
+        pane_id: PaneId,
+    }
+    Ok(m.link.call::<List>("pane.list", json!({}), SHORT).await?.panes.into_iter().map(|p| p.pane_id).collect())
+}
+
+// Same entry point as the desk popup: a new name, an existing branch, or #pr.
 pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree> {
+    #[derive(Deserialize)]
+    struct Done {
+        result: Created,
+    }
     #[derive(Deserialize)]
     struct Created {
         workspace: Workspace,
@@ -362,8 +327,12 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
         branch: String,
     }
 
-    let script = format!("cd {}/{} && {}", root(), repo.as_str(), wt(&format!("'{}' --no-focus", r#ref.as_str())));
-    let c: Created = parse(&sh(m, &script, LONG).await?)?;
+    let script = format!("cd {ROOT}/{} && herdr-wt '{}' --no-focus", repo.as_str(), r#ref.as_str());
+    let o = sh(m, &script, LONG).await?;
+    if o.code != Some(0) {
+        return Err(failure(&o));
+    }
+    let c = serde_json::from_str::<Done>(&o.out)?.result;
     Ok(Worktree {
         workspace_id: c.workspace.workspace_id,
         pane_id: c.root_pane.pane_id,
@@ -373,49 +342,57 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
 }
 
 // Resolves once the agent is ready or blocked at startup (folder trust and similar dialogs).
-pub async fn start(m: &Machine, name: &str, kind: &str, pane: &PaneId) -> Result<()> {
-    let args = ["agent", "start", name, "--kind", kind, "--pane", &pane.0, "--timeout", "90000"];
-    match call::<IgnoredAny>(m, &args, Duration::from_secs(100)).await {
+// A reopened workspace keeps its shell wherever it was left, so cd to the checkout first.
+pub async fn start(m: &Machine, name: &str, kind: &str, pane: &PaneId, path: &str) -> Result<()> {
+    let cd = json!({"pane_id": pane.0, "text": format!("cd '{path}'"), "keys": ["Enter"]});
+    m.link.call::<IgnoredAny>("pane.send_input", cd, SHORT).await?;
+    let params = json!({"name": name, "kind": kind, "pane_id": pane.0, "timeout_ms": 90_000});
+    match m.link.call::<IgnoredAny>("agent.start", params, Duration::from_secs(100)).await {
         Err(e) if !e.is(&Code::AgentNotReady) => Err(e),
         _ => Ok(()),
     }
 }
 
 pub async fn prompt(m: &Machine, pane: &PaneId, text: &str) -> Result<()> {
-    call::<IgnoredAny>(m, &["agent", "prompt", &pane.0, text], LONG).await.map(drop)
+    m.link.call::<IgnoredAny>("agent.prompt", json!({"target": pane.0, "text": text}), LONG).await.map(drop)
 }
 
 pub async fn keys(m: &Machine, pane: &PaneId, keys: &[&str]) -> Result<()> {
-    call::<IgnoredAny>(m, &[&["agent", "send-keys", &pane.0], keys].concat(), LONG).await.map(drop)
+    m.link.call::<IgnoredAny>("agent.send_keys", json!({"target": pane.0, "keys": keys}), SHORT).await.map(drop)
 }
 
 pub async fn screen(m: &Machine, pane: &PaneId, lines: u32) -> Result<String> {
-    let lines = lines.to_string();
-    let args = ["agent", "read", &pane.0, "--source", "recent-unwrapped", "--lines", &lines];
-    let o = herdr(m, &args, LONG).await?;
-    if o.code != Some(0) {
-        return Err(Error::failed(or(&o.err, &o.out).trim().into()));
+    #[derive(Deserialize)]
+    struct Read {
+        read: Text,
     }
-    Ok(o.out)
+    #[derive(Deserialize)]
+    struct Text {
+        text: String,
+    }
+    let params = json!({"target": pane.0, "source": "recent_unwrapped", "lines": lines});
+    Ok(m.link.call::<Read>("agent.read", params, SHORT).await?.read.text)
 }
 
 pub async fn close(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
-    call::<IgnoredAny>(m, &["workspace", "close", &workspace.0], LONG).await.map(drop)
+    m.link.call::<IgnoredAny>("workspace.close", json!({"workspace_id": workspace.0}), LONG).await.map(drop)
 }
 
 pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
-    call::<IgnoredAny>(m, &["worktree", "remove", "--workspace", &workspace.0, "--force"], LONG).await.map(drop)
+    let params = json!({"workspace_id": workspace.0, "force": true});
+    m.link.call::<IgnoredAny>("worktree.remove", params, LONG).await.map(drop)
 }
 
 // Same view as `wt ls` at the desk: every repo's worktrees with their herdr state.
 pub async fn worktrees(m: &Machine) -> Result<String> {
-    let o = sh(m, &format!("cd ~ && {}", wt("ls")), Duration::from_secs(30)).await?;
-    Ok(or(&o.out, &o.err).trim_end().into())
+    let o = sh(m, "cd ~ && herdr-wt ls", Duration::from_secs(30)).await?;
+    let text = if o.out.trim().is_empty() { o.err } else { o.out };
+    Ok(text.trim_end().into())
 }
 
 // Main clones only: a worktree has a .git file, a clone a .git directory.
 pub async fn repos(m: &Machine) -> Result<Vec<String>> {
-    let o = sh(m, &format!(r#"for d in {}/*/; do [ -d "$d.git" ] && basename "$d"; done"#, root()), SHORT).await?;
+    let o = sh(m, &format!(r#"for d in {ROOT}/*/; do [ -d "$d.git" ] && basename "$d"; done"#), SHORT).await?;
     Ok(o.out.lines().filter(|l| !l.is_empty()).map(String::from).collect())
 }
 
@@ -487,11 +464,19 @@ pub struct Reply {
 
 // Last assistant text after the latest real prompt in a Claude Code transcript.
 pub async fn reply(m: &Machine, session: &SessionId) -> Option<Reply> {
-    let o = sh(m, &format!("cat ~/.claude/projects/*/{}.jsonl", session.0), LIST).await.ok()?;
-    if o.code != Some(0) {
-        return None;
+    let file = format!("{}.jsonl", session.0);
+    if m.reach == Reach::Ssh {
+        let o = sh(m, &format!("cat ~/.claude/projects/*/{file}"), SHORT).await.ok()?;
+        return if o.code == Some(0) { last_reply(&o.out) } else { None };
     }
-    last_reply(&o.out)
+    let projects = std::path::Path::new(&std::env::var("HOME").ok()?).join(".claude/projects");
+    let mut dirs = tokio::fs::read_dir(projects).await.ok()?;
+    while let Ok(Some(d)) = dirs.next_entry().await {
+        if let Ok(text) = tokio::fs::read_to_string(d.path().join(&file)).await {
+            return last_reply(&text);
+        }
+    }
+    None
 }
 
 #[must_use]

@@ -2,5 +2,5 @@ target
 .env
 state.json
 journal.db
-logs
+drover.log
 .DS_Store

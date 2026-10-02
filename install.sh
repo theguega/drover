@@ -1,109 +1,57 @@
 #!/usr/bin/env bash
-# Install drover under XDG data home, put binaries on PATH, seed .env.
-#   curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/install.sh | bash
+# Build drover and run it as a user service from this checkout. Rerun after a pull.
+# herdr-wt, PATH, REPOS_ROOT and HERDR_WORKTREE_PREFIX come from the dotfiles: the service starts through zsh.
 set -euo pipefail
 
-REPO="${DROVER_REPO:-https://github.com/theguega/drover.git}"
-REF="${DROVER_REF:-main}"
-DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
-ROOT="${DROVER_HOME:-$DATA_HOME/drover}"
-ROOT="${ROOT/#\~/$HOME}"
-
-need() {
-  command -v "$1" >/dev/null || {
-    echo "missing on PATH: $1" >&2
-    exit 1
-  }
-}
-
-echo "drover → $ROOT"
-need git
-need cargo
-need herdr
-need jq
-need ssh
-
-if [[ -d "$ROOT/.git" ]]; then
-  git -C "$ROOT" fetch -q origin
-  git -C "$ROOT" checkout -q "$REF"
-  git -C "$ROOT" pull -q --ff-only origin "$REF" || true
-else
-  mkdir -p "$(dirname "$ROOT")"
-  git clone -q --branch "$REF" "$REPO" "$ROOT"
-fi
-
-cargo build --release --manifest-path "$ROOT/Cargo.toml"
-
-mkdir -p "$HOME/.local/bin"
-ln -sfn "$ROOT/target/release/drover" "$HOME/.local/bin/drover"
-ln -sfn "$ROOT/bin/herdr-wt" "$HOME/.local/bin/herdr-wt"
-
-if [[ ! -f "$ROOT/.env" ]]; then
-  cp "$ROOT/.env.example" "$ROOT/.env"
-  echo "wrote $ROOT/.env — fill DISCORD_* and ALLOWED_USER_IDS"
-fi
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+zsh=$(command -v zsh)
+[[ -f "$root/.env" ]] || { cp "$root/.env.example" "$root/.env"; echo "fill $root/.env, then rerun"; exit 1; }
+cargo build --release --manifest-path "$root/Cargo.toml"
+run="set -a; . ./.env; set +a; exec ./target/release/drover"
 
 case "$(uname -s)" in
   Linux)
-    unit_dir="$HOME/.config/systemd/user"
-    mkdir -p "$unit_dir"
-    cat >"$unit_dir/drover.service" <<EOF
+    mkdir -p ~/.config/systemd/user
+    cat >~/.config/systemd/user/drover.service <<UNIT
 [Unit]
 Description=drover, Discord bridge for herdr
 After=network-online.target
 
 [Service]
-WorkingDirectory=$ROOT
-ExecStart=$ROOT/target/release/drover
-Environment=PATH=$HOME/.local/bin:/home/linuxbrew/.linuxbrew/bin:/opt/homebrew/bin:/usr/bin:/bin
+WorkingDirectory=$root
+ExecStart=$zsh -c '$run'
 Restart=always
 RestartSec=10
 
 [Install]
 WantedBy=default.target
-EOF
+UNIT
+    loginctl enable-linger "$USER"
     systemctl --user daemon-reload
-    echo "systemd unit → $unit_dir/drover.service"
-    echo "after .env:  systemctl --user enable --now drover"
+    systemctl --user enable -q drover
+    systemctl --user restart drover
+    echo "logs: journalctl --user -u drover -f"
     ;;
   Darwin)
-    plist="$HOME/Library/LaunchAgents/dev.drover.plist"
-    mkdir -p "$HOME/Library/LaunchAgents" "$ROOT/logs"
-    cat >"$plist" <<EOF
+    plist=~/Library/LaunchAgents/dev.drover.plist
+    mkdir -p ~/Library/LaunchAgents
+    cat >"$plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key><string>dev.drover</string>
-  <key>WorkingDirectory</key><string>$ROOT</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$ROOT/target/release/drover</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
-    <key>HOME</key><string>$HOME</string>
-  </dict>
+  <key>WorkingDirectory</key><string>$root</string>
+  <key>ProgramArguments</key><array><string>$zsh</string><string>-c</string><string>$run</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>$ROOT/logs/drover.log</string>
-  <key>StandardErrorPath</key><string>$ROOT/logs/drover.log</string>
+  <key>StandardOutPath</key><string>$root/drover.log</string>
+  <key>StandardErrorPath</key><string>$root/drover.log</string>
 </dict>
 </plist>
-EOF
-    echo "launchd plist → $plist"
-    echo "after .env:  launchctl bootstrap gui/\$(id -u) $plist"
+PLIST
+    launchctl bootout "gui/$(id -u)/dev.drover" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$plist"
+    echo "logs: tail -f $root/drover.log"
     ;;
 esac
-
-echo
-echo "next:"
-echo "  1. edit $ROOT/.env"
-echo "  2. merge $ROOT/desk/herdr.toml into ~/.config/herdr/config.toml"
-echo "  3. start the service (see above)"
-echo "  drover    → $HOME/.local/bin/drover"
-echo "  herdr-wt  → $HOME/.local/bin/herdr-wt"
-echo "  data dir  → $ROOT  (.env, state.json, journal.db)"
-echo "  repos     → \$REPOS_ROOT (default ~/Developer) — project clones, not this install"
