@@ -378,9 +378,37 @@ pub async fn close(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
     m.link.call::<IgnoredAny>("workspace.close", json!({"workspace_id": workspace.0}), LONG).await.map(drop)
 }
 
-pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
-    let params = json!({"workspace_id": workspace.0, "force": true});
-    m.link.call::<IgnoredAny>("worktree.remove", params, LONG).await.map(drop)
+// Through herdr-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
+pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
+    #[derive(Deserialize)]
+    struct List {
+        workspaces: Vec<Ws>,
+    }
+    #[derive(Deserialize)]
+    struct Ws {
+        workspace_id: WorkspaceId,
+        worktree: Option<Tree>,
+    }
+    #[derive(Deserialize)]
+    struct Tree {
+        checkout_path: String,
+    }
+    let path = m
+        .link
+        .call::<List>("workspace.list", json!({}), SHORT)
+        .await?
+        .workspaces
+        .into_iter()
+        .find(|w| &w.workspace_id == workspace)
+        .and_then(|w| w.worktree)
+        .ok_or_else(|| Error::failed("workspace has no worktree".into()))?
+        .checkout_path;
+    let path = Name::parse(&path)?;
+    let o = sh(m, &format!("herdr-wt rm '{}'", path.as_str()), LONG).await?;
+    if o.code != Some(0) {
+        return Err(failure(&o));
+    }
+    Ok(o.out.trim().into())
 }
 
 // Same view as `wt ls` at the desk: every repo's worktrees with their herdr state.
