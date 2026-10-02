@@ -5,7 +5,8 @@ Claude reads this when there is no `CLAUDE.md`. The user-facing guide is `README
 ## Layout
 
 ```
-src/main.rs     discord: commands, threads, reactions, poll loop, prompt queue
+src/main.rs     discord: commands, threads, reactions, event watchers, prompt queue
+src/events.rs   herdr `events.subscribe` (local socket; ssh+python relay on remotes)
 src/herdr.rs    herdr and ssh per machine, transcript replies
 src/journal.rs  journal store, search, context for new tasks
 bin/herdr-wt    worktree open/list/remove. The desk `wt` execs this file
@@ -39,19 +40,19 @@ Native herdr worktree (0.9.3):
 
 Blank native `new_worktree` so `prefix+shift+g` can run `herdr-wt prompt` (see `desk/herdr.toml`). `prefix+o` focuses the first blocked agent, else the first done one — the native toast target is gone with `ui.toast.delivery = "system"`.
 
-## Poll loop
+## Event loop
 
-Every `POLL_MS`, drover lists the agents on each machine once and walks its tasks. A status change becomes a reaction. `blocked` posts the dialog. `idle` after a prompt reads the reply from the Claude transcript (`~/.claude/projects/*/<session>.jsonl`) and posts it. Other agents use the last 80 lines of the terminal. Each task has its own lock, so the poller and a command on the same thread take turns.
+Each machine gets a watcher. It opens herdr's Unix socket (`events.subscribe`) for the panes drover is following — `pane.agent_status_changed` per pane, plus `pane.closed`, `pane.exited`, and `workspace.closed`. Local connects to `~/.config/herdr/herdr.sock` (or `HERDR_SOCKET_PATH`). Remotes ssh to the machine and run a short Python relay onto that host's socket (needs `python3` there).
 
-If Discord sends a prompt while the agent is busy (`agent_not_ready` / `agent_not_idle`), drover keeps one message in `queued` and sends it on the next idle tick.
-
-A task's phase is one enum in `state.json`:
+A push runs the same reconcile as before: `agent.list`, then reactions / dialog / transcript reply. `events_lost` or a pane-set change resubscribes. While a task is `Starting` / `Waiting` / `Ending`, `POLL_MS` (default 1s) re-checks the Claude transcript so a late flush is not missed.
 
 ```
 Starting { prompt } ──ready──▶ Waiting ──reply──▶ Idle ──message──▶ Waiting
                                                     └──/done──▶ Ending ──entry──▶ (closed)
 any ──pane gone──▶ Gone
 ```
+
+If Discord sends a prompt while the agent is busy (`agent_not_ready` / `agent_not_idle`), drover keeps one message in `queued` and sends it on the next idle tick.
 
 `Origin::Opened` means drover created the worktree, so `/done remove` may delete the checkout. `Attached` is an agent that was started at the desk.
 

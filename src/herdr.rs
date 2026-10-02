@@ -196,12 +196,12 @@ impl Error {
         matches!(self, Self::Herdr { code, .. } if code.busy())
     }
 
-    fn failed(message: String) -> Self {
+    pub(crate) fn failed(message: String) -> Self {
         Self::Herdr { code: Code::Other("failed".into()), message }
     }
 }
 
-type Result<T> = std::result::Result<T, Error>;
+pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 // Clones and worktrees live here. Tilde form (`~/Developer`) expands in the shell.
 fn root() -> &'static str {
