@@ -5,20 +5,22 @@
 #   herdr-wt <branch>        existing local or remote branch
 #   herdr-wt <#123|123>      GitHub pull request head
 #   herdr-wt prompt          ask for one of the above, then open it
-#   herdr-wt [ls]            list worktrees of this repo, or of every repo in ~/Developer
+#   herdr-wt [ls]            list worktrees of this repo, or of every repo under REPOS_ROOT
 #   herdr-wt rm [-f] [path]  remove a worktree (default: this one), its workspace, and its branch if merged
 # Extra args are passed to herdr (default --focus). Prints herdr's JSON.
 #
-# Set HERDR_WORKTREE_PREFIX to put new names under a prefix (dev/cache).
+# REPOS_ROOT defaults to ~/Developer. HERDR_WORKTREE_PREFIX puts new names under a prefix (dev/cache).
 # Native `herdr worktree` creates a branch from HEAD when the name exists only
 # on origin, and it has no pull-request checkout. Its checkouts land in
-# ~/.herdr/worktrees, not ~/Developer/<repo>.<branch>.
+# ~/.herdr/worktrees, not <REPOS_ROOT>/<repo>.<branch>.
 set -euo pipefail
 
 for cmd in git jq herdr; do
   command -v "$cmd" >/dev/null || { echo "herdr-wt needs $cmd on PATH" >&2; exit 1; }
 done
 
+repos_root=${REPOS_ROOT:-$HOME/Developer}
+repos_root=${repos_root/#\~/$HOME}
 prefix="${HERDR_WORKTREE_PREFIX:-}"
 
 # ● working  ◆ blocked  ✓ done  ○ open in herdr  · closed
@@ -81,7 +83,7 @@ if [[ $# -eq 0 ]]; then
   if root=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); then
     list "$(dirname "$root")"
   else
-    list $(for d in ~/Developer/*/; do [[ -d "$d.git" ]] && echo "${d%/}"; done)
+    list $(for d in "$repos_root"/*/; do [[ -d "$d.git" ]] && echo "${d%/}"; done)
   fi
   exit
 fi

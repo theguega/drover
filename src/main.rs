@@ -93,6 +93,8 @@ struct Task {
     prompt_msg: Option<MessageId>, // message that carries the state reaction
     #[serde(skip_serializing_if = "Option::is_none")]
     dialog_msg: Option<MessageId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    queued: Option<String>, // one Discord prompt waiting while the agent works
 }
 
 // What state.json may hold: this format, or the flags of the TypeScript drover.
@@ -112,6 +114,7 @@ struct Stored {
     last_reply: Option<String>,
     prompt_msg: Option<MessageId>,
     dialog_msg: Option<MessageId>,
+    queued: Option<String>,
     #[serde(default)]
     owned: bool,
     #[serde(default)]
@@ -152,6 +155,7 @@ impl From<Stored> for Task {
             last_reply: s.last_reply,
             prompt_msg: s.prompt_msg,
             dialog_msg: s.dialog_msg,
+            queued: s.queued,
         }
     }
 }
@@ -424,7 +428,7 @@ impl App {
             CreateCommand::new("new")
                 .description("Worktree + agent in a new thread")
                 .add_option(machine())
-                .add_option(string("repo", "repo in ~/Developer").required(true).set_autocomplete(true))
+                .add_option(string("repo", "repo under REPOS_ROOT").required(true).set_autocomplete(true))
                 .add_option(string("branch", "new name, existing branch, or #pr").required(true))
                 .add_option(string("prompt", "first instruction").required(true))
                 .add_option(kinds.iter().fold(string("agent", "default claude"), |o, k| o.add_string_choice(*k, *k))),
@@ -507,6 +511,7 @@ impl App {
             last_reply: None,
             prompt_msg: Some(head.id),
             dialog_msg: None,
+            queued: None,
         });
         self.save().await;
         th.create_reaction(http, head.id, emoji("👀")).await?;
@@ -549,6 +554,7 @@ impl App {
             last_reply,
             prompt_msg: None,
             dialog_msg: None,
+            queued: None,
         });
         self.save().await;
         i.edit_response(http, edit(format!("<#{th}>"))).await?;
@@ -723,14 +729,27 @@ impl App {
         }
         let m = self.machine(&t.machine)?;
         if let Err(e) = herdr::prompt(m, &t.pane, text).await {
-            if !e.is(&herdr::Code::AgentBlocked) {
-                return Err(e.into());
+            if e.is(&herdr::Code::AgentBlocked) {
+                let content = screen(m, &t.pane, "answer the dialog first, then resend\n").await;
+                drop(t);
+                let out = CreateMessage::new().content(content).components(key_rows()).reference_message(msg);
+                msg.channel_id.send_message(http, out).await?;
+                return Ok(());
             }
-            let content = screen(m, &t.pane, "answer the dialog first, then resend\n").await;
-            drop(t);
-            let out = CreateMessage::new().content(content).components(key_rows()).reference_message(msg);
-            msg.channel_id.send_message(http, out).await?;
-            return Ok(());
+            if e.is_busy() {
+                if t.queued.is_some() {
+                    drop(t);
+                    msg.reply(http, "one message already queued; send again after it runs").await?;
+                    return Ok(());
+                }
+                t.queued = Some(text.into());
+                drop(t);
+                self.save().await;
+                msg.react(http, emoji("👀")).await?;
+                msg.reply(http, "queued — sends when the agent is idle").await?;
+                return Ok(());
+            }
+            return Err(e.into());
         }
         // a pending first prompt or journal entry keeps its phase; its reply covers this one too
         if t.phase == Phase::Idle {
@@ -824,7 +843,7 @@ impl App {
 
         let was_working = prev == Some(Status::Working);
         if !(t.phase.waiting() || was_working) {
-            return Ok(Step::Keep);
+            return self.drain_queue(http, th, &mut t, m).await;
         }
         if t.kind == "claude" {
             let Some(s) = &t.session else { return Ok(Step::Keep) };
@@ -848,6 +867,29 @@ impl App {
             mark(http, th, &t, "✅").await;
             let screen = herdr::screen(m, &t.pane, 80).await?;
             post(http, th, &format!("```\n{}\n```", tail(&screen, 5000))).await?;
+        }
+        self.drain_queue(http, th, &mut t, m).await
+    }
+
+    // One Discord message may wait while the agent works; send it once idle.
+    async fn drain_queue(&self, http: &Http, th: ChannelId, t: &mut Task, m: &Machine) -> Result<Step> {
+        if t.phase != Phase::Idle {
+            return Ok(Step::Keep);
+        }
+        let Some(text) = t.queued.take() else {
+            return Ok(Step::Keep);
+        };
+        match herdr::prompt(m, &t.pane, &text).await {
+            Ok(()) => {
+                t.phase = Phase::Waiting;
+                mark(http, th, t, "👀").await;
+            }
+            Err(e) if e.is_busy() || e.is(&herdr::Code::AgentBlocked) => {
+                t.queued = Some(text); // still not ready; try next tick
+            }
+            Err(e) => {
+                th.say(http, format!("queued prompt failed: {e}")).await?;
+            }
         }
         Ok(Step::Keep)
     }
@@ -940,17 +982,14 @@ fn on_path(cmd: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
 }
 
-// A bare clone still needs these on PATH, plus bin/herdr-wt from this repo.
+// A bare clone still needs these on PATH, plus bin/herdr-wt from this repo (or HERDR_WT / PATH).
 fn require_runtime() -> Result<()> {
     let missing: Vec<_> = ["herdr", "git", "jq", "ssh"].into_iter().filter(|cmd| !on_path(cmd)).collect();
     if !missing.is_empty() {
         bail!("missing on PATH: {}", missing.join(", "));
     }
-    let home = std::env::var("HOME").context("HOME")?;
-    let shipped = std::path::PathBuf::from(&home).join("Developer/drover/bin/herdr-wt");
-    let stowed = std::path::PathBuf::from(&home).join(".local/bin/herdr-wt");
-    if !shipped.is_file() && !stowed.is_file() {
-        bail!("herdr-wt is not at {} (this repo) or {}", shipped.display(), stowed.display());
+    if herdr::herdr_wt().is_none() {
+        bail!("herdr-wt not found (set HERDR_WT, put it on PATH, or keep bin/herdr-wt next to this checkout)");
     }
     Ok(())
 }

@@ -2,6 +2,10 @@
 name = "drover"
 version = "0.1.0"
 edition = "2024"
+description = "The same herdr workspace, from the desk or from Discord"
+license = "MIT"
+repository = "https://github.com/theguega/drover"
+readme = "README.md"
 publish = false
 
 [dependencies]
