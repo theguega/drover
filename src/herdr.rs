@@ -1,7 +1,12 @@
 // herdr and shell access per machine. The host runs commands directly;
 // other machines go through `herdr --machine <label>` and `ssh <label>`.
 
-use std::{process::Stdio, time::Duration};
+use std::{
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::LazyLock,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use tokio::process::Command;
@@ -152,10 +157,17 @@ pub enum Code {
 impl From<String> for Code {
     fn from(s: String) -> Self {
         match s.as_str() {
-            "agent_not_ready" => Self::AgentNotReady,
+            "agent_not_ready" | "agent_not_idle" => Self::AgentNotReady,
             "agent_blocked" => Self::AgentBlocked,
             _ => Self::Other(s),
         }
+    }
+}
+
+impl Code {
+    #[must_use]
+    pub fn busy(&self) -> bool {
+        matches!(self, Self::AgentNotReady)
     }
 }
 
@@ -179,6 +191,11 @@ impl Error {
         matches!(self, Self::Herdr { code: c, .. } if c == code)
     }
 
+    #[must_use]
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Herdr { code, .. } if code.busy())
+    }
+
     fn failed(message: String) -> Self {
         Self::Herdr { code: Code::Other("failed".into()), message }
     }
@@ -186,12 +203,51 @@ impl Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
-const ROOT: &str = "~/Developer";
+// Clones and worktrees live here. Tilde form (`~/Developer`) expands in the shell.
+fn root() -> &'static str {
+    static ROOT: LazyLock<String> =
+        LazyLock::new(|| std::env::var("REPOS_ROOT").unwrap_or_else(|_| "~/Developer".into()));
+    ROOT.as_str()
+}
 
-// The script ships in this repo. ~/.local/bin/herdr-wt is the same file, stowed from the dotfiles.
+/// Path to `bin/herdr-wt`: `HERDR_WT`, then PATH, then this repo next to the binary, then `~/.local/bin`.
+#[must_use]
+pub fn herdr_wt() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("HERDR_WT") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let p = dir.join("herdr-wt");
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        // target/{debug,release}/drover → ../../bin/herdr-wt
+        if let Some(p) = exe.ancestors().nth(3).map(|repo| repo.join("bin/herdr-wt"))
+            && p.is_file()
+        {
+            return Some(p);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let p = Path::new(&home).join(".local/bin/herdr-wt");
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+// Prefer PATH / HERDR_WT so remotes need only a stowed copy, not this repo checkout.
 fn wt(args: &str) -> String {
     format!(
-        r#"b="$HOME/Developer/drover/bin/herdr-wt"; [ -x "$b" ] || b="$HOME/.local/bin/herdr-wt"; "$b" {args}"#
+        r#"b="${{HERDR_WT:-}}"; [ -n "$b" ] || b="$(command -v herdr-wt 2>/dev/null || true)"; [ -n "$b" ] || b="$HOME/.local/bin/herdr-wt"; "$b" {args}"#
     )
 }
 const SHORT: Duration = Duration::from_secs(15);
@@ -306,7 +362,7 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
         branch: String,
     }
 
-    let script = format!("cd {ROOT}/{} && {}", repo.as_str(), wt(&format!("'{}' --no-focus", r#ref.as_str())));
+    let script = format!("cd {}/{} && {}", root(), repo.as_str(), wt(&format!("'{}' --no-focus", r#ref.as_str())));
     let c: Created = parse(&sh(m, &script, LONG).await?)?;
     Ok(Worktree {
         workspace_id: c.workspace.workspace_id,
@@ -359,7 +415,7 @@ pub async fn worktrees(m: &Machine) -> Result<String> {
 
 // Main clones only: a worktree has a .git file, a clone a .git directory.
 pub async fn repos(m: &Machine) -> Result<Vec<String>> {
-    let o = sh(m, &format!(r#"for d in {ROOT}/*/; do [ -d "$d.git" ] && basename "$d"; done"#), SHORT).await?;
+    let o = sh(m, &format!(r#"for d in {}/*/; do [ -d "$d.git" ] && basename "$d"; done"#, root()), SHORT).await?;
     Ok(o.out.lines().filter(|l| !l.is_empty()).map(String::from).collect())
 }
 

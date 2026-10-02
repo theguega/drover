@@ -5,10 +5,11 @@ Claude reads this when there is no `CLAUDE.md`. The user-facing guide is `README
 ## Layout
 
 ```
-src/main.rs     discord: commands, threads, reactions, the poll loop
+src/main.rs     discord: commands, threads, reactions, poll loop, prompt queue
 src/herdr.rs    herdr and ssh per machine, transcript replies
 src/journal.rs  journal store, search, context for new tasks
 bin/herdr-wt    worktree open/list/remove. The desk `wt` execs this file
+desk/herdr.toml sample desk keys (tuicr, lazygit, herdr-wt)
 state.json      thread → task map (gitignored)
 journal.db      journal (gitignored)
 ```
@@ -18,33 +19,31 @@ drover has no model. It opens a worktree, starts the real `claude` (or `codex`, 
 ```
 phone ─ discord ─▶ drover  (Rust, a user service on the host)
                      │
-                     ├─ bin/herdr-wt + herdr     ~/Developer/<repo>.<branch>
+                     ├─ herdr-wt + herdr     $REPOS_ROOT/<repo>.<branch>
                      └─ ssh / herdr --machine    the same on each remote
 ```
 
 ## Worktrees
 
-`bin/herdr-wt` is the one entry point for the <kbd>⌃b</kbd> <kbd>⇧g</kbd> popup, the `wt` shell alias, and `/new`. Do not switch those to native `herdr worktree create`.
+`bin/herdr-wt` is the one entry point for the desk popup, the `wt` shell alias, and `/new`. Do not switch those to native `herdr worktree create`.
 
-Keep `bin/herdr-wt` identical to the copy stowed at `~/.local/bin/herdr-wt`. drover prefers `~/Developer/drover/bin/herdr-wt` and falls back to the stowed copy. New branch names are used as-is. `HERDR_WORKTREE_PREFIX` adds a prefix when it is set.
+Put it on `PATH` (`ln -sf …/drover/bin/herdr-wt ~/.local/bin/herdr-wt`). drover resolves it via `HERDR_WT`, then `PATH`, then `bin/herdr-wt` next to the checkout, then `~/.local/bin`. New branch names are used as-is. `HERDR_WORKTREE_PREFIX` adds a prefix when set. `REPOS_ROOT` (default `~/Developer`) is where clones and `repo.branch` checkouts live.
 
 Native herdr worktree (0.9.3):
 
 - no optional prefix of its own (`HERDR_WORKTREE_PREFIX` is what adds one)
 - a name that exists only on origin becomes a new branch from HEAD, which is an empty copy of someone else's work
 - no `#pr` fetch
-- checkouts go under `~/.herdr/worktrees/<repo>/<branch>`, not `~/Developer/<repo>.<branch>`
+- checkouts go under `~/.herdr/worktrees/<repo>/<branch>`, not `$REPOS_ROOT/<repo>.<branch>`
 - remove deletes the checkout and never the merged branch
 
-The settings screen shows native "new worktree" as unset because `config.toml` sets `new_worktree = ""`. That frees `prefix+shift+g` for the popup that runs `bin/herdr-wt prompt`. The binding that works is the custom command, listed in <kbd>⌃b</kbd> <kbd>?</kbd>.
-
-`prefix+o` is the same story. The native action only focuses the pane behind the current toast, and with `ui.toast.delivery = "system"` that target is gone by the time you are back at the keyboard. The custom command focuses the first blocked agent, otherwise the first done one, via `herdr agent focus`.
-
-`prefix+v` and `prefix+l` are pane commands (`type = "pane"`, a temporary zoomed pane that closes when the program exits). The shift versions stay popups. Those chords used to be split-right and focus-right, which are now `prefix+percent` and `prefix+right`. A custom command on a default chord is disabled unless that default is moved or blanked.
+Blank native `new_worktree` so `prefix+shift+g` can run `herdr-wt prompt` (see `desk/herdr.toml`). `prefix+o` focuses the first blocked agent, else the first done one — the native toast target is gone with `ui.toast.delivery = "system"`.
 
 ## Poll loop
 
 Every `POLL_MS`, drover lists the agents on each machine once and walks its tasks. A status change becomes a reaction. `blocked` posts the dialog. `idle` after a prompt reads the reply from the Claude transcript (`~/.claude/projects/*/<session>.jsonl`) and posts it. Other agents use the last 80 lines of the terminal. Each task has its own lock, so the poller and a command on the same thread take turns.
+
+If Discord sends a prompt while the agent is busy (`agent_not_ready` / `agent_not_idle`), drover keeps one message in `queued` and sends it on the next idle tick.
 
 A task's phase is one enum in `state.json`:
 
@@ -95,4 +94,4 @@ cargo test
 cargo clippy --all-targets
 ```
 
-`cargo run` needs a `.env`. Use a test server and channel. Startup refuses to launch if `herdr`, `git`, `jq`, or `ssh` is missing, or if `bin/herdr-wt` is not at `~/Developer/drover/bin/herdr-wt` or `~/.local/bin/herdr-wt`.
+`cargo run` needs a `.env`. Use a test server and channel. Startup refuses to launch if `herdr`, `git`, `jq`, or `ssh` is missing, or if `herdr-wt` cannot be found.

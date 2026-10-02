@@ -1,0 +1,57 @@
+# Merge into ~/.config/herdr/config.toml (or drop the bits you already have).
+# Review (tuicr) and git (lazygit) stay at the desk. Discord only steers the same pane.
+#
+# Put herdr-wt on PATH first: ln -sf /path/to/drover/bin/herdr-wt ~/.local/bin/herdr-wt
+# Optional: HERDR_WORKTREE_PREFIX=dev   # wt cache → branch dev/cache
+
+[keys]
+new_worktree = ""
+open_worktree = "prefix+shift+o"
+remove_worktree = "prefix+shift+k"
+open_notification_target = ""
+next_agent = "prefix+a"
+previous_agent = "prefix+shift+a"
+split_vertical = "prefix+percent"
+focus_pane_right = "prefix+right"
+
+[[keys.command]]
+key = "prefix+shift+g"
+type = "popup"
+command = "exec herdr-wt prompt"
+width = 70
+height = 8
+description = "Worktree: new, branch or #pr"
+
+[[keys.command]]
+key = "prefix+o"
+type = "shell"
+command = "id=$(herdr agent list | jq -r '[.result.agents[] | select(.agent_status==\"blocked\" or .agent_status==\"done\")] | sort_by(if .agent_status==\"blocked\" then 0 else 1 end) | .[0].pane_id // empty'); [ -n \"$id\" ] && herdr agent focus \"$id\""
+description = "Jump to the agent that needs you"
+
+[[keys.command]]
+key = "prefix+shift+v"
+type = "popup"
+command = "tuicr"
+width = "90%"
+height = "90%"
+description = "Review diff"
+
+[[keys.command]]
+key = "prefix+v"
+type = "pane"
+command = "tuicr"
+description = "Review diff in a pane"
+
+[[keys.command]]
+key = "prefix+shift+l"
+type = "popup"
+command = "lazygit"
+width = "90%"
+height = "90%"
+description = "Git"
+
+[[keys.command]]
+key = "prefix+l"
+type = "pane"
+command = "lazygit"
+description = "Git in a pane"
