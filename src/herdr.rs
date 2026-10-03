@@ -118,7 +118,8 @@ pub struct Name(String);
 
 impl Name {
     pub fn parse(s: &str) -> Result<Self> {
-        let ok = !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "#_./-".contains(c));
+        // a leading dash would reach herdr-wt as an option
+        let ok = !s.is_empty() && !s.starts_with('-') && s.chars().all(|c| c.is_ascii_alphanumeric() || "#_./-".contains(c));
         if ok { Ok(Self(s.into())) } else { Err(Error::Unsafe) }
     }
 
