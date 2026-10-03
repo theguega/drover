@@ -395,6 +395,10 @@ fn opt<'a>(i: &'a CommandInteraction, name: &str) -> Option<&'a str> {
     i.data.options.iter().find(|o| o.name == name).and_then(|o| o.value.as_str())
 }
 
+fn flag(i: &CommandInteraction, name: &str) -> Option<bool> {
+    i.data.options.iter().find(|o| o.name == name).and_then(|o| o.value.as_bool())
+}
+
 fn req<'a>(i: &'a CommandInteraction, name: &str) -> Result<&'a str> {
     opt(i, name).context(format!("missing {name}"))
 }
@@ -458,6 +462,25 @@ fn today() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+// Seconds since the epoch for a UTC "yyyy-mm-ddThh:mm:ss…" (Howard Hinnant's days_from_civil).
+#[must_use]
+fn unix(ts: &str) -> Option<i64> {
+    let n = |a: usize, b: usize| ts.get(a..b)?.parse::<i64>().ok();
+    let (y, m, d) = (n(0, 4)? - i64::from(n(5, 7)? <= 2), n(5, 7)?, n(8, 10)?);
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let days = era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719_468;
+    Some(days * 86_400 + n(11, 13)? * 3600 + n(14, 16)? * 60 + n(17, 19)?)
+}
+
+#[must_use]
+fn bar(name: &str, w: &herdr::Window) -> String {
+    let filled = ((w.utilization / 10.0).round().clamp(0.0, 10.0)) as usize;
+    let reset = w.resets_at.as_deref().and_then(unix).map(|t| format!(" resets <t:{t}:R>")).unwrap_or_default();
+    format!("`{name:<6} {}{} {:>3.0}%`{reset}", "█".repeat(filled), "░".repeat(10 - filled), w.utilization)
+}
+
 #[must_use]
 fn home(cwd: &str) -> String {
     let user = ["/Users/", "/home/"].iter().find_map(|p| cwd.strip_prefix(p)).filter(|r| !r.is_empty() && !r.starts_with('/'));
@@ -490,6 +513,7 @@ impl App {
                 .add_option(string("agent", "running agent").required(true).set_autocomplete(true)),
             CreateCommand::new("agents").description("Agents on every machine"),
             CreateCommand::new("worktrees").description("Worktrees on every machine"),
+            CreateCommand::new("usage").description("Claude plan limits on every machine"),
             CreateCommand::new("screen").description("This thread's terminal"),
             CreateCommand::new("keys")
                 .description("Send keys to this thread's agent")
@@ -500,7 +524,8 @@ impl App {
                     CommandOptionType::Boolean,
                     "remove",
                     "also delete the checkout, and the branch if merged",
-                )),
+                ))
+                .add_option(CreateCommandOption::new(CommandOptionType::Boolean, "journal", "false: close without an entry")),
             CreateCommand::new("recall")
                 .description("Search the journal")
                 .add_option(string("query", "words").required(true)),
@@ -531,7 +556,7 @@ impl App {
         let r#ref = Name::parse(req(i, "branch")?)?;
         let text = req(i, "prompt")?;
         let kind = opt(i, "agent").unwrap_or("claude");
-        let scout = i.data.options.iter().any(|o| o.name == "scout" && o.value.as_bool() == Some(true));
+        let scout = flag(i, "scout") == Some(true);
 
         i.defer(http).await?;
         let wt = herdr::worktree(m, &repo, &r#ref).await?;
@@ -641,6 +666,28 @@ impl App {
         Ok(())
     }
 
+    async fn cmd_usage(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
+        i.defer(http).await?;
+        let mut lines = vec![];
+        for m in self.machines() {
+            lines.push(format!("**{}**", m.name));
+            let u = match herdr::usage(m).await {
+                Ok(u) => u,
+                Err(e) => {
+                    lines.push(format!("unavailable: {}", head(&e.to_string(), 200)));
+                    continue;
+                }
+            };
+            let windows = [("5h", &u.five_hour), ("week", &u.seven_day), ("opus", &u.seven_day_opus), ("sonnet", &u.seven_day_sonnet)];
+            lines.extend(windows.iter().filter_map(|(n, w)| w.as_ref().map(|w| bar(n, w))));
+            if let Some(x) = u.extra_usage.filter(|x| x.is_enabled) {
+                lines.push(format!("extra ${:.2} of ${:.2}", x.used_credits / 100.0, x.monthly_limit / 100.0));
+            }
+        }
+        i.edit_response(http, edit(tail(&lines.join("\n"), 1990))).await?;
+        Ok(())
+    }
+
     async fn cmd_worktrees(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
         i.defer(http).await?;
         let jobs: Vec<_> = self
@@ -667,16 +714,25 @@ impl App {
 
     async fn cmd_done(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
         let cell = self.task_in(i.channel_id)?;
-        let remove = i.data.options.iter().find(|o| o.name == "remove").and_then(|o| o.value.as_bool());
-        let teardown = if remove == Some(true) { Teardown::Remove } else { Teardown::Close };
+        let teardown = if flag(i, "remove") == Some(true) { Teardown::Remove } else { Teardown::Close };
+        let journal = flag(i, "journal") != Some(false);
         i.defer(http).await?;
         {
             let mut t = cell.lock().await;
             if teardown == Teardown::Remove && t.origin == Origin::Attached {
                 bail!("drover didn't open this worktree, remove it by hand");
             }
-            herdr::prompt(self.machine(&t.machine)?, &t.pane, journal::ENTRY_PROMPT).await?;
-            t.phase = Phase::Ending(teardown);
+            if journal {
+                herdr::prompt(self.machine(&t.machine)?, &t.pane, journal::ENTRY_PROMPT).await?;
+                t.phase = Phase::Ending(teardown);
+            }
+        }
+        if !journal {
+            let t = cell.lock().await.clone();
+            self.remove(i.channel_id);
+            self.save().await;
+            i.edit_response(http, edit("closing without a journal entry")).await?;
+            return self.teardown(http, i.channel_id, &t, teardown).await;
         }
         let msg = i.edit_response(http, edit("writing the journal entry")).await?;
         cell.lock().await.prompt_msg = Some(msg.id);
@@ -686,7 +742,6 @@ impl App {
     }
 
     async fn finish(&self, http: &Http, th: ChannelId, t: &Task, teardown: Teardown, entry: &str) -> Result<()> {
-        let m = self.machine(&t.machine)?;
         self.journal.add(&journal::Entry {
             day: today(),
             machine: t.machine.clone(),
@@ -695,6 +750,11 @@ impl App {
             text: entry.into(),
         })?;
         th.say(http, format!("```\n{}\n```", entry.replace("```", ""))).await?;
+        self.teardown(http, th, t, teardown).await
+    }
+
+    async fn teardown(&self, http: &Http, th: ChannelId, t: &Task, teardown: Teardown) -> Result<()> {
+        let m = self.machine(&t.machine)?;
         let removed = match teardown {
             Teardown::Remove => herdr::remove(m, &t.workspace).await.map_err(|e| format!("kept the checkout: {e}")),
             Teardown::Close => Err(String::new()),
@@ -719,6 +779,7 @@ impl App {
             "attach" => self.cmd_attach(http, i).await,
             "agents" => self.cmd_agents(http, i).await,
             "worktrees" => self.cmd_worktrees(http, i).await,
+            "usage" => self.cmd_usage(http, i).await,
             "done" => self.cmd_done(http, i).await,
             "screen" | "keys" => {
                 let (m, pane) = self.target(i.channel_id).await?;
@@ -1189,5 +1250,8 @@ mod tests {
         assert_eq!(home("/opt/x"), "/opt/x");
         assert_eq!(tail("abcdef", 3), "…def");
         assert_eq!(today().len(), 10);
+        assert_eq!(unix("1970-01-01T00:00:00Z"), Some(0));
+        assert_eq!(unix("2026-10-02T22:50:00.185835+00:00"), Some(1_790_981_400));
+        assert_eq!(unix("2024-02-29T12:00:00Z"), Some(1_709_208_000));
     }
 }

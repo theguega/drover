@@ -418,6 +418,41 @@ pub async fn worktrees(m: &Machine) -> Result<String> {
     Ok(text.trim_end().into())
 }
 
+#[derive(Deserialize)]
+pub struct Usage {
+    pub five_hour: Option<Window>,
+    pub seven_day: Option<Window>,
+    pub seven_day_opus: Option<Window>,
+    pub seven_day_sonnet: Option<Window>,
+    pub extra_usage: Option<Extra>,
+}
+
+#[derive(Deserialize)]
+pub struct Window {
+    pub utilization: f64,
+    pub resets_at: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct Extra {
+    pub is_enabled: bool,
+    pub used_credits: f64,
+    pub monthly_limit: f64,
+}
+
+// Plan limits, as Claude Code's /usage reads them. The token stays on the machine and goes to curl on stdin.
+const USAGE: &str = r#"c=$(cat ~/.claude/.credentials.json 2>/dev/null || security find-generic-password -s 'Claude Code-credentials' -w) &&
+printf 'Authorization: Bearer %s' "$(printf %s "$c" | jq -r .claudeAiOauth.accessToken)" |
+curl -sSf -m 10 -H @- -H 'anthropic-beta: oauth-2025-04-20' https://api.anthropic.com/api/oauth/usage"#;
+
+pub async fn usage(m: &Machine) -> Result<Usage> {
+    let o = sh(m, USAGE, SHORT).await?;
+    if o.code != Some(0) {
+        return Err(failure(&o));
+    }
+    Ok(serde_json::from_str(&o.out)?)
+}
+
 // Main clones only: a worktree has a .git file, a clone a .git directory.
 pub async fn repos(m: &Machine) -> Result<Vec<String>> {
     let o = sh(m, &format!(r#"for d in {ROOT}/*/; do [ -d "$d.git" ] && basename "$d"; done"#), SHORT).await?;

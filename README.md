@@ -27,8 +27,8 @@ Remotes need only the dotfiles, a running herdr, `python3`, and passwordless `ss
 | a message in the thread | Next prompt (queued if the agent is busy) |
 | `/attach machine agent` | Follow an agent you started at the desk |
 | `/screen` · `/keys` | Terminal view and key buttons |
-| `/done [remove]` | Journal entry, close workspace; `remove` runs `herdr-wt rm` on a checkout drover opened: a dirty checkout and an unmerged branch are kept |
-| `/recall` · `/agents` · `/worktrees` | Journal search and status |
+| `/done [remove] [journal]` | Journal entry, close workspace; `journal:false` skips the entry; `remove` runs `herdr-wt rm` on a checkout drover opened: a dirty checkout and an unmerged branch are kept |
+| `/recall` · `/agents` · `/worktrees` · `/usage` | Journal search, status, and Claude plan limits |
 
 Default agent is `claude` (`codex`, `cursor`, `opencode`, `pi` also). State is one reaction: 👀 working · ⏸️ dialog · ✅ done.
 
