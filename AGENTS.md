@@ -1,6 +1,6 @@
 # drover
 
-Claude reads this when there is no `CLAUDE.md`. The user-facing guide is `README.md`. This file is how the program is put together.
+The user-facing guide is `README.md`. This file is how the program is put together.
 
 ## Layout
 
@@ -66,8 +66,8 @@ Sessions are throwaway. What carries over is small and curated.
 
 | | |
 |---|---|
-| you | `~/.claude/CLAUDE.md` from the dotfiles, on every machine |
-| project | `AGENTS.md` and Claude's auto memory, shared by every worktree of a repo. drover adds nothing |
+| you | `~/.claude/CLAUDE.md` or `~/.agents/AGENTS.md` from the dotfiles, on every machine |
+| project | `AGENTS.md` shared by every worktree of a repo. drover adds nothing |
 | journal | `/done` asks for one five-line entry: what, why, outcome, decisions, next. Stored in `journal.db` (SQLite FTS5) |
 | recall | `/new` appends the repo's three latest entries plus the best matches for the prompt, capped at 2 KB |
 
