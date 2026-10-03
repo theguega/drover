@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::json;
 use tokio::process::Command;
 
-use crate::socket::Link;
+use crate::socket::{Link, SSH_OPTS};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
@@ -252,7 +252,7 @@ async fn sh(m: &Machine, script: &str, timeout: Duration) -> Result<Out> {
     let mut cmd = match m.reach {
         Reach::Ssh => {
             let mut c = Command::new("ssh");
-            c.args(["-o", "BatchMode=yes", &m.name, script]);
+            c.args(SSH_OPTS).args([&m.name, script]);
             c
         }
         Reach::Local => {

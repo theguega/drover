@@ -55,9 +55,14 @@ fn socket_path() -> PathBuf {
     PathBuf::from(home).join(".config/herdr/herdr.sock")
 }
 
+/// A silent drop (wifi switch, NAT timeout) ends ssh in ~45 s instead of whenever TCP gives up.
+pub const SSH_OPTS: [&str; 8] =
+    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"];
+
 fn relay(host: &str) -> Result<Child> {
     Ok(Command::new("ssh")
-        .args(["-o", "BatchMode=yes", "-T", host, &format!("python3 -u -c '{RELAY}'")]) // the remote shell parses this; RELAY has no single quotes
+        .args(SSH_OPTS)
+        .args(["-T", host, &format!("python3 -u -c '{RELAY}'")]) // the remote shell parses this; RELAY has no single quotes
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -127,7 +132,9 @@ impl Link {
         let reply = match reply {
             Ok(r) => r?,
             Err(_) => {
-                if let Some(r) = self.relay.lock().await.as_ref() {
+                // a write into a dead ssh still succeeds, so a timeout is the only sign; calls
+                // already waiting keep the old relay alive until they finish, new ones start fresh
+                if let Some(r) = self.relay.lock().await.take() {
                     r.pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
                 }
                 return Err(Error::Timeout(method.into()));
