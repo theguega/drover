@@ -68,7 +68,7 @@ Sessions are throwaway. What carries over is small and curated.
 |---|---|
 | you | `~/.claude/CLAUDE.md` or `~/.agents/AGENTS.md` from the dotfiles, on every machine |
 | project | `AGENTS.md` shared by every worktree of a repo. drover adds nothing |
-| journal | `/done` asks for one five-line entry: what, why, outcome, decisions, next. Stored in `journal.db` (SQLite FTS5) |
+| journal | `/done` (unless `journal:false`) asks for one five-line entry: what, why, outcome, decisions, next. Stored in `journal.db` (SQLite FTS5) |
 | recall | `/new` appends the repo's three latest entries plus the best matches for the prompt, capped at 2 KB |
 
 drover holds no conversation. It stores a map from thread to pane. Long tasks rely on the agent's own compaction.
@@ -87,6 +87,8 @@ Enforced by the lints in `Cargo.toml`:
 - A typed `herdr::Error` (codes like `agent_blocked` are matched). `main.rs` uses a boxed `std::error::Error` with `bail!`, `err!` and `.context()`.
 - Five dependencies: serenity, tokio, serde, serde_json, rusqlite. Prefer a few lines over a crate. serde stays: herdr, Discord and Claude transcripts all speak JSON.
 - `state.json` from the TypeScript version still loads. There is a test for it.
+
+`/usage` runs a short script on each machine that hands the Claude login token (`~/.claude/.credentials.json`, or the macOS keychain) to curl on stdin for `api.anthropic.com/api/oauth/usage`, the undocumented endpoint behind Claude Code's own `/usage`. It may change without notice.
 
 Repo and branch names are checked (letters, digits, `# . _ / -`) and session ids must be uuids before they reach a shell. drover adds no sandbox. A Discord message is as good as typing in the pane.
 
