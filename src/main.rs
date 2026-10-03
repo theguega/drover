@@ -478,7 +478,7 @@ fn unix(ts: &str) -> Option<i64> {
 fn bar(name: &str, pct: f64, reset: Option<i64>) -> String {
     let filled = ((pct / 10.0).round().clamp(0.0, 10.0)) as usize;
     let reset = reset.map(|t| format!(" resets <t:{t}:R>")).unwrap_or_default();
-    format!("`{name:<6} {}{} {pct:>3.0}%`{reset}", "█".repeat(filled), "░".repeat(10 - filled))
+    format!("`{name:<10} {}{} {pct:>3.0}%`{reset}", "█".repeat(filled), "░".repeat(10 - filled))
 }
 
 #[must_use]
@@ -500,11 +500,11 @@ async fn usage_lines(m: &Machine) -> Vec<String> {
     match claude {
         Ok(None) => {}
         Ok(Some(u)) => {
-            lines.push("*claude*".into());
-            let windows = [("5h", &u.five_hour), ("week", &u.seven_day), ("opus", &u.seven_day_opus), ("sonnet", &u.seven_day_sonnet)];
+            lines.push("*claude* plan limits".into());
+            let windows = [("5h session", &u.five_hour), ("7d all", &u.seven_day), ("7d opus", &u.seven_day_opus), ("7d sonnet", &u.seven_day_sonnet)];
             lines.extend(windows.iter().filter_map(|(n, w)| w.as_ref().map(|w| bar(n, w.utilization, w.resets_at.as_deref().and_then(unix)))));
             if let Some(x) = u.extra_usage.filter(|x| x.is_enabled) {
-                lines.push(format!("extra ${:.2} of ${:.2}", x.used_credits / 100.0, x.monthly_limit / 100.0));
+                lines.push(format!("extra usage ${:.2} of ${:.2} this month", x.used_credits / 100.0, x.monthly_limit / 100.0));
             }
         }
         Err(e) => failed(&mut lines, "claude", &e),
@@ -512,24 +512,24 @@ async fn usage_lines(m: &Machine) -> Vec<String> {
     match cursor {
         Ok(None) => {}
         Ok(Some(c)) => {
-            lines.push("*cursor*".into());
+            lines.push("*cursor* billing cycle".into());
             let reset = c.billing_cycle_end.map(|ms| (ms.0 / 1000.0) as i64);
             if let Some(p) = c.plan_usage {
-                let windows = [("plan", p.total_percent_used, reset), ("auto", p.auto_percent_used, None), ("api", p.api_percent_used, None)];
+                let windows = [("plan total", p.total_percent_used, reset), ("plan auto", p.auto_percent_used, None), ("plan api", p.api_percent_used, None)];
                 lines.extend(windows.iter().filter_map(|(n, pct, r)| pct.map(|pct| bar(n, pct.0, *r))));
                 if let (Some(spent), Some(limit)) = (p.total_spend, p.limit) {
-                    let bonus = p.bonus_spend.filter(|b| b.0 > 0.0).map(|b| format!(", ${:.2} bonus", b.0 / 100.0)).unwrap_or_default();
-                    lines.push(format!("${:.2} spent: ${:.2} included{bonus}", spent.0 / 100.0, limit.0 / 100.0));
+                    let bonus = p.bonus_spend.filter(|b| b.0 > 0.0).map(|b| format!(" + ${:.2} free bonus", b.0 / 100.0)).unwrap_or_default();
+                    lines.push(format!("you: ${:.2} spent (${:.2} included{bonus})", spent.0 / 100.0, limit.0 / 100.0));
                 }
             }
             if let Some(o) = c.spend_limit_usage {
-                let (used, limit) = match o.limit_type.as_deref() {
-                    Some("team") => (o.pooled_used, o.pooled_limit),
-                    _ => (o.individual_used, o.individual_limit),
+                // a team pool is everyone's on-demand spend; Cursor sends no per-member share
+                let (who, used, limit) = match o.limit_type.as_deref() {
+                    Some("team") => ("team pool, all members", o.pooled_used, o.pooled_limit),
+                    _ => ("you", o.individual_used, o.individual_limit),
                 };
                 if let (Some(used), Some(limit)) = (used, limit) {
-                    let kind = o.limit_type.unwrap_or_default();
-                    lines.push(format!("on-demand ${:.2} of ${:.2} {kind}", used.0 / 100.0, limit.0 / 100.0));
+                    lines.push(format!("on-demand ({who}): ${:.2} of ${:.2}", used.0 / 100.0, limit.0 / 100.0));
                 }
             }
         }
@@ -539,7 +539,7 @@ async fn usage_lines(m: &Machine) -> Vec<String> {
         Ok(None) => {}
         Ok(Some(p)) => {
             let spend = |s: &herdr::Spend| format!("{} ${:.2}", tokens(s.tokens), s.cost);
-            lines.push(format!("*pi* {}", p.providers.join(", ")));
+            lines.push(format!("*pi* tokens and cost it logged, via {}", p.providers.join(", ")));
             lines.push(format!("`24h {} · 7d {} · 30d {}`", spend(&p.day), spend(&p.week), spend(&p.month)));
         }
         Err(e) => failed(&mut lines, "pi", &e),
