@@ -88,7 +88,13 @@ Enforced by the lints in `Cargo.toml`:
 - Five dependencies: serenity, tokio, serde, serde_json, rusqlite. Prefer a few lines over a crate. serde stays: herdr, Discord and Claude transcripts all speak JSON.
 - `state.json` from the TypeScript version still loads. There is a test for it.
 
-`/usage` runs a short script on each machine that hands the Claude login token (`~/.claude/.credentials.json`, or the macOS keychain) to curl on stdin for `api.anthropic.com/api/oauth/usage`, the undocumented endpoint behind Claude Code's own `/usage`. It may change without notice.
+`/usage` runs three short scripts on each machine and leaves out any agent that isn't logged in there (exit 3):
+
+- claude: the login token (`~/.claude/.credentials.json`, or the macOS keychain) goes to curl on stdin for `api.anthropic.com/api/oauth/usage`, the endpoint behind Claude Code's own `/usage`
+- cursor: the cursor-agent token (`~/.config/cursor/auth.json`, or the keychain) goes the same way to `DashboardService/GetCurrentPeriodUsage` on `api2.cursor.sh`, what the editor's usage view reads
+- pi: no plan and no token. jq sums the tokens and cost pi logs per message in `~/.pi/agent/sessions`, over 24 h, 7 d and 30 d
+
+The two endpoints are undocumented and may change without notice.
 
 Repo and branch names are checked (letters, digits, `# . _ / -`) and session ids must be uuids before they reach a shell. drover adds no sandbox. A Discord message is as good as typing in the pane.
 

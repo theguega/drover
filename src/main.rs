@@ -475,10 +475,76 @@ fn unix(ts: &str) -> Option<i64> {
 }
 
 #[must_use]
-fn bar(name: &str, w: &herdr::Window) -> String {
-    let filled = ((w.utilization / 10.0).round().clamp(0.0, 10.0)) as usize;
-    let reset = w.resets_at.as_deref().and_then(unix).map(|t| format!(" resets <t:{t}:R>")).unwrap_or_default();
-    format!("`{name:<6} {}{} {:>3.0}%`{reset}", "█".repeat(filled), "░".repeat(10 - filled), w.utilization)
+fn bar(name: &str, pct: f64, reset: Option<i64>) -> String {
+    let filled = ((pct / 10.0).round().clamp(0.0, 10.0)) as usize;
+    let reset = reset.map(|t| format!(" resets <t:{t}:R>")).unwrap_or_default();
+    format!("`{name:<6} {}{} {pct:>3.0}%`{reset}", "█".repeat(filled), "░".repeat(10 - filled))
+}
+
+#[must_use]
+fn tokens(n: f64) -> String {
+    match n {
+        n if n >= 1e6 => format!("{:.1}M", n / 1e6),
+        n if n >= 1e3 => format!("{:.0}k", n / 1e3),
+        n => format!("{n:.0}"),
+    }
+}
+
+// One machine's plans; an agent that isn't logged in there is left out.
+async fn usage_lines(m: &Machine) -> Vec<String> {
+    fn failed(lines: &mut Vec<String>, agent: &str, e: &herdr::Error) {
+        lines.push(format!("*{agent}* unavailable: {}", head(&e.to_string(), 200)));
+    }
+    let (claude, cursor, pi) = tokio::join!(herdr::usage(m), herdr::cursor_usage(m), herdr::pi_usage(m));
+    let mut lines = vec![format!("**{}**", m.name)];
+    match claude {
+        Ok(None) => {}
+        Ok(Some(u)) => {
+            lines.push("*claude*".into());
+            let windows = [("5h", &u.five_hour), ("week", &u.seven_day), ("opus", &u.seven_day_opus), ("sonnet", &u.seven_day_sonnet)];
+            lines.extend(windows.iter().filter_map(|(n, w)| w.as_ref().map(|w| bar(n, w.utilization, w.resets_at.as_deref().and_then(unix)))));
+            if let Some(x) = u.extra_usage.filter(|x| x.is_enabled) {
+                lines.push(format!("extra ${:.2} of ${:.2}", x.used_credits / 100.0, x.monthly_limit / 100.0));
+            }
+        }
+        Err(e) => failed(&mut lines, "claude", &e),
+    }
+    match cursor {
+        Ok(None) => {}
+        Ok(Some(c)) => {
+            lines.push("*cursor*".into());
+            let reset = c.billing_cycle_end.map(|ms| (ms.0 / 1000.0) as i64);
+            if let Some(p) = c.plan_usage {
+                let windows = [("plan", p.total_percent_used, reset), ("auto", p.auto_percent_used, None), ("api", p.api_percent_used, None)];
+                lines.extend(windows.iter().filter_map(|(n, pct, r)| pct.map(|pct| bar(n, pct.0, *r))));
+                if let (Some(spent), Some(limit)) = (p.total_spend, p.limit) {
+                    let bonus = p.bonus_spend.filter(|b| b.0 > 0.0).map(|b| format!(", ${:.2} bonus", b.0 / 100.0)).unwrap_or_default();
+                    lines.push(format!("${:.2} spent: ${:.2} included{bonus}", spent.0 / 100.0, limit.0 / 100.0));
+                }
+            }
+            if let Some(o) = c.spend_limit_usage {
+                let (used, limit) = match o.limit_type.as_deref() {
+                    Some("team") => (o.pooled_used, o.pooled_limit),
+                    _ => (o.individual_used, o.individual_limit),
+                };
+                if let (Some(used), Some(limit)) = (used, limit) {
+                    let kind = o.limit_type.unwrap_or_default();
+                    lines.push(format!("on-demand ${:.2} of ${:.2} {kind}", used.0 / 100.0, limit.0 / 100.0));
+                }
+            }
+        }
+        Err(e) => failed(&mut lines, "cursor", &e),
+    }
+    match pi {
+        Ok(None) => {}
+        Ok(Some(p)) => {
+            let spend = |s: &herdr::Spend| format!("{} ${:.2}", tokens(s.tokens), s.cost);
+            lines.push(format!("*pi* {}", p.providers.join(", ")));
+            lines.push(format!("`24h {} · 7d {} · 30d {}`", spend(&p.day), spend(&p.week), spend(&p.month)));
+        }
+        Err(e) => failed(&mut lines, "pi", &e),
+    }
+    lines
 }
 
 #[must_use]
@@ -513,7 +579,7 @@ impl App {
                 .add_option(string("agent", "running agent").required(true).set_autocomplete(true)),
             CreateCommand::new("agents").description("Agents on every machine"),
             CreateCommand::new("worktrees").description("Worktrees on every machine"),
-            CreateCommand::new("usage").description("Claude plan limits on every machine"),
+            CreateCommand::new("usage").description("Claude, Cursor and pi usage on every machine"),
             CreateCommand::new("screen").description("This thread's terminal"),
             CreateCommand::new("keys")
                 .description("Send keys to this thread's agent")
@@ -668,21 +734,10 @@ impl App {
 
     async fn cmd_usage(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
         i.defer(http).await?;
+        let jobs: Vec<_> = self.machines().cloned().map(|m| tokio::spawn(async move { usage_lines(&m).await })).collect();
         let mut lines = vec![];
-        for m in self.machines() {
-            lines.push(format!("**{}**", m.name));
-            let u = match herdr::usage(m).await {
-                Ok(u) => u,
-                Err(e) => {
-                    lines.push(format!("unavailable: {}", head(&e.to_string(), 200)));
-                    continue;
-                }
-            };
-            let windows = [("5h", &u.five_hour), ("week", &u.seven_day), ("opus", &u.seven_day_opus), ("sonnet", &u.seven_day_sonnet)];
-            lines.extend(windows.iter().filter_map(|(n, w)| w.as_ref().map(|w| bar(n, w))));
-            if let Some(x) = u.extra_usage.filter(|x| x.is_enabled) {
-                lines.push(format!("extra ${:.2} of ${:.2}", x.used_credits / 100.0, x.monthly_limit / 100.0));
-            }
+        for job in jobs {
+            lines.extend(job.await?);
         }
         i.edit_response(http, edit(tail(&lines.join("\n"), 1990))).await?;
         Ok(())
