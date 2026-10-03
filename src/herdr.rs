@@ -441,16 +441,114 @@ pub struct Extra {
 }
 
 // Plan limits, as Claude Code's /usage reads them. The token stays on the machine and goes to curl on stdin.
-const USAGE: &str = r#"c=$(cat ~/.claude/.credentials.json 2>/dev/null || security find-generic-password -s 'Claude Code-credentials' -w) &&
+const USAGE: &str = r#"c=$(cat ~/.claude/.credentials.json 2>/dev/null || security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null) || exit 3
 printf 'Authorization: Bearer %s' "$(printf %s "$c" | jq -r .claudeAiOauth.accessToken)" |
 curl -sSf -m 10 -H @- -H 'anthropic-beta: oauth-2025-04-20' https://api.anthropic.com/api/oauth/usage"#;
 
-pub async fn usage(m: &Machine) -> Result<Usage> {
-    let o = sh(m, USAGE, SHORT).await?;
-    if o.code != Some(0) {
-        return Err(failure(&o));
+/// Cursor's current billing period, as the editor's own usage view reads it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Cursor {
+    pub billing_cycle_end: Option<Num>, // ms
+    pub plan_usage: Option<CursorPlan>,
+    pub spend_limit_usage: Option<CursorOnDemand>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorPlan {
+    pub total_percent_used: Option<Num>,
+    pub auto_percent_used: Option<Num>,
+    pub api_percent_used: Option<Num>,
+    pub total_spend: Option<Num>, // cents, included plus bonus
+    pub limit: Option<Num>,       // cents
+    pub bonus_spend: Option<Num>, // cents Cursor gives on top of the plan
+}
+
+/// On-demand spend past the plan: a team pool or a personal limit, in cents.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorOnDemand {
+    pub limit_type: Option<String>,
+    pub pooled_used: Option<Num>,
+    pub pooled_limit: Option<Num>,
+    pub individual_used: Option<Num>,
+    pub individual_limit: Option<Num>,
+}
+
+// The cursor-agent login: ~/.config/cursor/auth.json on Linux, the keychain on macOS.
+const CURSOR_USAGE: &str = r#"t=$(jq -er .accessToken ~/.config/cursor/auth.json 2>/dev/null || security find-generic-password -s cursor-access-token -w 2>/dev/null) || exit 3
+printf 'Authorization: Bearer %s' "$t" |
+curl -sSf -m 10 -H @- -H 'Content-Type: application/json' -H 'Connect-Protocol-Version: 1' -d '{}' https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"#;
+
+/// pi has no plan of its own: tokens and cost it logged per message, over any provider.
+#[derive(Deserialize)]
+pub struct Pi {
+    pub day: Spend,
+    pub week: Spend,
+    pub month: Spend,
+    pub providers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub struct Spend {
+    pub tokens: f64,
+    pub cost: f64, // dollars
+}
+
+const PI_USAGE: &str = r#"d=~/.pi/agent/sessions; [ -d "$d" ] || exit 3
+find "$d" -name '*.jsonl' -mtime -30 -exec cat {} + | jq -nRc --argjson now "$(date +%s)" '
+  [inputs | fromjson? | try (select(.message.usage) | {
+    age: ($now - (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdate)),
+    p: .message.provider, t: (.message.usage.totalTokens // 0), c: (.message.usage.cost.total // 0)
+  }) | select(.age < 2592000)] as $r
+  | def spend($s): [$r[] | select(.age < $s)] | {tokens: (map(.t) | add // 0), cost: (map(.c) | add // 0)};
+  {day: spend(86400), week: spend(604800), month: spend(2592000), providers: ([$r[].p | strings] | unique)}'"#;
+
+/// A number that proto JSON may send as a string (int64).
+#[derive(Clone, Copy, Deserialize)]
+#[serde(try_from = "NumOrString")]
+pub struct Num(pub f64);
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum NumOrString {
+    Num(f64),
+    String(String),
+}
+
+impl TryFrom<NumOrString> for Num {
+    type Error = std::num::ParseFloatError;
+    fn try_from(v: NumOrString) -> std::result::Result<Self, Self::Error> {
+        match v {
+            NumOrString::Num(n) => Ok(Self(n)),
+            NumOrString::String(s) => s.parse().map(Self),
+        }
     }
-    Ok(serde_json::from_str(&o.out)?)
+}
+
+// Exit code of a usage script when that agent isn't logged in on the machine.
+const ABSENT: i32 = 3;
+
+async fn usage_of<T: serde::de::DeserializeOwned>(m: &Machine, script: &str) -> Result<Option<T>> {
+    let o = sh(m, script, SHORT).await?;
+    match o.code {
+        Some(0) => Ok(Some(serde_json::from_str(&o.out)?)),
+        Some(ABSENT) => Ok(None),
+        _ => Err(failure(&o)),
+    }
+}
+
+pub async fn usage(m: &Machine) -> Result<Option<Usage>> {
+    usage_of(m, USAGE).await
+}
+
+pub async fn cursor_usage(m: &Machine) -> Result<Option<Cursor>> {
+    usage_of(m, CURSOR_USAGE).await
+}
+
+pub async fn pi_usage(m: &Machine) -> Result<Option<Pi>> {
+    usage_of(m, PI_USAGE).await
 }
 
 // Main clones only: a worktree has a .git file, a clone a .git directory.
@@ -558,6 +656,19 @@ fn last_reply(jsonl: &str) -> Option<Reply> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_usage_parses() -> Result<()> {
+        let c: Cursor = serde_json::from_str(
+            r#"{"billingCycleEnd":"1793156163000","planUsage":{"totalSpend":2701,"includedSpend":2000,"bonusSpend":701,"limit":2000,
+            "autoPercentUsed":0,"apiPercentUsed":33.7625,"totalPercentUsed":33.7625},
+            "spendLimitUsage":{"totalSpend":28903,"pooledLimit":"450000","pooledUsed":28903,"pooledRemaining":"421097","limitType":"team"}}"#,
+        )?;
+        assert_eq!(c.billing_cycle_end.map(|n| n.0), Some(1_793_156_163_000.0));
+        assert_eq!(c.plan_usage.and_then(|p| p.total_percent_used).map(|n| n.0), Some(33.7625));
+        assert_eq!(c.spend_limit_usage.and_then(|o| o.pooled_limit).map(|n| n.0), Some(450_000.0));
+        Ok(())
+    }
 
     #[test]
     fn reply_after_latest_prompt() {
