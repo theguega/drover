@@ -18,7 +18,13 @@ pub struct Entry {
 pub struct Journal(Mutex<Connection>);
 
 fn entry(r: &Row) -> Result<Entry> {
-    Ok(Entry { day: r.get(0)?, machine: r.get(1)?, repo: r.get(2)?, branch: r.get(3)?, text: r.get(4)? })
+    Ok(Entry {
+        day: r.get(0)?,
+        machine: r.get(1)?,
+        repo: r.get(2)?,
+        branch: r.get(3)?,
+        text: r.get(4)?,
+    })
 }
 
 const COLS: &str = "select day, machine, repo, branch, text from journal";
@@ -69,13 +75,17 @@ impl Journal {
             return Ok(vec![]);
         }
         let db = self.db();
-        let mut st = db.prepare(&format!("{COLS} where journal match ?1 order by rank limit ?2"))?;
+        let mut st = db.prepare(&format!(
+            "{COLS} where journal match ?1 order by rank limit ?2"
+        ))?;
         st.query_map(params![m, limit], entry)?.collect()
     }
 
     fn recent(&self, repo: &str, limit: u32) -> Result<Vec<Entry>> {
         let db = self.db();
-        let mut st = db.prepare(&format!("{COLS} where repo = ?1 order by rowid desc limit ?2"))?;
+        let mut st = db.prepare(&format!(
+            "{COLS} where repo = ?1 order by rowid desc limit ?2"
+        ))?;
         st.query_map(params![repo, limit], entry)?.collect()
     }
 
@@ -84,7 +94,11 @@ impl Journal {
         let mut seen = HashSet::new();
         let mut lines = vec![];
         let mut size = 0;
-        for e in self.recent(repo, 3)?.into_iter().chain(self.search(&format!("{repo} {prompt}"), 5)?) {
+        for e in self
+            .recent(repo, 3)?
+            .into_iter()
+            .chain(self.search(&format!("{repo} {prompt}"), 5)?)
+        {
             let s = format(&e);
             let n = s.chars().count();
             if seen.contains(&s) || size + n > cap {
@@ -98,7 +112,8 @@ impl Journal {
     }
 }
 
-pub const ENTRY_PROMPT: &str = "This task is done. Reply with only a journal entry, five lines at most, no preamble:
+pub const ENTRY_PROMPT: &str =
+    "This task is done. Reply with only a journal entry, five lines at most, no preamble:
 what: <one line>
 why: <one line>
 outcome: <one line, include commit or PR if any>
@@ -122,7 +137,10 @@ mod tests {
         j.add(&e("drover", "what: rust port of the discord bridge"))?;
         j.add(&e("other", "what: unrelated sqlite tuning"))?;
 
-        assert_eq!(terms("a Rust, PORT!! of x_y"), r#""rust" OR "port" OR "x_y""#);
+        assert_eq!(
+            terms("a Rust, PORT!! of x_y"),
+            r#""rust" OR "port" OR "x_y""#
+        );
         assert_eq!(j.search("rust", 5)?.len(), 1);
         assert!(j.search("a b", 5)?.is_empty());
 

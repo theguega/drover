@@ -56,8 +56,16 @@ fn socket_path() -> PathBuf {
 }
 
 /// A silent drop (wifi switch, NAT timeout) ends ssh in ~45 s instead of whenever TCP gives up.
-pub const SSH_OPTS: [&str; 8] =
-    ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"];
+pub const SSH_OPTS: [&str; 8] = [
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectTimeout=10",
+    "-o",
+    "ServerAliveInterval=15",
+    "-o",
+    "ServerAliveCountMax=3",
+];
 
 fn relay(host: &str) -> Result<Child> {
     Ok(Command::new("ssh")
@@ -97,9 +105,14 @@ struct WireError {
 impl Wire {
     fn into_result<T: DeserializeOwned>(self) -> Result<T> {
         match (self.result, self.error) {
-            (_, Some(e)) => Err(Error::Herdr { code: e.code.into(), message: e.message }),
+            (_, Some(e)) => Err(Error::Herdr {
+                code: e.code.into(),
+                message: e.message,
+            }),
             (Some(r), None) => Ok(serde_json::from_value(r)?),
-            (None, None) => Err(Error::failed("herdr reply has neither result nor error".into())),
+            (None, None) => Err(Error::failed(
+                "herdr reply has neither result nor error".into(),
+            )),
         }
     }
 }
@@ -122,12 +135,24 @@ pub struct Link {
 impl Link {
     #[must_use]
     pub fn new(host: Option<String>) -> Self {
-        Self { host, relay: Mutex::new(None), next: AtomicU64::new(1) }
+        Self {
+            host,
+            relay: Mutex::new(None),
+            next: AtomicU64::new(1),
+        }
     }
 
-    pub async fn call<T: DeserializeOwned>(&self, method: &str, params: Value, timeout: Duration) -> Result<T> {
+    pub async fn call<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<T> {
         let id = format!("d{}", self.next.fetch_add(1, Ordering::Relaxed));
-        let line = format!("{}\n", json!({"id": id, "method": method, "params": params}));
+        let line = format!(
+            "{}\n",
+            json!({"id": id, "method": method, "params": params})
+        );
         let reply = tokio::time::timeout(timeout, self.send(&id, &line)).await;
         let reply = match reply {
             Ok(r) => r?,
@@ -135,7 +160,10 @@ impl Link {
                 // a write into a dead ssh still succeeds, so a timeout is the only sign; calls
                 // already waiting keep the old relay alive until they finish, new ones start fresh
                 if let Some(r) = self.relay.lock().await.take() {
-                    r.pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+                    r.pending
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&id);
                 }
                 return Err(Error::Timeout(method.into()));
             }
@@ -148,13 +176,23 @@ impl Link {
             let mut s = UnixStream::connect(socket_path()).await?;
             s.write_all(line.as_bytes()).await?;
             let mut lines = BufReader::new(s).lines();
-            return Ok(serde_json::from_str(&lines.next_line().await?.ok_or_else(closed)?)?);
+            return Ok(serde_json::from_str(
+                &lines.next_line().await?.ok_or_else(closed)?,
+            )?);
         };
         let r = self.relay(host).await?;
         let (tx, rx) = oneshot::channel();
-        r.pending.lock().unwrap_or_else(PoisonError::into_inner).insert(id.into(), tx);
+        r.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id.into(), tx);
         let sent = r.stdin.lock().await.write_all(line.as_bytes()).await;
-        if let Some(reply) = async { sent.ok()?; rx.await.ok() }.await {
+        if let Some(reply) = async {
+            sent.ok()?;
+            rx.await.ok()
+        }
+        .await
+        {
             return Ok(reply);
         }
         // the ssh died; the next call starts a fresh one
@@ -178,16 +216,30 @@ impl Link {
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                let Ok(w) = serde_json::from_str::<Wire>(&line) else { continue };
-                let tx = w.id.as_ref().and_then(|id| routes.lock().unwrap_or_else(PoisonError::into_inner).remove(id));
+                let Ok(w) = serde_json::from_str::<Wire>(&line) else {
+                    continue;
+                };
+                let tx = w.id.as_ref().and_then(|id| {
+                    routes
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(id)
+                });
                 if let Some(tx) = tx {
                     let _ = tx.send(w);
                 }
             }
             // dropping the senders fails every call still waiting
-            routes.lock().unwrap_or_else(PoisonError::into_inner).clear();
+            routes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
         });
-        let r = Arc::new(Relay { stdin: Mutex::new(stdin), pending, _child: child });
+        let r = Arc::new(Relay {
+            stdin: Mutex::new(stdin),
+            pending,
+            _child: child,
+        });
         *slot = Some(r.clone());
         Ok(r)
     }
@@ -219,22 +271,32 @@ impl Events {
             json!({"type": "workspace.closed"}),
             json!({"type": "pane.agent_detected"}),
         ];
-        subs.extend(panes.iter().map(|p| json!({"type": "pane.agent_status_changed", "pane_id": p.0})));
-        let line = format!("{}\n", json!({"id": "sub", "method": "events.subscribe", "params": {"subscriptions": subs}}));
+        subs.extend(
+            panes
+                .iter()
+                .map(|p| json!({"type": "pane.agent_status_changed", "pane_id": p.0})),
+        );
+        let line = format!(
+            "{}\n",
+            json!({"id": "sub", "method": "events.subscribe", "params": {"subscriptions": subs}})
+        );
 
-        let (mut write, read, child): (Box<dyn AsyncWrite + Send + Unpin>, Box<dyn AsyncRead + Send + Unpin>, _) =
-            match host {
-                None => {
-                    let (r, w) = UnixStream::connect(socket_path()).await?.into_split();
-                    (Box::new(w), Box::new(r), None)
-                }
-                Some(host) => {
-                    let mut child = relay(host)?;
-                    let w = child.stdin.take().ok_or_else(closed)?;
-                    let r = child.stdout.take().ok_or_else(closed)?;
-                    (Box::new(w), Box::new(r), Some(child))
-                }
-            };
+        let (mut write, read, child): (
+            Box<dyn AsyncWrite + Send + Unpin>,
+            Box<dyn AsyncRead + Send + Unpin>,
+            _,
+        ) = match host {
+            None => {
+                let (r, w) = UnixStream::connect(socket_path()).await?.into_split();
+                (Box::new(w), Box::new(r), None)
+            }
+            Some(host) => {
+                let mut child = relay(host)?;
+                let w = child.stdin.take().ok_or_else(closed)?;
+                let r = child.stdout.take().ok_or_else(closed)?;
+                (Box::new(w), Box::new(r), Some(child))
+            }
+        };
         write.write_all(line.as_bytes()).await?;
 
         let mut lines = BufReader::new(read).lines();
@@ -243,28 +305,43 @@ impl Events {
             .map_err(|_| Error::Timeout("events.subscribe".into()))??
             .ok_or_else(closed)?;
         serde_json::from_str::<Wire>(&ack)?.into_result::<IgnoredResult>()?;
-        Ok(Self { lines, _write: write, _child: child })
+        Ok(Self {
+            lines,
+            _write: write,
+            _child: child,
+        })
     }
 
     pub async fn recv(&mut self) -> Result<Push> {
         loop {
             let line = self.lines.next_line().await?.ok_or_else(closed)?;
-            let Ok(w) = serde_json::from_str::<Wire>(&line) else { continue };
+            let Ok(w) = serde_json::from_str::<Wire>(&line) else {
+                continue;
+            };
             if let Some(e) = w.error {
                 if e.code == "events_lost" {
                     return Ok(Push::Lost);
                 }
-                return Err(Error::Herdr { code: e.code.into(), message: e.message });
+                return Err(Error::Herdr {
+                    code: e.code.into(),
+                    message: e.message,
+                });
             }
-            let (Some(event), Some(data)) = (w.event, w.data) else { continue };
+            let (Some(event), Some(data)) = (w.event, w.data) else {
+                continue;
+            };
             // herdr 0.9.3 names this one with dots and the others with underscores
             return Ok(match event.replace('.', "_").as_str() {
                 "pane_agent_status_changed" => {
                     let d: Data = serde_json::from_value(data)?;
                     Push::Status(d.pane_id, d.agent_status.unwrap_or(Status::Unknown))
                 }
-                "pane_agent_detected" => Push::Detected(serde_json::from_value::<Data>(data)?.pane_id),
-                "pane_closed" | "pane_exited" => Push::Gone(serde_json::from_value::<Data>(data)?.pane_id),
+                "pane_agent_detected" => {
+                    Push::Detected(serde_json::from_value::<Data>(data)?.pane_id)
+                }
+                "pane_closed" | "pane_exited" => {
+                    Push::Gone(serde_json::from_value::<Data>(data)?.pane_id)
+                }
                 "workspace_closed" => Push::Reconcile,
                 _ => continue,
             });
@@ -280,4 +357,3 @@ struct Data {
     pane_id: PaneId,
     agent_status: Option<Status>,
 }
-

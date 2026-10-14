@@ -25,7 +25,11 @@ impl Machine {
     #[must_use]
     pub fn new(name: String, reach: Reach) -> Self {
         let host = (reach == Reach::Ssh).then(|| name.clone());
-        Self { name, reach, link: Arc::new(Link::new(host)) }
+        Self {
+            name,
+            reach,
+            link: Arc::new(Link::new(host)),
+        }
     }
 
     #[must_use]
@@ -119,8 +123,15 @@ pub struct Name(String);
 impl Name {
     pub fn parse(s: &str) -> Result<Self> {
         // a leading dash would reach herdr-wt as an option
-        let ok = !s.is_empty() && !s.starts_with('-') && s.chars().all(|c| c.is_ascii_alphanumeric() || "#_./-".contains(c));
-        if ok { Ok(Self(s.into())) } else { Err(Error::Unsafe) }
+        let ok = !s.is_empty()
+            && !s.starts_with('-')
+            && s.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "#_./-".contains(c));
+        if ok {
+            Ok(Self(s.into()))
+        } else {
+            Err(Error::Unsafe)
+        }
     }
 
     #[must_use]
@@ -148,7 +159,9 @@ struct Session {
 impl Agent {
     #[must_use]
     pub fn session(&self) -> Option<SessionId> {
-        self.agent_session.as_ref().and_then(|s| SessionId::parse(&s.value))
+        self.agent_session
+            .as_ref()
+            .and_then(|s| SessionId::parse(&s.value))
     }
 }
 
@@ -230,7 +243,10 @@ impl Error {
     }
 
     pub(crate) fn failed(message: String) -> Self {
-        Self::Herdr { code: Code::Other("failed".into()), message }
+        Self::Herdr {
+            code: Code::Other("failed".into()),
+            message,
+        }
     }
 }
 
@@ -262,7 +278,12 @@ async fn sh(m: &Machine, script: &str, timeout: Duration) -> Result<Out> {
             c
         }
     };
-    let child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()?;
+    let child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
     let o = tokio::time::timeout(timeout, child.wait_with_output())
         .await
         .map_err(|_| Error::Timeout(m.name.clone()))??;
@@ -274,7 +295,11 @@ async fn sh(m: &Machine, script: &str, timeout: Duration) -> Result<Out> {
 }
 
 fn failure(o: &Out) -> Error {
-    let text = if o.err.trim().is_empty() { &o.out } else { &o.err };
+    let text = if o.err.trim().is_empty() {
+        &o.out
+    } else {
+        &o.err
+    };
     Error::failed(match (text.trim(), o.code) {
         ("", Some(c)) => format!("exit {c}"),
         ("", None) => "killed".into(),
@@ -287,7 +312,10 @@ pub async fn agents(m: &Machine) -> Result<Vec<Agent>> {
     struct List {
         agents: Vec<Agent>,
     }
-    Ok(m.link.call::<List>("agent.list", json!({}), SHORT).await?.agents)
+    Ok(m.link
+        .call::<List>("agent.list", json!({}), SHORT)
+        .await?
+        .agents)
 }
 
 pub async fn panes(m: &Machine) -> Result<Vec<PaneId>> {
@@ -299,7 +327,13 @@ pub async fn panes(m: &Machine) -> Result<Vec<PaneId>> {
     struct Pane {
         pane_id: PaneId,
     }
-    Ok(m.link.call::<List>("pane.list", json!({}), SHORT).await?.panes.into_iter().map(|p| p.pane_id).collect())
+    Ok(m.link
+        .call::<List>("pane.list", json!({}), SHORT)
+        .await?
+        .panes
+        .into_iter()
+        .map(|p| p.pane_id)
+        .collect())
 }
 
 // Same entry point as the desk popup: a new name, an existing branch, or #pr.
@@ -328,7 +362,11 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
         branch: String,
     }
 
-    let script = format!("cd {ROOT}/{} && herdr-wt '{}' --no-focus", repo.as_str(), r#ref.as_str());
+    let script = format!(
+        "cd {ROOT}/{} && herdr-wt '{}' --no-focus",
+        repo.as_str(),
+        r#ref.as_str()
+    );
     let o = sh(m, &script, LONG).await?;
     if o.code != Some(0) {
         return Err(failure(&o));
@@ -346,20 +384,40 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
 // A reopened workspace keeps its shell wherever it was left, so cd to the checkout first.
 pub async fn start(m: &Machine, name: &str, kind: &str, pane: &PaneId, path: &str) -> Result<()> {
     let cd = json!({"pane_id": pane.0, "text": format!("cd '{path}'"), "keys": ["Enter"]});
-    m.link.call::<IgnoredAny>("pane.send_input", cd, SHORT).await?;
+    m.link
+        .call::<IgnoredAny>("pane.send_input", cd, SHORT)
+        .await?;
     let params = json!({"name": name, "kind": kind, "pane_id": pane.0, "timeout_ms": 90_000});
-    match m.link.call::<IgnoredAny>("agent.start", params, Duration::from_secs(100)).await {
+    match m
+        .link
+        .call::<IgnoredAny>("agent.start", params, Duration::from_secs(100))
+        .await
+    {
         Err(e) if !e.is(&Code::AgentNotReady) => Err(e),
         _ => Ok(()),
     }
 }
 
 pub async fn prompt(m: &Machine, pane: &PaneId, text: &str) -> Result<()> {
-    m.link.call::<IgnoredAny>("agent.prompt", json!({"target": pane.0, "text": text}), LONG).await.map(drop)
+    m.link
+        .call::<IgnoredAny>(
+            "agent.prompt",
+            json!({"target": pane.0, "text": text}),
+            LONG,
+        )
+        .await
+        .map(drop)
 }
 
 pub async fn keys(m: &Machine, pane: &PaneId, keys: &[&str]) -> Result<()> {
-    m.link.call::<IgnoredAny>("agent.send_keys", json!({"target": pane.0, "keys": keys}), SHORT).await.map(drop)
+    m.link
+        .call::<IgnoredAny>(
+            "agent.send_keys",
+            json!({"target": pane.0, "keys": keys}),
+            SHORT,
+        )
+        .await
+        .map(drop)
 }
 
 pub async fn screen(m: &Machine, pane: &PaneId, lines: u32) -> Result<String> {
@@ -372,11 +430,22 @@ pub async fn screen(m: &Machine, pane: &PaneId, lines: u32) -> Result<String> {
         text: String,
     }
     let params = json!({"target": pane.0, "source": "recent_unwrapped", "lines": lines});
-    Ok(m.link.call::<Read>("agent.read", params, SHORT).await?.read.text)
+    Ok(m.link
+        .call::<Read>("agent.read", params, SHORT)
+        .await?
+        .read
+        .text)
 }
 
 pub async fn close(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
-    m.link.call::<IgnoredAny>("workspace.close", json!({"workspace_id": workspace.0}), LONG).await.map(drop)
+    m.link
+        .call::<IgnoredAny>(
+            "workspace.close",
+            json!({"workspace_id": workspace.0}),
+            LONG,
+        )
+        .await
+        .map(drop)
 }
 
 // Through herdr-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
@@ -415,7 +484,11 @@ pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
 // Same view as `wt ls` at the desk: every repo's worktrees with their herdr state.
 pub async fn worktrees(m: &Machine) -> Result<String> {
     let o = sh(m, "cd ~ && herdr-wt ls", Duration::from_secs(30)).await?;
-    let text = if o.out.trim().is_empty() { o.err } else { o.out };
+    let text = if o.out.trim().is_empty() {
+        o.err
+    } else {
+        o.out
+    };
     Ok(text.trim_end().into())
 }
 
@@ -554,8 +627,17 @@ pub async fn pi_usage(m: &Machine) -> Result<Option<Pi>> {
 
 // Main clones only: a worktree has a .git file, a clone a .git directory.
 pub async fn repos(m: &Machine) -> Result<Vec<String>> {
-    let o = sh(m, &format!(r#"for d in {ROOT}/*/; do [ -d "$d.git" ] && basename "$d"; done"#), SHORT).await?;
-    Ok(o.out.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    let o = sh(
+        m,
+        &format!(r#"for d in {ROOT}/*/; do [ -d "$d.git" ] && basename "$d"; done"#),
+        SHORT,
+    )
+    .await?;
+    Ok(o.out
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 // ── transcript ──────────────────────────────────────────────
@@ -615,7 +697,11 @@ impl Line {
             Some(Content::Blocks(b)) => b.as_slice(),
             _ => &[],
         };
-        blocks.iter().filter(|b| b.kind == "text").filter_map(|b| b.text.as_deref()).map(str::trim)
+        blocks
+            .iter()
+            .filter(|b| b.kind == "text")
+            .filter_map(|b| b.text.as_deref())
+            .map(str::trim)
     }
 }
 
@@ -628,8 +714,14 @@ pub struct Reply {
 pub async fn reply(m: &Machine, session: &SessionId) -> Option<Reply> {
     let file = format!("{}.jsonl", session.0);
     if m.reach == Reach::Ssh {
-        let o = sh(m, &format!("cat ~/.claude/projects/*/{file}"), SHORT).await.ok()?;
-        return if o.code == Some(0) { last_reply(&o.out) } else { None };
+        let o = sh(m, &format!("cat ~/.claude/projects/*/{file}"), SHORT)
+            .await
+            .ok()?;
+        return if o.code == Some(0) {
+            last_reply(&o.out)
+        } else {
+            None
+        };
     }
     let projects = std::path::Path::new(&std::env::var("HOME").ok()?).join(".claude/projects");
     let mut dirs = tokio::fs::read_dir(projects).await.ok()?;
@@ -643,7 +735,10 @@ pub async fn reply(m: &Machine, session: &SessionId) -> Option<Reply> {
 
 #[must_use]
 fn last_reply(jsonl: &str) -> Option<Reply> {
-    let lines: Vec<Line> = jsonl.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let lines: Vec<Line> = jsonl
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
     let from = lines.iter().rposition(Line::is_prompt).unwrap_or(0);
     lines
         .iter()
@@ -651,7 +746,10 @@ fn last_reply(jsonl: &str) -> Option<Reply> {
         .filter(|e| e.kind == "assistant")
         .flat_map(|e| e.texts().filter(|t| !t.is_empty()).map(move |t| (e, t)))
         .last()
-        .map(|(e, t)| Reply { id: e.uuid.clone(), text: t.into() })
+        .map(|(e, t)| Reply {
+            id: e.uuid.clone(),
+            text: t.into(),
+        })
 }
 
 #[cfg(test)]
@@ -666,8 +764,16 @@ mod tests {
             "spendLimitUsage":{"totalSpend":28903,"pooledLimit":"450000","pooledUsed":28903,"pooledRemaining":"421097","limitType":"team"}}"#,
         )?;
         assert_eq!(c.billing_cycle_end.map(|n| n.0), Some(1_793_156_163_000.0));
-        assert_eq!(c.plan_usage.and_then(|p| p.total_percent_used).map(|n| n.0), Some(33.7625));
-        assert_eq!(c.spend_limit_usage.and_then(|o| o.pooled_limit).map(|n| n.0), Some(450_000.0));
+        assert_eq!(
+            c.plan_usage.and_then(|p| p.total_percent_used).map(|n| n.0),
+            Some(33.7625)
+        );
+        assert_eq!(
+            c.spend_limit_usage
+                .and_then(|o| o.pooled_limit)
+                .map(|n| n.0),
+            Some(450_000.0)
+        );
         Ok(())
     }
 
@@ -684,7 +790,10 @@ mod tests {
         ]
         .join("\n");
         let r = last_reply(&jsonl);
-        assert_eq!(r.as_ref().map(|r| (r.id.as_str(), r.text.as_str())), Some(("a2", "new")));
+        assert_eq!(
+            r.as_ref().map(|r| (r.id.as_str(), r.text.as_str())),
+            Some(("a2", "new"))
+        );
 
         let only_prompt = r#"{"type":"user","message":{"content":"hi"}}"#;
         assert!(last_reply(only_prompt).is_none());

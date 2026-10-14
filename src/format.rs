@@ -43,18 +43,31 @@ fn is_rule(t: &str) -> bool {
 
 fn cells(row: &str) -> Vec<String> {
     let row = row.trim().trim_start_matches('|').trim_end_matches('|');
-    row.split('|').map(|c| c.trim().replace("**", "").replace('`', "")).collect()
+    row.split('|')
+        .map(|c| c.trim().replace("**", "").replace('`', ""))
+        .collect()
 }
 
 fn is_separator(row: &[String]) -> bool {
-    row.iter().all(|c| !c.is_empty() && c.chars().all(|x| matches!(x, '-' | ':' | ' ')))
+    row.iter()
+        .all(|c| !c.is_empty() && c.chars().all(|x| matches!(x, '-' | ':' | ' ')))
 }
 
 fn render_table(lines: &[&str]) -> String {
-    let rows: Vec<Vec<String>> = lines.iter().map(|l| cells(l)).filter(|r| !is_separator(r)).collect();
+    let rows: Vec<Vec<String>> = lines
+        .iter()
+        .map(|l| cells(l))
+        .filter(|r| !is_separator(r))
+        .collect();
     let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
     let widths: Vec<usize> = (0..cols)
-        .map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| c.chars().count()).max().unwrap_or(0))
+        .map(|i| {
+            rows.iter()
+                .filter_map(|r| r.get(i))
+                .map(|c| c.chars().count())
+                .max()
+                .unwrap_or(0)
+        })
         .collect();
     if widths.iter().sum::<usize>() + 3 * cols.saturating_sub(1) <= NARROW {
         let line = |r: &Vec<String>| {
@@ -62,25 +75,41 @@ fn render_table(lines: &[&str]) -> String {
                 let c = r.get(i).map_or("", String::as_str);
                 format!("{c:<w$}", w = widths.get(i).copied().unwrap_or(0))
             });
-            padded.collect::<Vec<_>>().join(" │ ").trim_end().to_string()
+            padded
+                .collect::<Vec<_>>()
+                .join(" │ ")
+                .trim_end()
+                .to_string()
         };
         let mut out = vec!["```".to_string()];
         let mut it = rows.iter();
         if let Some(h) = it.next() {
             out.push(line(h));
-            out.push(widths.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("─┼─"));
+            out.push(
+                widths
+                    .iter()
+                    .map(|w| "─".repeat(*w))
+                    .collect::<Vec<_>>()
+                    .join("─┼─"),
+            );
         }
         out.extend(it.map(line));
         out.push("```".into());
         return out.join("\n");
     }
-    let Some((header, body)) = rows.split_first() else { return String::new() };
+    let Some((header, body)) = rows.split_first() else {
+        return String::new();
+    };
     body.iter()
         .map(|r| {
             let mut it = r.iter().zip(header).filter(|(c, _)| !c.is_empty());
             let first = it.next().map_or(String::new(), |(c, _)| format!("**{c}**"));
             let rest: Vec<String> = it.map(|(c, h)| format!("{h}: {c}")).collect();
-            if rest.is_empty() { format!("- {first}") } else { format!("- {first} — {}", rest.join(" · ")) }
+            if rest.is_empty() {
+                format!("- {first}")
+            } else {
+                format!("- {first} — {}", rest.join(" · "))
+            }
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -107,7 +136,11 @@ pub fn chunks(text: &str, max: usize) -> Vec<String> {
         }
         cur.push_str(&line);
         if line.trim_start().starts_with("```") {
-            fence = if fence.is_some() { None } else { Some(line.trim().to_string()) };
+            fence = if fence.is_some() {
+                None
+            } else {
+                Some(line.trim().to_string())
+            };
         }
     }
     if !cur.trim().is_empty() {
