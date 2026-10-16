@@ -762,15 +762,7 @@ impl App {
             inbox: Vec::new(),
         });
         self.save().await;
-        herdr::start(
-            &self.host,
-            &format!("scout-{id}"),
-            harness::DEFAULT,
-            &pane,
-            &cwd,
-            None,
-        )
-        .await?;
+        herdr::start(&self.host, &id, harness::DEFAULT, &pane, &cwd, None).await?;
         Ok(match thread {
             Some(th) => format!("<#{th}>"),
             None => pane.0,
