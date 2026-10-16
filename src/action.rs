@@ -24,7 +24,8 @@ pub enum Action {
     Screen(Target),
     Mate(Mate),
     Scout(Scout),
-    Brief(Brief),
+    Brief(Note),
+    Escalate(Note),
     ScoutClose(Target),
     Take(Target),
     Send(Send),
@@ -48,7 +49,7 @@ pub struct New {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct Brief {
+pub struct Note {
     pub mate: String,
     pub text: String,
 }
@@ -162,6 +163,7 @@ impl App {
             Action::Mate(m) => self.cmd_mate(http, &m.name).await,
             Action::Scout(s) => self.cmd_scout(http, &s.prompt).await,
             Action::Brief(b) => self.cmd_brief(&b),
+            Action::Escalate(n) => self.cmd_escalate(http, &n).await,
             Action::ScoutClose(t) => self.cmd_scout_close(http, &t.thread).await,
             Action::Send(s) => self.cmd_send(&s).await,
             Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
@@ -445,8 +447,35 @@ impl App {
     }
 
     // A scout: a short look with no repo, in its own folder and pane, with nothing to journal.
+    // The mate's thread: the one task the mate runs in its own pane.
+    pub(crate) async fn mate_thread(&self, name: &str) -> Option<ChannelId> {
+        for (id, cell) in self.cells() {
+            let t = cell.lock().await;
+            if t.mate.as_deref() == Some(name) && t.repo == "mates" {
+                return Some(id);
+            }
+        }
+        None
+    }
+
+    // A question for the desk from a mate: posted in its thread and kept in its log.
+    async fn cmd_escalate(&self, http: &Http, n: &Note) -> Result<String> {
+        let name = mate_name(&n.mate)?;
+        let th = self
+            .mate_thread(&name)
+            .await
+            .context(format!("no running mate {name}"))?;
+        log::append(
+            &self.mates.join("state").join(&name),
+            log::Event::Escalated,
+            &n.text,
+        )?;
+        th.say(http, &n.text).await?;
+        Ok(format!("escalated to <#{th}>"))
+    }
+
     // A note for the mate, in its log, for it to read when it next looks.
-    fn cmd_brief(&self, b: &Brief) -> Result<String> {
+    fn cmd_brief(&self, b: &Note) -> Result<String> {
         let name = mate_name(&b.mate)?;
         log::append(
             &self.mates.join("state").join(&name),
@@ -627,19 +656,14 @@ impl App {
                 mate: Some(name),
             };
             self.cmd_attach(http, &at).await?;
-        } else if let Some(name) = near {
-            for (id, cell) in self.cells() {
-                let t = cell.lock().await;
-                if t.mate.as_deref() == Some(name.as_str()) && t.repo == "mates" {
-                    let text = format!(
-                        "a new agent on {repo} {branch} at {} is not linked to you: `drover link --machine {machine} --pane {} --mate {name}` links it",
-                        pane.0, pane.0
-                    );
-                    drop(t);
-                    id.say(http, text).await?;
-                    break;
-                }
-            }
+        } else if let Some(name) = near
+            && let Some(th) = self.mate_thread(&name).await
+        {
+            let text = format!(
+                "a new agent on {repo} {branch} at {} is not linked to you: `drover link --machine {machine} --pane {} --mate {name}` links it",
+                pane.0, pane.0
+            );
+            th.say(http, text).await?;
         }
         Ok(())
     }

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::action::{Action, Attach, Brief, Done, Keys, Mate, New, Recall, Scout, Send, Target};
+use crate::action::{Action, Attach, Done, Keys, Mate, New, Note, Recall, Scout, Send, Target};
 
 pub enum Invocation {
     Serve,
@@ -27,6 +27,8 @@ Commands (Discord command in brackets):
              [/attach] follow an agent already running in herdr. P is from `agents`.
   link       --machine M --pane P --mate NAME
              attach a running agent to a mate: the mate sees it and the desk keeps the pane
+  escalate   --mate NAME --text \"...\"
+             post a question for the desk in the mate's thread, and keep it in its log
   brief      --mate NAME --text \"...\"
              add a note to a mate's log for it to read
   agents     [/agents] agents on every machine, with the thread each one is bound to
@@ -101,7 +103,11 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
             pane: flags.req("pane")?,
             mate: Some(flags.req("mate")?),
         }),
-        "brief" => Action::Brief(Brief {
+        "escalate" => Action::Escalate(Note {
+            mate: flags.req("mate")?,
+            text: flags.req("text")?,
+        }),
+        "brief" => Action::Brief(Note {
             mate: flags.req("mate")?,
             text: flags.req("text")?,
         }),
