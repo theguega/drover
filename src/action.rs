@@ -18,6 +18,7 @@ pub enum Action {
     Usage,
     Config,
     Screen(Target),
+    Mate(Mate),
     Take(Target),
     Release(Target),
     Keys(Keys),
@@ -34,6 +35,11 @@ pub struct New {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub scout: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Mate {
+    pub name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -66,6 +72,27 @@ pub struct Recall {
     pub query: String,
 }
 
+// Most mates a desk runs at once.
+const MAX_MATES: usize = 3;
+
+// What a mate is told before its first message: its instructions live in mates/AGENTS.md.
+const MATE_ROLE: &str = "You are a mate. Your instructions are in AGENTS.md in this folder. Wait for the desk's first message in this thread.";
+
+// Agent names take 32 characters, and "mate-" takes five of them.
+fn mate_name(s: &str) -> Result<String> {
+    let valid = s.len() <= 26
+        && s.starts_with(|c: char| c.is_ascii_lowercase())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if valid {
+        Ok(s.into())
+    } else {
+        bail!(
+            "a mate name is lowercase letters, digits, - or _, starting with a letter, up to 26 characters"
+        )
+    }
+}
+
 impl App {
     pub async fn act(&self, http: &Http, action: Action) -> Result<String> {
         match action {
@@ -75,6 +102,7 @@ impl App {
             Action::Worktrees => self.cmd_worktrees().await,
             Action::Usage => self.cmd_usage().await,
             Action::Config => Ok(self.config()),
+            Action::Mate(m) => self.cmd_mate(http, &m.name).await,
             Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
             Action::Release(t) => self.set_owner(&t.thread, Owner::Mate).await,
             Action::Screen(t) => {
@@ -164,6 +192,7 @@ impl App {
                 branch: wt.branch.clone(),
                 origin: Origin::Opened,
                 owner: Owner::User,
+                mate: None,
                 phase: Phase::Starting { prompt },
                 status: None,
                 session: None,
@@ -220,6 +249,7 @@ impl App {
                 branch: String::new(),
                 origin: Origin::Attached,
                 owner: Owner::User,
+                mate: None,
                 phase: Phase::Idle,
                 status: Some(a.agent_status),
                 session,
@@ -301,13 +331,88 @@ impl App {
         .join("\n")
     }
 
+    async fn cmd_mate(&self, http: &Http, name: &str) -> Result<String> {
+        let name = mate_name(name)?;
+        let mut live = 0;
+        for (_, cell) in self.cells() {
+            let t = cell.lock().await;
+            if t.phase == Phase::Gone {
+                continue;
+            }
+            match t.mate.as_deref() {
+                Some(n) if n == name => bail!("mate {name} is already running"),
+                Some(_) => live += 1,
+                None => {}
+            }
+        }
+        if live >= MAX_MATES {
+            bail!("{MAX_MATES} mates already run, close one first");
+        }
+
+        let cwd = self.mates.to_string_lossy().into_owned();
+        let (workspace, pane) = herdr::mate_pane(&self.host, &cwd).await?;
+        let th = self
+            .open_thread(http, &format!("mate · {name} · {}", self.host.name))
+            .await?;
+        let head = th.say(http, format!("mate `{name}` in `{cwd}`")).await?;
+        self.insert(
+            th,
+            Task {
+                machine: self.host.name.clone(),
+                pane: pane.clone(),
+                workspace,
+                kind: harness::DEFAULT.into(),
+                repo: "mates".into(),
+                branch: String::new(),
+                origin: Origin::Attached,
+                owner: Owner::Mate,
+                mate: Some(name.clone()),
+                phase: Phase::Starting {
+                    prompt: MATE_ROLE.into(),
+                },
+                status: None,
+                session: None,
+                last_reply: None,
+                prompt_msg: Some(head.id),
+                dialog_msg: None,
+                queued: None,
+            },
+        );
+        self.save().await;
+        log::append(
+            &self.mates.join("state").join(&name),
+            log::Event::Started,
+            &pane.0,
+        )?;
+        herdr::start(
+            &self.host,
+            &format!("mate-{name}"),
+            harness::DEFAULT,
+            &pane,
+            &cwd,
+            None,
+        )
+        .await?;
+        Ok(format!("<#{th}>"))
+    }
+
     async fn set_owner(&self, thread: &str, owner: Owner) -> Result<String> {
         let cell = self.task_in(id(thread)?)?;
-        let text = {
+        let (text, mate) = {
             let mut t = cell.lock().await;
             t.owner = owner;
-            format!("{} is {}", t.pane.0, owner.as_str())
+            (
+                format!("{} is {}", t.pane.0, owner.as_str()),
+                t.mate.clone(),
+            )
         };
+        if let Some(name) = mate {
+            log::append(
+                &self.mates.join("state").join(name),
+                log::Event::Owner,
+                owner.as_str(),
+            )?;
+        }
         self.save().await;
         Ok(text)
     }
@@ -364,5 +469,18 @@ impl App {
         self.save().await;
         th.create_reaction(http, msg.id, emoji("👀")).await?;
         Ok("asked the agent for the journal entry".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mate_names_are_short_and_lowercase() {
+        assert!(mate_name("reviewer-2").is_ok());
+        assert!(mate_name("Reviewer").is_err());
+        assert!(mate_name("2fast").is_err());
+        assert!(mate_name(&"a".repeat(27)).is_err());
     }
 }

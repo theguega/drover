@@ -514,6 +514,126 @@ pub async fn worktrees(m: &Machine) -> Result<String> {
     Ok(text.trim_end().into())
 }
 
+// The mates tab of the drover workspace. The first mate creates both, later mates split from a pane in it.
+#[derive(Deserialize)]
+struct PaneRef {
+    pane_id: PaneId,
+    tab_id: String,
+}
+
+#[derive(Deserialize)]
+struct Created {
+    root_pane: PaneRef,
+}
+
+#[derive(Deserialize)]
+struct CreatedWorkspace {
+    root_pane: PaneRef,
+    workspace: WorkspaceRef,
+}
+
+#[derive(Deserialize)]
+struct WorkspaceRef {
+    workspace_id: WorkspaceId,
+}
+
+pub async fn mate_pane(m: &Machine, cwd: &str) -> Result<(WorkspaceId, PaneId)> {
+    #[derive(Deserialize)]
+    struct Workspaces {
+        workspaces: Vec<Ws>,
+    }
+    #[derive(Deserialize)]
+    struct Ws {
+        workspace_id: WorkspaceId,
+        label: String,
+    }
+    #[derive(Deserialize)]
+    struct Tabs {
+        tabs: Vec<Tab>,
+    }
+    #[derive(Deserialize)]
+    struct Tab {
+        tab_id: String,
+        label: String,
+    }
+    #[derive(Deserialize)]
+    struct Panes {
+        panes: Vec<PaneRef>,
+    }
+    #[derive(Deserialize)]
+    struct Split {
+        pane: PaneRef,
+    }
+
+    let found = m
+        .link
+        .call::<Workspaces>("workspace.list", json!({}), SHORT)
+        .await?
+        .workspaces
+        .into_iter()
+        .find(|w| w.label == "drover");
+    let Some(ws) = found else {
+        let made = m
+            .link
+            .call::<CreatedWorkspace>(
+                "workspace.create",
+                json!({"label": "drover", "cwd": cwd, "focus": false}),
+                SHORT,
+            )
+            .await?;
+        m.link
+            .call::<IgnoredAny>(
+                "tab.rename",
+                json!({"tab_id": made.root_pane.tab_id, "label": "mates"}),
+                SHORT,
+            )
+            .await?;
+        return Ok((made.workspace.workspace_id, made.root_pane.pane_id));
+    };
+    let workspace = ws.workspace_id.clone();
+    let tabs = m
+        .link
+        .call::<Tabs>("tab.list", json!({"workspace_id": workspace.0}), SHORT)
+        .await?
+        .tabs;
+    let Some(tab) = tabs.into_iter().find(|t| t.label == "mates") else {
+        let made = m
+            .link
+            .call::<Created>(
+                "tab.create",
+                json!({"workspace_id": workspace.0, "label": "mates", "cwd": cwd, "focus": false}),
+                SHORT,
+            )
+            .await?;
+        return Ok((workspace, made.root_pane.pane_id));
+    };
+    let panes = m
+        .link
+        .call::<Panes>("pane.list", json!({}), SHORT)
+        .await?
+        .panes;
+    let first = panes
+        .into_iter()
+        .find(|p| p.tab_id == tab.tab_id)
+        .ok_or_else(|| Error::failed("the mates tab has no pane".into()))?;
+    let split = m
+        .link
+        .call::<Split>(
+            "pane.split",
+            json!({"target_pane_id": first.pane_id.0, "direction": "right", "cwd": cwd, "focus": false}),
+            SHORT,
+        )
+        .await?;
+    Ok((workspace, split.pane.pane_id))
+}
+
+pub async fn close_pane(m: &Machine, pane: &PaneId) -> Result<()> {
+    m.link
+        .call::<IgnoredAny>("pane.close", json!({"pane_id": pane.0}), SHORT)
+        .await
+        .map(drop)
+}
+
 #[derive(Deserialize)]
 pub struct Usage {
     pub five_hour: Option<Window>,

@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::action::{Action, Attach, Done, Keys, New, Recall, Target};
+use crate::action::{Action, Attach, Done, Keys, Mate, New, Recall, Target};
 
 pub enum Invocation {
     Serve,
@@ -32,6 +32,8 @@ Commands (Discord command in brackets):
              [/screen] the terminal of a task's agent
   keys       --thread T --keys \"esc shift+tab enter\"
              [/keys] send keys to a task's agent
+  mate       NAME
+             [/mate] start a mate: a dispatcher pane in the drover workspace, at most three
   take       --thread T
              [/take] give the pane back to you
   release    --thread T
@@ -96,6 +98,9 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
                 .split_whitespace()
                 .map(String::from)
                 .collect(),
+        }),
+        "mate" => Action::Mate(Mate {
+            name: flags.words.first().cloned().context("drover mate NAME")?,
         }),
         "take" => Action::Take(Target {
             thread: flags.req("thread")?,

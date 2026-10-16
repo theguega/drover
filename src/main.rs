@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     hash::{BuildHasher, Hasher, RandomState},
     num::NonZeroU64,
+    path::PathBuf,
     sync::{
         Arc, Mutex as StdMutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, Ordering},
@@ -30,7 +31,7 @@ use tokio::{
     time::sleep,
 };
 
-use action::{Action, Attach, Done, Keys, New, Recall, Target};
+use action::{Action, Attach, Done, Keys, Mate, New, Recall, Target};
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
 
@@ -148,6 +149,8 @@ struct Task {
     branch: String,
     origin: Origin,
     owner: Owner,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mate: Option<String>,
     phase: Phase,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<Status>, // none until the poller has seen the agent
@@ -175,6 +178,7 @@ struct Stored {
     branch: String,
     origin: Option<Origin>,
     owner: Option<Owner>,
+    mate: Option<String>,
     phase: Option<Phase>,
     status: Option<Status>,
     session: Option<String>,
@@ -226,6 +230,7 @@ impl From<Stored> for Task {
             branch: s.branch,
             origin,
             owner: s.owner.unwrap_or(Owner::User),
+            mate: s.mate,
             phase,
             status: s.status,
             last_reply: s.last_reply,
@@ -250,6 +255,8 @@ struct App {
     remotes: Vec<Machine>,
     tasks: StdMutex<Tasks>,
     journal: Journal,
+    /// Where mates and their logs live: the mates folder of this checkout.
+    mates: PathBuf,
     started: AtomicBool,
     /// Watchers resubscribe when the set of panes for a machine changes.
     wake: Notify,
@@ -295,6 +302,7 @@ impl App {
                     .collect(),
             ),
             journal: Journal::open("journal.db")?,
+            mates: std::env::current_dir()?.join("mates"),
             started: AtomicBool::new(false),
             wake: Notify::new(),
             saving: Mutex::new(()),
@@ -742,6 +750,9 @@ impl App {
             CreateCommand::new("agents").description("Agents on every machine"),
             CreateCommand::new("worktrees").description("Worktrees on every machine"),
             CreateCommand::new("usage").description("Claude and Cursor usage on every machine"),
+            CreateCommand::new("mate")
+                .description("Start a mate: a dispatcher pane in the drover workspace")
+                .add_option(string("name", "lowercase, up to 26 characters").required(true)),
             CreateCommand::new("take").description("Give this pane back to you"),
             CreateCommand::new("release").description("Let the mate drive this pane"),
             CreateCommand::new("screen").description("This thread's terminal"),
@@ -822,10 +833,17 @@ impl App {
         };
         let note = match removed {
             Ok(said) => said,
-            Err(kept) => match herdr::close(m, &t.workspace).await {
-                Ok(()) => kept,
-                Err(e) => format!("{kept}\nclose failed: {e}"),
-            },
+            Err(kept) => {
+                // a mate shares its workspace with the other mates, so only its pane goes
+                let closed = match t.mate {
+                    Some(_) => herdr::close_pane(m, &t.pane).await,
+                    None => herdr::close(m, &t.workspace).await,
+                };
+                match closed {
+                    Ok(()) => kept,
+                    Err(e) => format!("{kept}\nclose failed: {e}"),
+                }
+            }
         };
         if !note.trim().is_empty() {
             let _ = th.say(http, note.trim()).await;
@@ -854,6 +872,9 @@ impl App {
             "agents" => Action::Agents,
             "worktrees" => Action::Worktrees,
             "usage" => Action::Usage,
+            "mate" => Action::Mate(Mate {
+                name: req(i, "name")?.into(),
+            }),
             "take" => Action::Take(Target { thread }),
             "release" => Action::Release(Target { thread }),
             "screen" => Action::Screen(Target { thread }),

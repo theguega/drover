@@ -1,6 +1,4 @@
 // One line per mate event, so the desk can read what happened without a transcript.
-// Nothing calls this until the mate commands exist; the allowance goes with them.
-#![allow(dead_code)]
 
 use std::{
     fs::OpenOptions,
@@ -14,10 +12,7 @@ use super::Result;
 #[derive(Clone, Copy)]
 pub enum Event {
     Started,
-    Linked,
     Owner,
-    Escalated,
-    Closed,
 }
 
 impl Event {
@@ -25,10 +20,7 @@ impl Event {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Started => "started",
-            Self::Linked => "linked",
             Self::Owner => "owner",
-            Self::Escalated => "escalated",
-            Self::Closed => "closed",
         }
     }
 }
@@ -65,7 +57,7 @@ mod tests {
 
     #[test]
     fn detail_stays_on_one_line() {
-        assert_eq!(line(1, Event::Escalated, "a\nb"), "1 escalated a b");
+        assert_eq!(line(1, Event::Owner, "a\nb"), "1 owner a b");
     }
 
     #[test]
@@ -73,13 +65,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("drover-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         append(&dir, Event::Started, "first")?;
-        append(&dir, Event::Closed, "second")?;
+        append(&dir, Event::Owner, "second")?;
         let text = std::fs::read_to_string(dir.join("log"))?;
         std::fs::remove_dir_all(&dir)?;
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines.first().is_some_and(|l| l.ends_with(" started first")));
-        assert!(lines.last().is_some_and(|l| l.ends_with(" closed second")));
+        assert!(lines.last().is_some_and(|l| l.ends_with(" owner second")));
         Ok(())
     }
 }
