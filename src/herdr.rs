@@ -131,7 +131,7 @@ pub struct Name(String);
 
 impl Name {
     pub fn parse(s: &str) -> Result<Self> {
-        // a leading dash would reach herdr-wt as an option
+        // a leading dash would reach drover-wt as an option
         let ok = !s.is_empty()
             && !s.starts_with('-')
             && s.chars()
@@ -262,7 +262,7 @@ impl Error {
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 // Clones and `repo.branch` worktrees. Set per machine in the dotfiles, expanded by that machine's shell.
-const ROOT: &str = r#""${REPOS_ROOT:-$HOME/Developer}""#;
+const ROOT: &str = r#""${REPOS_ROOT:-$HOME/.drover-workspace}""#;
 
 const SHORT: Duration = Duration::from_secs(15);
 // bytes read from the end of a transcript; a turn's reply sits well inside this
@@ -275,7 +275,7 @@ struct Out {
     code: Option<i32>,
 }
 
-// Shell work herdr has no method for: git via herdr-wt, transcripts. ssh runs the login shell, so the dotfiles' env applies.
+// Shell work herdr has no method for: git via drover-wt, transcripts. ssh runs the login shell, so the dotfiles' env applies.
 async fn sh(m: &Machine, script: &str, timeout: Duration) -> Result<Out> {
     let mut cmd = match m.reach {
         Reach::Ssh => {
@@ -374,7 +374,7 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
     }
 
     let script = format!(
-        "cd {ROOT}/{} && herdr-wt '{}' --no-focus",
+        "cd {ROOT}/{} && drover-wt '{}' --no-focus",
         repo.as_str(),
         r#ref.as_str()
     );
@@ -470,7 +470,7 @@ pub async fn close(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
         .map(drop)
 }
 
-// Through herdr-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
+// Through drover-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
 pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
     #[derive(Deserialize)]
     struct List {
@@ -496,7 +496,7 @@ pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
         .ok_or_else(|| Error::failed("workspace has no worktree".into()))?
         .checkout_path;
     let path = Name::parse(&path)?;
-    let o = sh(m, &format!("herdr-wt rm '{}'", path.as_str()), LONG).await?;
+    let o = sh(m, &format!("drover-wt rm '{}'", path.as_str()), LONG).await?;
     if o.code != Some(0) {
         return Err(failure(&o));
     }
@@ -505,7 +505,7 @@ pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
 
 // Same view as `wt ls` at the desk: every repo's worktrees with their herdr state.
 pub async fn worktrees(m: &Machine) -> Result<String> {
-    let o = sh(m, "cd ~ && herdr-wt ls", Duration::from_secs(30)).await?;
+    let o = sh(m, "cd ~ && drover-wt ls", Duration::from_secs(30)).await?;
     let text = if o.out.trim().is_empty() {
         o.err
     } else {

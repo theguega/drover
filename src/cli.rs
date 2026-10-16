@@ -20,14 +20,14 @@ drover: the same herdr desk from the terminal, Discord, or an agent.
 Usage: drover <command> [--flag value ...]
 
 Commands (Discord command in brackets):
-  new        --machine M --repo R --branch B --prompt P [--agent claude|cursor] [--model X] [--scout]
+  new        --machine M --repo R --branch B --prompt P [--agent NAME] [--model X] [--scout]
              [/new] worktree and agent in a new Discord thread. --branch is a new name,
              an existing branch, or #pr. --scout asks for a report and no changes.
   attach     --machine M --pane P
              [/attach] follow an agent already running in herdr. P is from `agents`.
   agents     [/agents] agents on every machine, with the thread each one is bound to
   worktrees  [/worktrees] worktrees on every machine
-  usage      [/usage] Claude and Cursor usage on every machine
+  usage      [/usage] usage of each agent on every machine
   screen     --thread T
              [/screen] the terminal of a task's agent
   keys       --thread T --keys \"esc shift+tab enter\"
@@ -48,10 +48,13 @@ Reactions on the prompt: 👀 working, ⏸️ the agent asks a dialog, ✅ done.
 Setup:
   The service runs `drover` with no arguments, from this checkout, as a user service.
   It reads .env: DISCORD_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID, ALLOWED_USER_IDS,
-  HOST_NAME, REMOTES (comma-separated ssh names). Run `drover config` for the live values.
-  Needs on PATH: herdr, herdr-wt, git, jq, ssh. Remotes need the dotfiles, herdr, python3, and ssh.
+  HOST_NAME, REMOTES (comma-separated ssh names), REPOS_ROOT (repositories and worktrees,
+  default ~/.drover-workspace). Run `drover config` for the live values.
+  Needs on PATH: herdr, drover-wt, git, jq, ssh. Remotes need herdr, python3, and ssh.
   The terminal commands talk to the service over a unix socket under ~/.local/state/drover.
-  Install or update: ./install.sh in the checkout. Logs: journalctl --user -u drover, or drover.log on macOS.
+  Install or update: curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh
+  Remote machines: the same command with `-s -- --remote`. The README has the Discord setup.
+  Logs: journalctl --user -u drover, or drover.log in the install directory on macOS.
 ";
 
 pub fn parse(args: &[String]) -> Result<Invocation> {

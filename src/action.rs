@@ -279,6 +279,10 @@ impl App {
             format!("host: {}", self.host.name),
             format!("remotes: {remotes}"),
             format!("channel: <#{}>", self.channel),
+            format!(
+                "repos: {}",
+                std::env::var("REPOS_ROOT").unwrap_or_else(|_| "~/.drover-workspace".into())
+            ),
             format!("state: {STATE}"),
             "journal: journal.db".into(),
             format!(

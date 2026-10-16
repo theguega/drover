@@ -1372,9 +1372,9 @@ fn on_path(cmd: &str) -> bool {
     std::env::split_paths(&path).any(|dir| dir.join(cmd).is_file())
 }
 
-// herdr-wt comes from the dotfiles and needs the rest.
+// drover-wt comes from the dotfiles and needs the rest.
 fn require_runtime() -> Result<()> {
-    let missing: Vec<_> = ["herdr", "herdr-wt", "git", "jq", "ssh"]
+    let missing: Vec<_> = ["herdr", "drover-wt", "git", "jq", "ssh"]
         .into_iter()
         .filter(|cmd| !on_path(cmd))
         .collect();
