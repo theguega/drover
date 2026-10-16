@@ -2,7 +2,6 @@
 
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
 
-use serde::{Deserialize, Serialize};
 use serenity::all::Http;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -11,12 +10,6 @@ use tokio::{
 
 use super::*;
 use crate::action::Action;
-
-#[derive(Serialize, Deserialize)]
-struct Reply {
-    ok: bool,
-    text: String,
-}
 
 // Under the home directory, so the CLI finds the service from any folder.
 pub fn path() -> Result<PathBuf> {
@@ -34,7 +27,7 @@ pub async fn serve(app: Arc<App>, http: Arc<Http>) -> Result<()> {
     tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
     loop {
         let (stream, _) = listener.accept().await?;
-        let (app, http) = (app.clone(), http.clone());
+        let (app, http) = (Arc::clone(&app), Arc::clone(&http));
         tokio::spawn(async move {
             if let Err(e) = handle(&app, &http, stream).await {
                 eprintln!("control: {e}");
@@ -47,18 +40,10 @@ async fn handle(app: &App, http: &Http, stream: UnixStream) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut line = String::new();
     BufReader::new(read).read_line(&mut line).await?;
-    let reply = match serde_json::from_str::<Action>(&line) {
-        Ok(action) => match app.act(http, action).await {
-            Ok(text) => Reply { ok: true, text },
-            Err(e) => Reply {
-                ok: false,
-                text: e.to_string(),
-            },
-        },
-        Err(e) => Reply {
-            ok: false,
-            text: format!("bad request: {e}"),
-        },
+    // the reply is the action's text, or the error it failed with
+    let reply: Result<String, String> = match serde_json::from_str::<Action>(&line) {
+        Ok(action) => app.act(http, action).await.map_err(|e| e.to_string()),
+        Err(e) => Err(format!("bad request: {e}")),
     };
     let mut out = serde_json::to_string(&reply)?;
     out.push('\n');
@@ -76,10 +61,6 @@ pub async fn send(action: &Action) -> Result<String> {
     write.write_all(line.as_bytes()).await?;
     let mut reply = String::new();
     BufReader::new(read).read_line(&mut reply).await?;
-    let r: Reply = serde_json::from_str(&reply).context("reply from drover")?;
-    if r.ok {
-        Ok(r.text)
-    } else {
-        bail!("{}", r.text)
-    }
+    let r: Result<String, String> = serde_json::from_str(&reply).context("reply from drover")?;
+    r.map_err(Error::from)
 }

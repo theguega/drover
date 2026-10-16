@@ -58,14 +58,14 @@ pub struct New {
     pub model: Option<String>,
     pub scout: bool,
     // the mate that dispatches this crewmate, which then owns its pane
-    pub mate: Option<String>,
+    pub mate: Option<MateName>,
     #[serde(default)]
     pub discord: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Note {
-    pub mate: String,
+    pub mate: MateName,
     pub text: String,
 }
 
@@ -78,7 +78,7 @@ pub struct Scout {
 
 #[derive(Serialize, Deserialize)]
 pub struct Mate {
-    pub name: String,
+    pub name: MateName,
     #[serde(default)]
     pub discord: bool,
 }
@@ -88,7 +88,7 @@ pub struct Attach {
     pub machine: Option<String>,
     pub pane: String,
     // set by link: the mate that the pane is linked to
-    pub mate: Option<String>,
+    pub mate: Option<MateName>,
     #[serde(default)]
     pub discord: bool,
 }
@@ -158,28 +158,66 @@ fn remove_scout_dir(root: &Path, id: &str) -> Result<()> {
     }
 }
 
+// What became of a prompt.
+pub enum Sent {
+    Now,
+    Queued,  // the agent works; it goes out on the next idle
+    Blocked, // a dialog holds the agent; nothing was sent
+}
+
 // Most mates a desk runs at once.
 const MAX_MATES: usize = 3;
 
 // What a mate is told before its first message: its instructions live in mates/AGENTS.md.
-fn mate_role(name: &str) -> String {
+fn mate_role(name: &MateName) -> String {
     format!(
         "You are mate {name}. Your instructions are in AGENTS.md in this folder. Wait for the desk's first message."
     )
 }
 
-// Agent names take 32 characters, and "mate-" takes five of them.
-fn mate_name(s: &str) -> Result<String> {
-    let valid = s.len() <= 26
-        && s.starts_with(|c: char| c.is_ascii_lowercase())
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
-    if valid {
-        Ok(s.into())
-    } else {
-        bail!(
-            "a mate name is lowercase letters, digits, - or _, starting with a letter, up to 26 characters"
-        )
+// A mate's name, checked once: it becomes an agent name and a folder under mates/state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct MateName(String);
+
+impl MateName {
+    // Agent names take 32 characters, and "mate-" takes five of them.
+    pub fn parse(s: &str) -> Result<Self> {
+        let valid = s.len() <= 26
+            && s.starts_with(|c: char| c.is_ascii_lowercase())
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        if valid {
+            Ok(Self(s.into()))
+        } else {
+            bail!(
+                "a mate name is lowercase letters, digits, - or _, starting with a letter, up to 26 characters"
+            )
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for MateName {
+    type Error = Error;
+    fn try_from(s: String) -> Result<Self> {
+        Self::parse(&s)
+    }
+}
+
+impl From<MateName> for String {
+    fn from(n: MateName) -> Self {
+        n.0
+    }
+}
+
+impl std::fmt::Display for MateName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -287,6 +325,9 @@ impl App {
         } else {
             n.prompt.clone()
         };
+        if n.mate.is_some() {
+            prompt = format!("{prompt}\n\n{CREW}");
+        }
         if !memory.is_empty() {
             prompt = format!(
                 "{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"
@@ -299,15 +340,12 @@ impl App {
             workspace: wt.workspace_id,
             kind: kind.into(),
             repo: repo.into(),
-            branch: wt.branch.clone(),
+            branch: Some(wt.branch.clone()),
             origin: Origin::Opened,
-            owner: if n.mate.is_some() {
-                Owner::Mate
-            } else {
-                Owner::User
-            },
-            mate: n.mate.clone(),
-            scout: None,
+            role: n.mate.clone().map_or(Role::Task, |mate| Role::Crew {
+                mate,
+                owner: Owner::Mate,
+            }),
             phase: Phase::Starting { prompt },
             status: None,
             session: None,
@@ -315,14 +353,11 @@ impl App {
             prompt_msg,
             dialog_msg: None,
             queued: None,
+            inbox: Vec::new(),
         });
         self.save().await;
         if let Some(name) = &n.mate {
-            log::append(
-                &self.mates.join("state").join(name),
-                log::Event::Linked,
-                &wt.pane_id.0,
-            )?;
+            log::append(&self.mate_dir(name), log::Event::Linked, &wt.pane_id.0)?;
             self.write_owners(name, None).await?;
         }
         // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
@@ -350,18 +385,24 @@ impl App {
         if let Some((_, cell)) = self.live_cell(&m.name, &pane).await {
             let mut t = cell.lock().await;
             if let Some(name) = &at.mate {
-                t.mate = Some(name.clone());
+                t.role = match &t.role {
+                    Role::Task => Role::Crew {
+                        mate: name.clone(),
+                        owner: Owner::User,
+                    },
+                    Role::Crew { owner, .. } => Role::Crew {
+                        mate: name.clone(),
+                        owner: *owner,
+                    },
+                    Role::Mate(_) | Role::Scout(_) => bail!("a mate or a scout can't be linked"),
+                };
             }
             if let Some(th) = t.thread {
                 if at.mate.is_none() {
                     return Ok(format!("already open in <#{th}>"));
                 }
             } else if at.discord {
-                let middle = if t.branch.is_empty() {
-                    &t.kind
-                } else {
-                    &t.branch
-                };
+                let middle = t.branch.as_ref().unwrap_or(&t.kind);
                 let th = self
                     .open_thread(http, &format!("{} · {middle} · {}", t.repo, m.name))
                     .await?;
@@ -377,11 +418,7 @@ impl App {
             drop(t);
             self.save().await;
             if let Some(name) = &at.mate {
-                log::append(
-                    &self.mates.join("state").join(name),
-                    log::Event::Linked,
-                    &pane.0,
-                )?;
+                log::append(&self.mate_dir(name), log::Event::Linked, &pane.0)?;
                 self.write_owners(name, None).await?;
             }
             return Ok(out);
@@ -414,11 +451,12 @@ impl App {
             workspace: a.workspace_id,
             kind: a.agent,
             repo,
-            branch: String::new(),
+            branch: None,
             origin: Origin::Attached,
-            owner: Owner::User,
-            mate: at.mate.clone(),
-            scout: None,
+            role: at.mate.clone().map_or(Role::Task, |mate| Role::Crew {
+                mate,
+                owner: Owner::User,
+            }),
             phase: Phase::Idle,
             status: Some(a.agent_status),
             session,
@@ -426,14 +464,11 @@ impl App {
             prompt_msg: None,
             dialog_msg: None,
             queued: None,
+            inbox: Vec::new(),
         });
         self.save().await;
         if let Some(name) = &at.mate {
-            log::append(
-                &self.mates.join("state").join(name),
-                log::Event::Linked,
-                &pane.0,
-            )?;
+            log::append(&self.mate_dir(name), log::Event::Linked, &pane.0)?;
             self.write_owners(name, None).await?;
         }
         if let Some(th) = thread {
@@ -489,8 +524,10 @@ impl App {
                 let mut names = vec![];
                 for (_, cell) in self.cells() {
                     let t = cell.lock().await;
-                    if let (Some(name), false) = (&t.mate, t.phase == Phase::Gone) {
-                        names.push(name.clone());
+                    if let Role::Mate(name) = &t.role
+                        && t.phase != Phase::Gone
+                    {
+                        names.push(name.to_string());
                     }
                 }
                 names.sort();
@@ -580,56 +617,98 @@ impl App {
     // A prompt from the terminal: the same path as a Discord message in the thread.
     async fn cmd_send(&self, s: &Send) -> Result<String> {
         let (_, cell) = self.find_task(&s.thread).await?;
-        let outcome = {
+        Ok(match self.send_prompt(&cell, &s.text, None).await? {
+            Sent::Now => "sent",
+            Sent::Queued => "queued, sent when the agent is idle",
+            Sent::Blocked => "the agent waits on a dialog: answer it with keys, then send again",
+        }
+        .into())
+    }
+
+    // A prompt from Discord or the terminal. `msg` is the Discord message that carries its reaction.
+    pub(crate) async fn send_prompt(
+        &self,
+        cell: &Cell,
+        text: &str,
+        msg: Option<MessageId>,
+    ) -> Result<Sent> {
+        let sent = {
             let mut t = cell.lock().await;
             if t.phase == Phase::Gone {
-                bail!("that agent has exited");
+                bail!("the agent has exited: attach a running one or start a new task");
             }
             let m = self.machine(&t.machine)?;
-            match herdr::prompt(m, &t.pane, &s.text).await {
+            match herdr::prompt(m, &t.pane, text).await {
                 Ok(()) => {
+                    // a pending first prompt or journal entry keeps its phase; its reply covers this one too
                     if t.phase == Phase::Idle {
                         t.phase = Phase::Waiting;
                     }
-                    "sent"
+                    if msg.is_some() {
+                        t.prompt_msg = msg;
+                    }
+                    Sent::Now
                 }
+                Err(e) if e.is(&herdr::Code::AgentBlocked) => return Ok(Sent::Blocked),
                 Err(e) if e.is_busy() => {
                     if t.queued.is_some() {
-                        bail!("one prompt is already queued for this agent");
+                        bail!("one message is already queued; send again after it runs");
                     }
-                    t.queued = Some(s.text.clone());
-                    "queued, sent when the agent is idle"
+                    t.queued = Some(text.into());
+                    Sent::Queued
                 }
                 Err(e) => return Err(e.into()),
             }
         };
         self.save().await;
-        Ok(outcome.into())
+        Ok(sent)
     }
 
-    // The mate's own task (pane and optional Discord thread).
-    pub(crate) async fn mate_task(&self, name: &str) -> Option<(PaneId, Option<ChannelId>)> {
+    // The mate's own task.
+    async fn mate_cell(&self, name: &MateName) -> Option<Cell> {
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
-            if t.mate.as_deref() == Some(name) && t.repo == "mates" && t.phase != Phase::Gone {
-                return Some((t.pane.clone(), t.thread));
+            if matches!(&t.role, Role::Mate(n) if n == name) && t.phase != Phase::Gone {
+                drop(t);
+                return Some(cell);
             }
         }
         None
     }
 
+    // The mate's pane and optional Discord thread.
+    pub(crate) async fn mate_task(&self, name: &MateName) -> Option<(PaneId, Option<ChannelId>)> {
+        let cell = self.mate_cell(name).await?;
+        let t = cell.lock().await;
+        Some((t.pane.clone(), t.thread))
+    }
+
+    // News from a crewmate: prompted to its mate now, or kept in its inbox until the mate's turn ends.
+    pub(crate) async fn tell_mate(&self, name: &MateName, text: &str) -> Result<()> {
+        let Some(cell) = self.mate_cell(name).await else {
+            return Ok(());
+        };
+        let head = text.lines().next().unwrap_or_default();
+        log::append(&self.mate_dir(name), log::Event::Crew, head)?;
+        let mut t = cell.lock().await;
+        let m = self.machine(&t.machine)?;
+        // the phase stays as it is, so the mate's answer to this is not posted
+        match herdr::prompt(m, &t.pane, text).await {
+            Ok(()) => {}
+            Err(e) if e.is_busy() || e.is(&herdr::Code::AgentBlocked) => t.inbox.push(text.into()),
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+
     // A question for the desk from a mate: posted in its thread (if any) and kept in its log.
     async fn cmd_escalate(&self, http: &Http, n: &Note) -> Result<String> {
-        let name = mate_name(&n.mate)?;
+        let name = &n.mate;
         let (pane, th) = self
-            .mate_task(&name)
+            .mate_task(name)
             .await
             .context(format!("no running mate {name}"))?;
-        log::append(
-            &self.mates.join("state").join(&name),
-            log::Event::Escalated,
-            &n.text,
-        )?;
+        log::append(&self.mate_dir(name), log::Event::Escalated, &n.text)?;
         if let Some(th) = th {
             th.say(http, &n.text).await?;
             Ok(format!("escalated to <#{th}>"))
@@ -640,12 +719,8 @@ impl App {
 
     // A note for the mate, in its log, for it to read when it next looks.
     fn cmd_brief(&self, b: &Note) -> Result<String> {
-        let name = mate_name(&b.mate)?;
-        log::append(
-            &self.mates.join("state").join(&name),
-            log::Event::Brief,
-            &b.text,
-        )?;
+        let name = &b.mate;
+        log::append(&self.mate_dir(name), log::Event::Brief, &b.text)?;
         Ok(format!("noted for mate {name}"))
     }
 
@@ -672,11 +747,9 @@ impl App {
             workspace,
             kind: harness::DEFAULT.into(),
             repo: "scouts".into(),
-            branch: String::new(),
+            branch: None,
             origin: Origin::Attached,
-            owner: Owner::User,
-            mate: None,
-            scout: Some(id.clone()),
+            role: Role::Scout(id.clone()),
             phase: Phase::Starting {
                 prompt: format!("{SCOUT}\n\n{}", s.prompt),
             },
@@ -686,17 +759,10 @@ impl App {
             prompt_msg,
             dialog_msg: None,
             queued: None,
+            inbox: Vec::new(),
         });
         self.save().await;
-        herdr::start(
-            &self.host,
-            &format!("scout-{id}"),
-            harness::DEFAULT,
-            &pane,
-            &cwd,
-            None,
-        )
-        .await?;
+        herdr::start(&self.host, &id, harness::DEFAULT, &pane, &cwd, None).await?;
         Ok(match thread {
             Some(th) => format!("<#{th}>"),
             None => pane.0,
@@ -706,7 +772,7 @@ impl App {
     async fn cmd_scout_close(&self, http: &Http, target: &str) -> Result<String> {
         let (key, cell) = self.find_task(target).await?;
         let t = cell.lock().await.clone();
-        let Some(scout) = t.scout.clone() else {
+        let Role::Scout(scout) = t.role.clone() else {
             bail!("this task is not a scout");
         };
         self.remove(&key);
@@ -717,17 +783,17 @@ impl App {
     }
 
     async fn cmd_mate(&self, http: &Http, m: &Mate) -> Result<String> {
-        let name = mate_name(&m.name)?;
+        let name = m.name.clone();
         let mut live = 0;
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
             if t.phase == Phase::Gone {
                 continue;
             }
-            match t.mate.as_deref() {
-                Some(n) if n == name => bail!("mate {name} is already running"),
-                Some(_) => live += 1,
-                None => {}
+            match &t.role {
+                Role::Mate(n) if *n == name => bail!("mate {name} is already running"),
+                Role::Mate(_) => live += 1,
+                _ => {}
             }
         }
         if live >= MAX_MATES {
@@ -752,11 +818,9 @@ impl App {
             workspace,
             kind: harness::DEFAULT.into(),
             repo: "mates".into(),
-            branch: String::new(),
+            branch: None,
             origin: Origin::Attached,
-            owner: Owner::Mate,
-            mate: Some(name.clone()),
-            scout: None,
+            role: Role::Mate(name.clone()),
             phase: Phase::Starting {
                 prompt: mate_role(&name),
             },
@@ -766,13 +830,10 @@ impl App {
             prompt_msg,
             dialog_msg: None,
             queued: None,
+            inbox: Vec::new(),
         });
         self.save().await;
-        log::append(
-            &self.mates.join("state").join(&name),
-            log::Event::Started,
-            &pane.0,
-        )?;
+        log::append(&self.mate_dir(&name), log::Event::Started, &pane.0)?;
         self.write_owners(&name, None).await?;
         herdr::start(
             &self.host,
@@ -814,11 +875,13 @@ impl App {
         let mut near = None;
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
-            let Some(name) = &t.mate else { continue };
+            let Role::Crew { mate: name, .. } = &t.role else {
+                continue;
+            };
             if t.repo != repo {
                 continue;
             }
-            if t.branch == branch {
+            if t.branch.as_deref() == Some(branch.as_str()) {
                 exact = Some(name.clone());
             } else {
                 near = Some(name.clone());
@@ -847,15 +910,18 @@ impl App {
 
     // The panes linked to a mate and who may drive each one, for the mate to read before it sends input.
     // `skip` leaves out a pane that is closing.
-    pub(crate) async fn write_owners(&self, name: &str, skip: Option<&PaneId>) -> Result<()> {
+    pub(crate) async fn write_owners(&self, name: &MateName, skip: Option<&PaneId>) -> Result<()> {
         let mut lines = Vec::new();
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
-            if t.mate.as_deref() == Some(name) && skip != Some(&t.pane) {
-                lines.push(format!("{} {}", t.pane.0, t.owner.as_str()));
+            if let Role::Crew { mate, owner } = &t.role
+                && mate == name
+                && skip != Some(&t.pane)
+            {
+                lines.push(format!("{} {}", t.pane.0, owner.as_str()));
             }
         }
-        let dir = self.mates.join("state").join(name);
+        let dir = self.mate_dir(name);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("owners"), lines.join("\n") + "\n")?;
         Ok(())
@@ -863,24 +929,19 @@ impl App {
 
     async fn set_owner(&self, target: &str, owner: Owner) -> Result<String> {
         let (_, cell) = self.find_task(target).await?;
-        let (text, mate) = {
+        let (pane, name) = {
             let mut t = cell.lock().await;
-            t.owner = owner;
-            (
-                format!("{} is {}", t.pane.0, owner.as_str()),
-                t.mate.clone(),
-            )
+            let pane = t.pane.0.clone();
+            let Role::Crew { mate, owner: o } = &mut t.role else {
+                bail!("{pane} is not linked to a mate");
+            };
+            *o = owner;
+            (pane, mate.clone())
         };
-        if let Some(name) = mate {
-            log::append(
-                &self.mates.join("state").join(&name),
-                log::Event::Owner,
-                owner.as_str(),
-            )?;
-            self.write_owners(&name, None).await?;
-        }
+        log::append(&self.mate_dir(&name), log::Event::Owner, owner.as_str())?;
+        self.write_owners(&name, None).await?;
         self.save().await;
-        Ok(text)
+        Ok(format!("{pane} is {}", owner.as_str()))
     }
 
     async fn cmd_worktrees(&self) -> Result<String> {
@@ -914,7 +975,7 @@ impl App {
         };
         let th = {
             let mut t = cell.lock().await;
-            if t.scout.is_some() {
+            if matches!(t.role, Role::Scout(_)) {
                 bail!("a scout ends with scout-close");
             }
             if teardown == Teardown::Remove && t.origin == Origin::Attached {
@@ -967,9 +1028,9 @@ mod tests {
 
     #[test]
     fn mate_names_are_short_and_lowercase() {
-        assert!(mate_name("reviewer-2").is_ok());
-        assert!(mate_name("Reviewer").is_err());
-        assert!(mate_name("2fast").is_err());
-        assert!(mate_name(&"a".repeat(27)).is_err());
+        assert!(MateName::parse("reviewer-2").is_ok());
+        assert!(MateName::parse("Reviewer").is_err());
+        assert!(MateName::parse("2fast").is_err());
+        assert!(MateName::parse(&"a".repeat(27)).is_err());
     }
 }

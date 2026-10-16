@@ -65,7 +65,7 @@ drover-wt --help             # full usage
 
 ## Mates and scouts
 
-A **mate** is a dispatcher: an agent in its own pane in the `drover` workspace, with its playbook in `mates/AGENTS.md`. It starts crewmates with `drover new --mate`, watches them, and asks the desk when it needs a decision. At most three run at once.
+A **mate** is a dispatcher: an agent in its own pane in the `drover` workspace, with its playbook in `mates/AGENTS.md`. It plans the goal as a small graph of crewmates, starts them with `drover new --mate`, hears each crewmate's turn as it ends, and loops until every check passes. It writes to you only when it needs a decision or the goal is done. At most three run at once.
 
 ```sh
 drover mate reviewer         # start a mate; /mate in Discord does the same

@@ -402,7 +402,7 @@ pub async fn start(
     path: &str,
     model: Option<&Name>,
 ) -> Result<()> {
-    let cd = json!({"pane_id": pane.0, "text": format!("cd '{path}'"), "keys": ["Enter"]});
+    let cd = json!({"pane_id": pane.0, "text": format!("cd {}", quote(path)), "keys": ["Enter"]});
     m.link
         .call::<IgnoredAny>("pane.send_input", cd, SHORT)
         .await?;
@@ -656,7 +656,7 @@ pub async fn checkout(m: &Machine, cwd: &str) -> Result<Option<(String, String)>
     Ok(Some((repo.into(), branch.into())))
 }
 
-// Quotes one argument for the shell: the folder comes from herdr, not from the user.
+// Quotes one argument for the shell, for a folder that came from herdr or drover-wt.
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -826,7 +826,7 @@ struct Msg {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Content {
-    Text(#[allow(dead_code, reason = "only the variant matters")] String), // must stay a String: untagged tries variants in order
+    Text(#[expect(dead_code, reason = "only the variant matters")] String), // must stay a String: untagged tries variants in order
     Blocks(Vec<Block>),
     Other(IgnoredAny),
 }
@@ -951,27 +951,28 @@ enum Scan {
     Reply(Option<Reply>),
 }
 
+// Walks back from the end, so only the latest turn is parsed.
 #[must_use]
 fn last_reply(jsonl: &str) -> Scan {
-    let lines: Vec<Line> = jsonl
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let Some(from) = lines.iter().rposition(Line::is_prompt) else {
-        return Scan::NoPrompt;
-    };
-    Scan::Reply(
-        lines
-            .iter()
-            .skip(from)
-            .filter(|e| e.kind == "assistant")
-            .flat_map(|e| e.texts().filter(|t| !t.is_empty()).map(move |t| (e, t)))
-            .last()
-            .map(|(e, t)| Reply {
+    let mut reply = None;
+    for line in jsonl.lines().rev() {
+        let Ok(e) = serde_json::from_str::<Line>(line) else {
+            continue;
+        };
+        if e.is_prompt() {
+            return Scan::Reply(reply);
+        }
+        if reply.is_none()
+            && e.kind == "assistant"
+            && let Some(text) = e.texts().filter(|t| !t.is_empty()).last()
+        {
+            reply = Some(Reply {
                 id: e.uuid.clone(),
-                text: t.into(),
-            }),
-    )
+                text: text.into(),
+            });
+        }
+    }
+    Scan::NoPrompt
 }
 
 #[cfg(test)]

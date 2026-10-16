@@ -32,7 +32,8 @@ use tokio::{
 };
 
 use action::{
-    Action, Attach, Done, JournalList, JournalRemove, Keys, Mate, New, Recall, Scout, Target,
+    Action, Attach, Done, JournalList, JournalRemove, Keys, Mate, MateName, New, Recall, Scout,
+    Sent, Target,
 };
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
@@ -88,6 +89,8 @@ fn id<T: From<NonZeroU64>>(s: &str) -> Result<T> {
 
 const STATE: &str = "state.json";
 const SCOUT: &str = "Scout task: investigate and report back. Do not edit files, commit, or push.";
+// The end of each turn goes to the mate, so a crewmate asks there instead of guessing.
+const CREW: &str = "You are a crewmate. Your mate reads the end of each of your turns. The brief above is your only source of facts: do not assume what it does not say. When blocked or unsure, stop and end your turn with a line starting QUESTION:. When the check in the brief passes, end your turn with DONE: and its output. Do not change the check.";
 
 // ── state: one thread per herdr pane ───────────────────────
 
@@ -140,6 +143,39 @@ impl Owner {
     }
 }
 
+// What a pane is to drover. Only a crewmate has an owner: the desk takes it from its mate or gives it back.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Role {
+    Task,                                  // a task of the desk's own
+    Crew { mate: MateName, owner: Owner }, // linked to a mate, in its own worktree
+    Mate(MateName),                        // a mate's pane, in the drover workspace
+    Scout(String),                         // the scout's folder name, while the scout lives
+}
+
+impl Role {
+    // The mate whose log and owner list this pane belongs in.
+    #[must_use]
+    fn mate(&self) -> Option<&MateName> {
+        match self {
+            Self::Crew { mate, .. } | Self::Mate(mate) => Some(mate),
+            Self::Task | Self::Scout(_) => None,
+        }
+    }
+
+    // A crewmate its mate drives.
+    #[must_use]
+    fn crew_of_mate(&self) -> Option<&MateName> {
+        match self {
+            Self::Crew {
+                mate,
+                owner: Owner::Mate,
+            } => Some(mate),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", from = "Stored")]
 struct Task {
@@ -150,13 +186,10 @@ struct Task {
     workspace: WorkspaceId,
     kind: String,
     repo: String,
-    branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>, // none for an agent drover attached to, a mate, or a scout
     origin: Origin,
-    owner: Owner,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mate: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scout: Option<String>, // the scout's folder name, while the scout lives
+    role: Role,
     phase: Phase,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<Status>, // none until the poller has seen the agent
@@ -170,6 +203,8 @@ struct Task {
     dialog_msg: Option<MessageId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     queued: Option<String>, // one Discord prompt waiting while the agent works
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    inbox: Vec<String>, // crewmates' news waiting for their mate's turn to end
 }
 
 // What state.json may hold: this format, or the flags of the TypeScript drover.
@@ -182,10 +217,12 @@ struct Stored {
     workspace: WorkspaceId,
     kind: String,
     repo: String,
-    branch: String,
+    #[serde(default)]
+    branch: Option<String>,
     origin: Option<Origin>,
+    role: Option<Role>,
     owner: Option<Owner>,
-    mate: Option<String>,
+    mate: Option<MateName>,
     scout: Option<String>,
     phase: Option<Phase>,
     status: Option<Status>,
@@ -194,6 +231,8 @@ struct Stored {
     prompt_msg: Option<MessageId>,
     dialog_msg: Option<MessageId>,
     queued: Option<String>,
+    #[serde(default)]
+    inbox: Vec<String>,
     #[serde(default)]
     owned: bool,
     #[serde(default)]
@@ -228,6 +267,16 @@ impl From<Stored> for Task {
         } else {
             Origin::Attached
         });
+        // before roles, the mate's own pane was the one in the mates folder
+        let role = s.role.unwrap_or_else(|| match (s.scout, s.mate) {
+            (Some(id), _) => Role::Scout(id),
+            (None, Some(mate)) if s.repo == "mates" => Role::Mate(mate),
+            (None, Some(mate)) => Role::Crew {
+                mate,
+                owner: s.owner.unwrap_or(Owner::User),
+            },
+            (None, None) => Role::Task,
+        });
         Self {
             thread: s.thread,
             session: s.session.as_deref().and_then(SessionId::parse),
@@ -236,17 +285,16 @@ impl From<Stored> for Task {
             workspace: s.workspace,
             kind: s.kind,
             repo: s.repo,
-            branch: s.branch,
+            branch: s.branch.filter(|b| !b.is_empty()),
             origin,
-            owner: s.owner.unwrap_or(Owner::User),
-            mate: s.mate,
-            scout: s.scout,
+            role,
             phase,
             status: s.status,
             last_reply: s.last_reply,
             prompt_msg: s.prompt_msg,
             dialog_msg: s.dialog_msg,
             queued: s.queued,
+            inbox: s.inbox,
         }
     }
 }
@@ -350,6 +398,11 @@ impl App {
             .context(format!("unknown machine {name}"))
     }
 
+    // A mate's log, owner list and goal.
+    fn mate_dir(&self, name: &MateName) -> PathBuf {
+        self.mates.join("state").join(name.as_str())
+    }
+
     // A poisoned lock only means a handler panicked; the map itself is fine.
     fn map(&self) -> MutexGuard<'_, Tasks> {
         self.tasks.lock().unwrap_or_else(PoisonError::into_inner)
@@ -400,7 +453,7 @@ impl App {
                 let t = cell.lock().await;
                 let matches = (thread.is_some() && t.thread == thread)
                     || t.pane.0 == raw
-                    || t.scout.as_deref() == Some(raw);
+                    || matches!(&t.role, Role::Scout(s) if s == raw);
                 (matches, t.phase != Phase::Gone)
             };
             if matches {
@@ -894,7 +947,7 @@ impl App {
                 day: today(),
                 machine: t.machine.clone(),
                 repo: t.repo.clone(),
-                branch: t.branch.clone(),
+                branch: t.branch.clone().unwrap_or_default(),
                 text: entry.into(),
             })
             .await?;
@@ -907,39 +960,33 @@ impl App {
 
     async fn teardown(&self, http: &Http, t: &Task, teardown: Teardown) -> Result<()> {
         let m = self.machine(&t.machine)?;
-        let removed = match teardown {
-            Teardown::Remove => herdr::remove(m, &t.workspace)
-                .await
-                .map_err(|e| format!("kept the checkout: {e}")),
-            Teardown::Close => Err(String::new()),
+        // drover-wt rm closes the workspace too; anything it kept is only closed
+        let (removed, mut note) = match teardown {
+            Teardown::Remove => match herdr::remove(m, &t.workspace).await {
+                Ok(said) => (true, said),
+                Err(e) => (false, format!("kept the checkout: {e}")),
+            },
+            Teardown::Close => (false, String::new()),
         };
-        let note = match removed {
-            Ok(said) => said,
-            Err(kept) => {
-                // mates and scouts share the drover workspace, so only their pane goes
-                let closed = if t.mate.is_some() || t.scout.is_some() {
-                    herdr::close_pane(m, &t.pane).await
-                } else {
-                    herdr::close(m, &t.workspace).await
-                };
-                match closed {
-                    Ok(()) => kept,
-                    Err(e) => format!("{kept}\nclose failed: {e}"),
-                }
+        if !removed {
+            // mates and scouts share the drover workspace, so only their pane goes
+            let closed = if matches!(t.role, Role::Mate(_) | Role::Scout(_)) {
+                herdr::close_pane(m, &t.pane).await
+            } else {
+                herdr::close(m, &t.workspace).await
+            };
+            if let Err(e) = closed {
+                note = format!("{note}\nclose failed: {e}");
             }
-        };
+        }
         if let Some(th) = t.thread
             && !note.trim().is_empty()
         {
             let _ = th.say(http, note.trim()).await;
         }
-        if let Some(name) = &t.mate {
+        if let Some(name) = t.role.mate() {
             // a mate's log records the close, and its owner list drops the pane
-            let closed = log::append(
-                &self.mates.join("state").join(name),
-                log::Event::Closed,
-                &t.pane.0,
-            );
+            let closed = log::append(&self.mate_dir(name), log::Event::Closed, &t.pane.0);
             let owners = self.write_owners(name, Some(&t.pane)).await;
             if let Err(e) = closed.and(owners) {
                 eprintln!("mate {name}: {e}");
@@ -981,7 +1028,7 @@ impl App {
             }),
             "scout-close" => Action::ScoutClose(Target { thread }),
             "mate" => Action::Mate(Mate {
-                name: req(i, "name")?.into(),
+                name: MateName::parse(req(i, "name")?)?,
                 discord: true,
             }),
             "take" => Action::Take(Target { thread }),
@@ -1144,49 +1191,27 @@ impl App {
         if text.is_empty() {
             return Ok(());
         }
-        let mut t = cell.lock().await;
-        if t.phase == Phase::Gone {
-            msg.reply(http, "agent exited, /attach a running one or /new")
-                .await?;
-            return Ok(());
-        }
-        let m = self.machine(&t.machine)?;
-        if let Err(e) = herdr::prompt(m, &t.pane, text).await {
-            if e.is(&herdr::Code::AgentBlocked) {
-                let content = screen(m, &t.pane, "answer the dialog first, then resend\n").await;
-                drop(t);
-                let out = CreateMessage::new()
-                    .content(content)
-                    .components(key_rows())
-                    .reference_message(msg);
-                msg.channel_id.send_message(http, out).await?;
-                return Ok(());
+        match self.send_prompt(&cell, text, Some(msg.id)).await? {
+            Sent::Now => {
+                msg.react(http, emoji("👀")).await?;
             }
-            if e.is_busy() {
-                if t.queued.is_some() {
-                    drop(t);
-                    msg.reply(http, "one message already queued; send again after it runs")
-                        .await?;
-                    return Ok(());
-                }
-                t.queued = Some(text.into());
-                drop(t);
-                self.save().await;
+            Sent::Queued => {
                 msg.react(http, emoji("👀")).await?;
                 msg.reply(http, "queued — sends when the agent is idle")
                     .await?;
-                return Ok(());
             }
-            return Err(e.into());
+            Sent::Blocked => {
+                let (m, pane) = {
+                    let t = cell.lock().await;
+                    (self.machine(&t.machine)?, t.pane.clone())
+                };
+                let out = CreateMessage::new()
+                    .content(screen(m, &pane, "answer the dialog first, then resend\n").await)
+                    .components(key_rows())
+                    .reference_message(msg);
+                msg.channel_id.send_message(http, out).await?;
+            }
         }
-        // a pending first prompt or journal entry keeps its phase; its reply covers this one too
-        if t.phase == Phase::Idle {
-            t.phase = Phase::Waiting;
-        }
-        t.prompt_msg = Some(msg.id);
-        drop(t);
-        self.save().await;
-        msg.react(http, emoji("👀")).await?;
         Ok(())
     }
 
@@ -1250,6 +1275,11 @@ impl App {
         match self.step(http, cell, seen).await {
             Ok(Step::Keep) => {}
             Ok(Step::Drop) => self.remove(key),
+            Ok(Step::Tell { mate, text }) => {
+                if let Err(e) = self.tell_mate(&mate, &text).await {
+                    eprintln!("mate {mate}: {e}");
+                }
+            }
             Err(e) => eprintln!("task {key}: {e}"),
         }
     }
@@ -1273,12 +1303,25 @@ impl App {
                 Err(e.into())
             };
         }
+        // a crewmate's mate hears of its replies, dialogs and exit, since it has no thread to read
+        let crew = t.role.crew_of_mate().cloned();
+        let tell = |text: String| {
+            crew.clone()
+                .map_or(Step::Keep, |mate| Step::Tell { mate, text })
+        };
+        let who = format!(
+            "crew {} on {} ({} {})",
+            t.pane.0,
+            t.machine,
+            t.repo,
+            t.branch.as_deref().unwrap_or("-")
+        );
         let Seen::Agent(now, session) = seen else {
             t.phase = Phase::Gone;
             if let Some(th) = th {
                 th.say(http, "agent exited").await?;
             }
-            return Ok(Step::Keep);
+            return Ok(tell(format!("{who} exited")));
         };
 
         let prev = t.status.replace(now);
@@ -1287,8 +1330,9 @@ impl App {
         }
 
         let blocked = Some(Status::Blocked);
+        let dialog = now == Status::Blocked && prev != blocked;
         if let Some(th) = th {
-            if now == Status::Blocked && prev != blocked {
+            if dialog {
                 t.dialog_msg = Some(
                     th.send_message(http, screen_msg(m, &t.pane).await)
                         .await?
@@ -1303,6 +1347,12 @@ impl App {
             }
         }
 
+        if dialog {
+            return Ok(tell(format!(
+                "{who} waits on a dialog: `drover screen --pane {}`",
+                t.pane.0
+            )));
+        }
         if !now.ready() {
             return Ok(Step::Keep);
         }
@@ -1326,6 +1376,10 @@ impl App {
         }
 
         let was_working = prev == Some(Status::Working);
+        // a mate's turn that crew news started stays out of its thread; the mate escalates what matters
+        let quiet = matches!(t.role, Role::Mate(_)) && !t.phase.waiting();
+        let th = th.filter(|_| !quiet);
+        let mut said = None;
         if !(t.phase.waiting() || was_working) {
             return self.drain_queue(http, &mut t, m).await;
         }
@@ -1348,6 +1402,7 @@ impl App {
             if let Some(th) = th {
                 post(http, th, &r.text).await?;
             }
+            said = Some(r.text);
         } else if was_working {
             // other agents have no transcript to read; the screen is the reply
             if let Phase::Ending(teardown) = t.phase {
@@ -1359,13 +1414,18 @@ impl App {
             if t.phase == Phase::Waiting {
                 t.phase = Phase::Idle;
             }
+            let screen = herdr::screen(m, &t.pane, 80).await?;
             if let Some(th) = th {
                 mark(http, th, &t, "✅").await;
-                let screen = herdr::screen(m, &t.pane, 80).await?;
                 post(http, th, &format!("```\n{}\n```", tail(&screen, 5000))).await?;
             }
+            said = Some(screen);
         }
-        self.drain_queue(http, &mut t, m).await
+        self.drain_queue(http, &mut t, m).await?;
+        // the end of a turn holds its question or result
+        Ok(said.map_or(Step::Keep, |s| {
+            tell(format!("{who} replied:\n{}", tail(s.trim(), 800)))
+        }))
     }
 
     // One prompt may wait while the agent works; send it once idle.
@@ -1374,6 +1434,14 @@ impl App {
             return Ok(Step::Keep);
         }
         let Some(text) = t.queued.take() else {
+            if !t.inbox.is_empty() {
+                let news = t.inbox.join("\n\n");
+                match herdr::prompt(m, &t.pane, &news).await {
+                    Ok(()) => t.inbox.clear(),
+                    Err(e) if e.is_busy() || e.is(&herdr::Code::AgentBlocked) => {}
+                    Err(e) => eprintln!("mate inbox {}: {e}", t.pane.0),
+                }
+            }
             return Ok(Step::Keep);
         };
         match herdr::prompt(m, &t.pane, &text).await {
@@ -1400,7 +1468,8 @@ impl App {
 
 enum Step {
     Keep,
-    Drop, // the task is over or its thread is gone
+    Drop,                                  // the task is over or its thread is gone
+    Tell { mate: MateName, text: String }, // keep, and pass this crewmate's news to its mate
 }
 
 // What herdr says about a task's pane.
@@ -1489,8 +1558,9 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
-        let app = self.0.clone();
-        if app.started.swap(true, Ordering::SeqCst) {
+        let app = Arc::clone(&self.0);
+        // only this flag is shared, so no ordering with other memory is needed
+        if app.started.swap(true, Ordering::Relaxed) {
             return; // a reconnect, the poller already runs
         }
         if let Err(e) = app.guild.set_commands(&ctx.http, app.commands()).await {
@@ -1502,16 +1572,16 @@ impl EventHandler for Handler {
             ready.user.tag(),
             names.join(", ")
         );
-        let http = ctx.http.clone();
+        let http = Arc::clone(&ctx.http);
         let machines: Vec<Machine> = app.machines().cloned().collect();
         for m in machines {
-            let app = app.clone();
-            let http = http.clone();
+            let app = Arc::clone(&app);
+            let http = Arc::clone(&http);
             tokio::spawn(async move {
                 watch_machine(app, http, m).await;
             });
         }
-        let (control_app, control_http) = (app.clone(), http.clone());
+        let (control_app, control_http) = (Arc::clone(&app), Arc::clone(&http));
         tokio::spawn(async move {
             if let Err(e) = control::serve(control_app, control_http).await {
                 eprintln!("control: {e}");
@@ -1625,7 +1695,7 @@ async fn serve() -> Result<()> {
     let intents =
         GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
     let mut client = Client::builder(&app.token, intents)
-        .event_handler(Handler(app.clone()))
+        .event_handler(Handler(Arc::clone(&app)))
         .await?;
     client.start().await?;
     Ok(())
@@ -1645,7 +1715,7 @@ mod tests {
         assert_eq!(t.thread, Some(ChannelId::new(123)));
         assert!(t.phase == Phase::Ending(Teardown::Remove));
         assert!(t.origin == Origin::Opened && t.session.is_none());
-        assert!(t.owner == Owner::User);
+        assert!(t.role == Role::Task);
         assert_eq!(t.prompt_msg, Some(MessageId::new(456)));
 
         let mut term = t.clone();
@@ -1660,6 +1730,38 @@ mod tests {
                     && t.phase == Phase::Ending(Teardown::Remove))
         );
         assert!(back.get("host:p2").is_some_and(|t| t.thread.is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn reads_mates_from_before_roles() -> Result<()> {
+        let task = |pane: &str, repo: &str, extra: &str| {
+            format!(
+                r#""host:{pane}": {{"machine":"host","pane":"{pane}","workspace":"w","kind":"claude","repo":"{repo}","branch":"","origin":"attached","phase":"idle"{extra}}}"#
+            )
+        };
+        let old = format!(
+            "{{{}, {}, {}, {}}}",
+            task("p1", "mates", r#","owner":"mate","mate":"a""#),
+            task("p2", "drover", r#","owner":"mate","mate":"a""#),
+            task("p3", "scouts", r#","owner":"user","scout":"scout-abc123""#),
+            task("p4", "drover", r#","owner":"user""#),
+        );
+        let tasks = parse_state(&old)?;
+        let a = MateName::parse("a")?;
+        let role = |k: &str| tasks.get(k).map(|t| t.role.clone());
+        assert!(role("host:p1") == Some(Role::Mate(a.clone())));
+        assert!(
+            role("host:p2")
+                == Some(Role::Crew {
+                    mate: a.clone(),
+                    owner: Owner::Mate
+                })
+        );
+        assert!(role("host:p3") == Some(Role::Scout("scout-abc123".into())));
+        assert!(role("host:p4") == Some(Role::Task));
+        let back = parse_state(&serde_json::to_string(&tasks)?)?;
+        assert!(back.get("host:p2").map(|t| &t.role) == tasks.get("host:p2").map(|t| &t.role));
         Ok(())
     }
 

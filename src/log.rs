@@ -16,6 +16,7 @@ pub enum Event {
     Owner,
     Brief,
     Escalated,
+    Crew,
     Closed,
 }
 
@@ -28,6 +29,7 @@ impl Event {
             Self::Owner => "owner",
             Self::Brief => "brief",
             Self::Escalated => "escalated",
+            Self::Crew => "crew",
             Self::Closed => "closed",
         }
     }

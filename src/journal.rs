@@ -64,7 +64,7 @@ impl Journal {
         &self,
         f: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
     ) -> Result<T> {
-        let db = self.0.clone();
+        let db = Arc::clone(&self.0);
         Ok(tokio::task::spawn_blocking(move || {
             // a poisoned lock only means another query panicked; the connection is fine
             let db = db.lock().unwrap_or_else(PoisonError::into_inner);

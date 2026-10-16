@@ -210,13 +210,13 @@ impl Link {
     async fn relay(&self, host: &str) -> Result<Arc<Relay>> {
         let mut slot = self.relay.lock().await;
         if let Some(r) = slot.as_ref() {
-            return Ok(r.clone());
+            return Ok(Arc::clone(r));
         }
         let mut child = relay(host)?;
         let stdin = child.stdin.take().ok_or_else(closed)?;
         let stdout = child.stdout.take().ok_or_else(closed)?;
         let pending: Pending = Arc::default();
-        let routes = pending.clone();
+        let routes = Arc::clone(&pending);
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
@@ -244,7 +244,7 @@ impl Link {
             pending,
             _child: child,
         });
-        *slot = Some(r.clone());
+        *slot = Some(Arc::clone(&r));
         Ok(r)
     }
 }

@@ -1,11 +1,14 @@
 // Terminal front end: argv becomes one Action, sent to the running service.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use super::*;
 use crate::action::{
-    Action, Attach, Candidates, Done, JournalList, JournalRemove, Keys, Mate, New, Note, Recall,
-    Scout, Send, Target,
+    Action, Attach, Candidates, Done, JournalList, JournalRemove, Keys, Mate, MateName, New, Note,
+    Recall, Scout, Send, Target,
 };
 
 pub enum Invocation {
@@ -132,7 +135,7 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
 
 fn action(cmd: &str, rest: &[String]) -> Result<Action> {
     let flags = Flags::read(rest)?;
-    Ok(match cmd {
+    let action = match cmd {
         "new" => Action::New(New {
             machine: flags.req("machine")?,
             repo: flags.req("repo")?,
@@ -141,7 +144,11 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
             agent: flags.opt("agent"),
             model: flags.opt("model"),
             scout: flags.on("scout"),
-            mate: flags.opt("mate"),
+            mate: flags
+                .opt("mate")
+                .as_deref()
+                .map(MateName::parse)
+                .transpose()?,
             discord: flags.on("discord"),
         }),
         "attach" => Action::Attach(Attach {
@@ -153,15 +160,15 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
         "link" => Action::Attach(Attach {
             machine: Some(flags.req("machine")?),
             pane: flags.req("pane")?,
-            mate: Some(flags.req("mate")?),
+            mate: Some(MateName::parse(&flags.req("mate")?)?),
             discord: flags.on("discord"),
         }),
         "escalate" => Action::Escalate(Note {
-            mate: flags.req("mate")?,
+            mate: MateName::parse(&flags.req("mate")?)?,
             text: flags.req("text")?,
         }),
         "brief" => Action::Brief(Note {
-            mate: flags.req("mate")?,
+            mate: MateName::parse(&flags.req("mate")?)?,
             text: flags.req("text")?,
         }),
         "agents" => Action::Agents,
@@ -210,7 +217,7 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
             }),
         },
         "mate" => Action::Mate(Mate {
-            name: flags.words.first().cloned().context("drover mate NAME")?,
+            name: MateName::parse(flags.words.first().context("drover mate NAME")?)?,
             discord: flags.on("discord"),
         }),
         "take" => Action::Take(Target {
@@ -245,7 +252,12 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
             }),
         },
         other => bail!("unknown command {other}"),
-    })
+    };
+    // a misspelt flag would otherwise fall back to its default without a word
+    if let Some(name) = flags.unread() {
+        bail!("unknown flag --{name}");
+    }
+    Ok(action)
 }
 
 // `--name value` pairs, `--switch` flags, and bare words.
@@ -253,6 +265,7 @@ struct Flags {
     values: HashMap<String, String>,
     switches: HashSet<String>,
     words: Vec<String>,
+    read: RefCell<HashSet<String>>, // names the command asked for
 }
 
 impl Flags {
@@ -261,6 +274,7 @@ impl Flags {
             values: HashMap::new(),
             switches: HashSet::new(),
             words: Vec::new(),
+            read: RefCell::default(),
         };
         let mut it = args.iter();
         while let Some(arg) = it.next() {
@@ -291,11 +305,22 @@ impl Flags {
     }
 
     fn opt(&self, name: &str) -> Option<String> {
+        self.read.borrow_mut().insert(name.into());
         self.values.get(name).cloned()
     }
 
     fn on(&self, name: &str) -> bool {
+        self.read.borrow_mut().insert(name.into());
         self.switches.contains(name)
+    }
+
+    fn unread(&self) -> Option<String> {
+        let read = self.read.borrow();
+        self.values
+            .keys()
+            .chain(&self.switches)
+            .find(|n| !read.contains(*n))
+            .cloned()
     }
 }
 
@@ -317,6 +342,18 @@ mod tests {
         };
         assert!(n.scout && !n.discord && n.agent.is_none() && n.branch == "feature/x");
         Ok(())
+    }
+
+    #[test]
+    fn misspelt_flags_are_errors() {
+        assert!(
+            parse(&args(
+                "new --machine h --repo r --branch b --prompt p --modle opus"
+            ))
+            .is_err()
+        );
+        assert!(parse(&args("screen --pane p1 --remove")).is_err());
+        assert!(parse(&args("journal --pane p1")).is_ok());
     }
 
     #[test]
@@ -373,7 +410,7 @@ mod tests {
         else {
             bail!("not an attach");
         };
-        assert_eq!(a.mate.as_deref(), Some("reviewer"));
+        assert_eq!(a.mate.as_ref().map(MateName::as_str), Some("reviewer"));
         assert!(parse(&args("brief --mate reviewer")).is_err());
         Ok(())
     }
