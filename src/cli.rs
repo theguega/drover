@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::action::{Action, Attach, Done, Keys, Mate, New, Recall, Scout, Send, Target};
+use crate::action::{Action, Attach, Brief, Done, Keys, Mate, New, Recall, Scout, Send, Target};
 
 pub enum Invocation {
     Serve,
@@ -25,6 +25,10 @@ Commands (Discord command in brackets):
              an existing branch, or #pr. --scout asks for a report and no changes.
   attach     --machine M --pane P
              [/attach] follow an agent already running in herdr. P is from `agents`.
+  link       --machine M --pane P --mate NAME
+             attach a running agent to a mate: the mate sees it and the desk keeps the pane
+  brief      --mate NAME --text \"...\"
+             add a note to a mate's log for it to read
   agents     [/agents] agents on every machine, with the thread each one is bound to
   worktrees  [/worktrees] worktrees on every machine
   usage      [/usage] usage of each agent on every machine
@@ -85,10 +89,21 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
             agent: flags.opt("agent"),
             model: flags.opt("model"),
             scout: flags.on("scout"),
+            mate: flags.opt("mate"),
         }),
         "attach" => Action::Attach(Attach {
             machine: flags.req("machine")?,
             pane: flags.req("pane")?,
+            mate: None,
+        }),
+        "link" => Action::Attach(Attach {
+            machine: flags.req("machine")?,
+            pane: flags.req("pane")?,
+            mate: Some(flags.req("mate")?),
+        }),
+        "brief" => Action::Brief(Brief {
+            mate: flags.req("mate")?,
+            text: flags.req("text")?,
         }),
         "agents" => Action::Agents,
         "worktrees" => Action::Worktrees,
@@ -242,6 +257,18 @@ mod tests {
         };
         assert_eq!(t.thread, "9");
         assert!(parse(&args("scout")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn link_sets_the_mate_and_brief_needs_text() -> Result<()> {
+        let Invocation::Run(Action::Attach(a)) =
+            parse(&args("link --machine host --pane wAX:p1 --mate reviewer"))?
+        else {
+            bail!("not an attach");
+        };
+        assert_eq!(a.mate.as_deref(), Some("reviewer"));
+        assert!(parse(&args("brief --mate reviewer")).is_err());
         Ok(())
     }
 

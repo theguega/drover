@@ -12,7 +12,9 @@ use super::Result;
 #[derive(Clone, Copy)]
 pub enum Event {
     Started,
+    Linked,
     Owner,
+    Brief,
     Closed,
 }
 
@@ -21,7 +23,9 @@ impl Event {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Started => "started",
+            Self::Linked => "linked",
             Self::Owner => "owner",
+            Self::Brief => "brief",
             Self::Closed => "closed",
         }
     }

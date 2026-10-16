@@ -879,6 +879,7 @@ impl App {
         let thread = i.channel_id.to_string();
         let action = match i.data.name.as_str() {
             "new" => Action::New(New {
+                mate: None,
                 machine: req(i, "machine")?.into(),
                 repo: req(i, "repo")?.into(),
                 branch: req(i, "branch")?.into(),
@@ -888,6 +889,7 @@ impl App {
                 scout: flag(i, "scout") == Some(true),
             }),
             "attach" => Action::Attach(Attach {
+                mate: None,
                 machine: req(i, "machine")?.into(),
                 pane: req(i, "agent")?.into(),
             }),

@@ -24,6 +24,7 @@ pub enum Action {
     Screen(Target),
     Mate(Mate),
     Scout(Scout),
+    Brief(Brief),
     ScoutClose(Target),
     Take(Target),
     Send(Send),
@@ -42,6 +43,14 @@ pub struct New {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub scout: bool,
+    // the mate that dispatches this crewmate, which then owns its pane
+    pub mate: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Brief {
+    pub mate: String,
+    pub text: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -58,6 +67,8 @@ pub struct Mate {
 pub struct Attach {
     pub machine: String,
     pub pane: String,
+    // set by link: the mate that the pane is linked to
+    pub mate: Option<String>,
 }
 
 // A task is addressed by its Discord thread id, as `agents` prints it.
@@ -150,6 +161,7 @@ impl App {
             Action::Config => Ok(self.config()),
             Action::Mate(m) => self.cmd_mate(http, &m.name).await,
             Action::Scout(s) => self.cmd_scout(http, &s.prompt).await,
+            Action::Brief(b) => self.cmd_brief(&b),
             Action::ScoutClose(t) => self.cmd_scout_close(http, &t.thread).await,
             Action::Send(s) => self.cmd_send(&s).await,
             Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
@@ -240,8 +252,12 @@ impl App {
                 repo: repo.into(),
                 branch: wt.branch.clone(),
                 origin: Origin::Opened,
-                owner: Owner::User,
-                mate: None,
+                owner: if n.mate.is_some() {
+                    Owner::Mate
+                } else {
+                    Owner::User
+                },
+                mate: n.mate.clone(),
                 scout: None,
                 phase: Phase::Starting { prompt },
                 status: None,
@@ -253,6 +269,14 @@ impl App {
             },
         );
         self.save().await;
+        if let Some(name) = &n.mate {
+            log::append(
+                &self.mates.join("state").join(name),
+                log::Event::Linked,
+                &wt.pane_id.0,
+            )?;
+            self.write_owners(name, None).await?;
+        }
         th.create_reaction(http, head.id, emoji("👀")).await?;
         // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
         herdr::start(
@@ -299,7 +323,7 @@ impl App {
                 branch: String::new(),
                 origin: Origin::Attached,
                 owner: Owner::User,
-                mate: None,
+                mate: at.mate.clone(),
                 scout: None,
                 phase: Phase::Idle,
                 status: Some(a.agent_status),
@@ -311,6 +335,14 @@ impl App {
             },
         );
         self.save().await;
+        if let Some(name) = &at.mate {
+            log::append(
+                &self.mates.join("state").join(name),
+                log::Event::Linked,
+                &pane.0,
+            )?;
+            self.write_owners(name, None).await?;
+        }
         th.send_message(http, screen_msg(m, &pane).await).await?;
         Ok(format!("<#{th}>"))
     }
@@ -413,6 +445,17 @@ impl App {
     }
 
     // A scout: a short look with no repo, in its own folder and pane, with nothing to journal.
+    // A note for the mate, in its log, for it to read when it next looks.
+    fn cmd_brief(&self, b: &Brief) -> Result<String> {
+        let name = mate_name(&b.mate)?;
+        log::append(
+            &self.mates.join("state").join(&name),
+            log::Event::Brief,
+            &b.text,
+        )?;
+        Ok(format!("noted for mate {name}"))
+    }
+
     async fn cmd_scout(&self, http: &Http, prompt: &str) -> Result<String> {
         let id = scout_id();
         let dir = self.mates.join("state").join("scouts").join(&id);
