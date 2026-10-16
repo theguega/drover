@@ -1468,6 +1468,7 @@ async fn main() {
     let out = match cli::parse(&args) {
         Ok(cli::Invocation::Serve) => return fail(serve().await),
         Ok(cli::Invocation::Help) => Ok(cli::HELP.into()),
+        Ok(cli::Invocation::Usage(text)) => Ok(text),
         Ok(cli::Invocation::Run(action)) => control::send(&action).await,
         Err(e) => Err(e),
     };

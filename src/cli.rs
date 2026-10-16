@@ -8,6 +8,7 @@ use crate::action::{Action, Attach, Done, Keys, Mate, New, Note, Recall, Scout, 
 pub enum Invocation {
     Serve,
     Help,
+    Usage(String),
     Run(Action),
 }
 
@@ -75,14 +76,53 @@ Setup:
   Logs: journalctl --user -u drover, or drover.log in the install directory on macOS.
 ";
 
+// The block of HELP for one command: its lines up to the next blank line.
+pub fn command_help(cmd: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    let mut on = false;
+    for line in HELP.lines() {
+        if line.is_empty() {
+            on = false;
+        } else if let Some(entry) = line.strip_prefix("  ").filter(|e| !e.starts_with(' ')) {
+            on = entry.split_whitespace().next() == Some(cmd);
+        }
+        if on {
+            lines.push(line);
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n") + "\n")
+}
+
 pub fn parse(args: &[String]) -> Result<Invocation> {
     let Some((cmd, rest)) = args.split_first() else {
         return Ok(Invocation::Help);
     };
-    let flags = Flags::read(rest)?;
-    let action = match cmd.as_str() {
+    match cmd.as_str() {
         "serve" => return Ok(Invocation::Serve),
-        "help" | "-h" | "--help" => return Ok(Invocation::Help),
+        "help" | "-h" | "--help" => {
+            return Ok(match rest.first().and_then(|c| command_help(c)) {
+                Some(usage) => Invocation::Usage(usage),
+                None => Invocation::Help,
+            });
+        }
+        _ => {}
+    }
+    if rest.iter().any(|a| a == "--help" || a == "-h") {
+        return Ok(match command_help(cmd) {
+            Some(usage) => Invocation::Usage(usage),
+            None => Invocation::Help,
+        });
+    }
+    let action = action(cmd, rest).map_err(|e| match command_help(cmd) {
+        Some(_) => err!("drover {cmd}: {e}\nsee `drover {cmd} --help`"),
+        None => err!("drover {cmd}: {e}\nsee `drover help`"),
+    })?;
+    Ok(Invocation::Run(action))
+}
+
+fn action(cmd: &str, rest: &[String]) -> Result<Action> {
+    let flags = Flags::read(rest)?;
+    Ok(match cmd {
         "new" => Action::New(New {
             machine: flags.req("machine")?,
             repo: flags.req("repo")?,
@@ -163,9 +203,8 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
                 query: flags.words.join(" "),
             })
         }
-        other => bail!("unknown command {other}, see `drover help`"),
-    };
-    Ok(Invocation::Run(action))
+        other => bail!("unknown command {other}"),
+    })
 }
 
 // `--name value` pairs, `--switch` flags, and bare words.
@@ -286,6 +325,37 @@ mod tests {
         assert_eq!(r.query, "fts5 index");
         assert!(parse(&args("recall")).is_err());
         Ok(())
+    }
+
+    #[test]
+    fn help_flag_wins_over_missing_values() {
+        assert!(matches!(
+            parse(&args("new --machine meerkat --help")),
+            Ok(Invocation::Usage(_))
+        ));
+        assert!(matches!(parse(&args("new -h")), Ok(Invocation::Usage(_))));
+        assert!(matches!(
+            parse(&args("frobnicate --help")),
+            Ok(Invocation::Help)
+        ));
+    }
+
+    #[test]
+    fn command_help_is_its_own_block() {
+        let new = command_help("new").unwrap_or_default();
+        assert!(new.starts_with("  new ") && new.contains("[/new]"));
+        assert!(!new.contains("attach"));
+        let scout = command_help("scout").unwrap_or_default();
+        assert!(scout.contains("close --thread T") && !scout.contains("A task is"));
+        assert!(command_help("frobnicate").is_none());
+    }
+
+    #[test]
+    fn errors_name_the_command() {
+        let err = parse(&args("new --machine host"))
+            .err()
+            .map(|e| e.to_string());
+        assert!(err.is_some_and(|e| e.starts_with("drover new: --repo is required")));
     }
 
     #[test]
