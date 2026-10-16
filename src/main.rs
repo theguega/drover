@@ -1,4 +1,5 @@
 mod format;
+mod harness;
 mod herdr;
 mod journal;
 mod log;
@@ -706,7 +707,6 @@ impl App {
                     o.add_string_choice(&m.name, &m.name)
                 })
         };
-        let kinds = ["claude", "cursor"];
         vec![
             CreateCommand::new("new")
                 .description("Worktree + agent in a new thread")
@@ -719,10 +719,10 @@ impl App {
                 .add_option(string("branch", "new name, existing branch, or #pr").required(true))
                 .add_option(string("prompt", "first instruction").required(true))
                 .add_option(
-                    kinds
+                    harness::HARNESSES
                         .iter()
-                        .fold(string("agent", "default claude"), |o, k| {
-                            o.add_string_choice(*k, *k)
+                        .fold(string("agent", "default claude"), |o, h| {
+                            o.add_string_choice(h.name, h.name)
                         }),
                 )
                 .add_option(string("model", "default if empty").set_autocomplete(true))
@@ -916,7 +916,7 @@ impl App {
                 .map(|r| (r.clone(), r))
                 .collect(),
             Some("model") => {
-                let kind = opt(i, "agent").unwrap_or("claude");
+                let kind = opt(i, "agent").unwrap_or(harness::DEFAULT);
                 herdr::models(m, kind)
                     .await
                     .unwrap_or_default()
@@ -1155,7 +1155,7 @@ impl App {
         if !(t.phase.waiting() || was_working) {
             return self.drain_queue(http, th, &mut t, m).await;
         }
-        if t.kind == "claude" {
+        if harness::find(&t.kind).is_some_and(|h| h.transcript) {
             let Some(s) = t.session.clone() else {
                 return Ok(Step::Keep);
             };

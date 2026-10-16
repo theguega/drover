@@ -107,7 +107,9 @@ impl App {
         let m = self.machine(&n.machine)?;
         let repo = Name::parse(&n.repo)?;
         let r#ref = Name::parse(&n.branch)?;
-        let kind = n.agent.as_deref().unwrap_or("claude");
+        let kind = harness::find(n.agent.as_deref().unwrap_or(harness::DEFAULT))
+            .context("unknown agent, see drover help")?
+            .name;
         let model = n.model.as_deref().map(Name::parse).transpose()?;
 
         let wt = herdr::worktree(m, &repo, &r#ref).await?;
