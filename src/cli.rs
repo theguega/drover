@@ -1,6 +1,9 @@
 // Terminal front end: argv becomes one Action, sent to the running service.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 use super::*;
 use crate::action::{
@@ -132,7 +135,7 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
 
 fn action(cmd: &str, rest: &[String]) -> Result<Action> {
     let flags = Flags::read(rest)?;
-    Ok(match cmd {
+    let action = match cmd {
         "new" => Action::New(New {
             machine: flags.req("machine")?,
             repo: flags.req("repo")?,
@@ -249,7 +252,12 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
             }),
         },
         other => bail!("unknown command {other}"),
-    })
+    };
+    // a misspelt flag would otherwise fall back to its default without a word
+    if let Some(name) = flags.unread() {
+        bail!("unknown flag --{name}");
+    }
+    Ok(action)
 }
 
 // `--name value` pairs, `--switch` flags, and bare words.
@@ -257,6 +265,7 @@ struct Flags {
     values: HashMap<String, String>,
     switches: HashSet<String>,
     words: Vec<String>,
+    read: RefCell<HashSet<String>>, // names the command asked for
 }
 
 impl Flags {
@@ -265,6 +274,7 @@ impl Flags {
             values: HashMap::new(),
             switches: HashSet::new(),
             words: Vec::new(),
+            read: RefCell::default(),
         };
         let mut it = args.iter();
         while let Some(arg) = it.next() {
@@ -295,11 +305,22 @@ impl Flags {
     }
 
     fn opt(&self, name: &str) -> Option<String> {
+        self.read.borrow_mut().insert(name.into());
         self.values.get(name).cloned()
     }
 
     fn on(&self, name: &str) -> bool {
+        self.read.borrow_mut().insert(name.into());
         self.switches.contains(name)
+    }
+
+    fn unread(&self) -> Option<String> {
+        let read = self.read.borrow();
+        self.values
+            .keys()
+            .chain(&self.switches)
+            .find(|n| !read.contains(*n))
+            .cloned()
     }
 }
 
@@ -321,6 +342,18 @@ mod tests {
         };
         assert!(n.scout && !n.discord && n.agent.is_none() && n.branch == "feature/x");
         Ok(())
+    }
+
+    #[test]
+    fn misspelt_flags_are_errors() {
+        assert!(
+            parse(&args(
+                "new --machine h --repo r --branch b --prompt p --modle opus"
+            ))
+            .is_err()
+        );
+        assert!(parse(&args("screen --pane p1 --remove")).is_err());
+        assert!(parse(&args("journal --pane p1")).is_ok());
     }
 
     #[test]
