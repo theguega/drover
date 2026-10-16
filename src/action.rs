@@ -158,6 +158,13 @@ fn remove_scout_dir(root: &Path, id: &str) -> Result<()> {
     }
 }
 
+// What became of a prompt.
+pub enum Sent {
+    Now,
+    Queued,  // the agent works; it goes out on the next idle
+    Blocked, // a dialog holds the agent; nothing was sent
+}
+
 // Most mates a desk runs at once.
 const MAX_MATES: usize = 3;
 
@@ -610,31 +617,51 @@ impl App {
     // A prompt from the terminal: the same path as a Discord message in the thread.
     async fn cmd_send(&self, s: &Send) -> Result<String> {
         let (_, cell) = self.find_task(&s.thread).await?;
-        let outcome = {
+        Ok(match self.send_prompt(&cell, &s.text, None).await? {
+            Sent::Now => "sent",
+            Sent::Queued => "queued, sent when the agent is idle",
+            Sent::Blocked => "the agent waits on a dialog: answer it with keys, then send again",
+        }
+        .into())
+    }
+
+    // A prompt from Discord or the terminal. `msg` is the Discord message that carries its reaction.
+    pub(crate) async fn send_prompt(
+        &self,
+        cell: &Cell,
+        text: &str,
+        msg: Option<MessageId>,
+    ) -> Result<Sent> {
+        let sent = {
             let mut t = cell.lock().await;
             if t.phase == Phase::Gone {
-                bail!("that agent has exited");
+                bail!("the agent has exited: attach a running one or start a new task");
             }
             let m = self.machine(&t.machine)?;
-            match herdr::prompt(m, &t.pane, &s.text).await {
+            match herdr::prompt(m, &t.pane, text).await {
                 Ok(()) => {
+                    // a pending first prompt or journal entry keeps its phase; its reply covers this one too
                     if t.phase == Phase::Idle {
                         t.phase = Phase::Waiting;
                     }
-                    "sent"
+                    if msg.is_some() {
+                        t.prompt_msg = msg;
+                    }
+                    Sent::Now
                 }
+                Err(e) if e.is(&herdr::Code::AgentBlocked) => return Ok(Sent::Blocked),
                 Err(e) if e.is_busy() => {
                     if t.queued.is_some() {
-                        bail!("one prompt is already queued for this agent");
+                        bail!("one message is already queued; send again after it runs");
                     }
-                    t.queued = Some(s.text.clone());
-                    "queued, sent when the agent is idle"
+                    t.queued = Some(text.into());
+                    Sent::Queued
                 }
                 Err(e) => return Err(e.into()),
             }
         };
         self.save().await;
-        Ok(outcome.into())
+        Ok(sent)
     }
 
     // The mate's own task.

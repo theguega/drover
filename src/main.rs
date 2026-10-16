@@ -33,7 +33,7 @@ use tokio::{
 
 use action::{
     Action, Attach, Done, JournalList, JournalRemove, Keys, Mate, MateName, New, Recall, Scout,
-    Target,
+    Sent, Target,
 };
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
@@ -1193,49 +1193,27 @@ impl App {
         if text.is_empty() {
             return Ok(());
         }
-        let mut t = cell.lock().await;
-        if t.phase == Phase::Gone {
-            msg.reply(http, "agent exited, /attach a running one or /new")
-                .await?;
-            return Ok(());
-        }
-        let m = self.machine(&t.machine)?;
-        if let Err(e) = herdr::prompt(m, &t.pane, text).await {
-            if e.is(&herdr::Code::AgentBlocked) {
-                let content = screen(m, &t.pane, "answer the dialog first, then resend\n").await;
-                drop(t);
-                let out = CreateMessage::new()
-                    .content(content)
-                    .components(key_rows())
-                    .reference_message(msg);
-                msg.channel_id.send_message(http, out).await?;
-                return Ok(());
+        match self.send_prompt(&cell, text, Some(msg.id)).await? {
+            Sent::Now => {
+                msg.react(http, emoji("👀")).await?;
             }
-            if e.is_busy() {
-                if t.queued.is_some() {
-                    drop(t);
-                    msg.reply(http, "one message already queued; send again after it runs")
-                        .await?;
-                    return Ok(());
-                }
-                t.queued = Some(text.into());
-                drop(t);
-                self.save().await;
+            Sent::Queued => {
                 msg.react(http, emoji("👀")).await?;
                 msg.reply(http, "queued — sends when the agent is idle")
                     .await?;
-                return Ok(());
             }
-            return Err(e.into());
+            Sent::Blocked => {
+                let (m, pane) = {
+                    let t = cell.lock().await;
+                    (self.machine(&t.machine)?, t.pane.clone())
+                };
+                let out = CreateMessage::new()
+                    .content(screen(m, &pane, "answer the dialog first, then resend\n").await)
+                    .components(key_rows())
+                    .reference_message(msg);
+                msg.channel_id.send_message(http, out).await?;
+            }
         }
-        // a pending first prompt or journal entry keeps its phase; its reply covers this one too
-        if t.phase == Phase::Idle {
-            t.phase = Phase::Waiting;
-        }
-        t.prompt_msg = Some(msg.id);
-        drop(t);
-        self.save().await;
-        msg.react(http, emoji("👀")).await?;
         Ok(())
     }
 
