@@ -333,7 +333,7 @@ impl App {
             workspace: wt.workspace_id,
             kind: kind.into(),
             repo: repo.into(),
-            branch: wt.branch.clone(),
+            branch: Some(wt.branch.clone()),
             origin: Origin::Opened,
             role: n.mate.clone().map_or(Role::Task, |mate| Role::Crew {
                 mate,
@@ -395,11 +395,7 @@ impl App {
                     return Ok(format!("already open in <#{th}>"));
                 }
             } else if at.discord {
-                let middle = if t.branch.is_empty() {
-                    &t.kind
-                } else {
-                    &t.branch
-                };
+                let middle = t.branch.as_ref().unwrap_or(&t.kind);
                 let th = self
                     .open_thread(http, &format!("{} · {middle} · {}", t.repo, m.name))
                     .await?;
@@ -448,7 +444,7 @@ impl App {
             workspace: a.workspace_id,
             kind: a.agent,
             repo,
-            branch: String::new(),
+            branch: None,
             origin: Origin::Attached,
             role: at.mate.clone().map_or(Role::Task, |mate| Role::Crew {
                 mate,
@@ -724,7 +720,7 @@ impl App {
             workspace,
             kind: harness::DEFAULT.into(),
             repo: "scouts".into(),
-            branch: String::new(),
+            branch: None,
             origin: Origin::Attached,
             role: Role::Scout(id.clone()),
             phase: Phase::Starting {
@@ -803,7 +799,7 @@ impl App {
             workspace,
             kind: harness::DEFAULT.into(),
             repo: "mates".into(),
-            branch: String::new(),
+            branch: None,
             origin: Origin::Attached,
             role: Role::Mate(name.clone()),
             phase: Phase::Starting {
@@ -866,7 +862,7 @@ impl App {
             if t.repo != repo {
                 continue;
             }
-            if t.branch == branch {
+            if t.branch.as_deref() == Some(branch.as_str()) {
                 exact = Some(name.clone());
             } else {
                 near = Some(name.clone());

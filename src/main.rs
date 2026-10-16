@@ -186,7 +186,8 @@ struct Task {
     workspace: WorkspaceId,
     kind: String,
     repo: String,
-    branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>, // none for an agent drover attached to, a mate, or a scout
     origin: Origin,
     role: Role,
     phase: Phase,
@@ -216,7 +217,8 @@ struct Stored {
     workspace: WorkspaceId,
     kind: String,
     repo: String,
-    branch: String,
+    #[serde(default)]
+    branch: Option<String>,
     origin: Option<Origin>,
     role: Option<Role>,
     owner: Option<Owner>,
@@ -283,7 +285,7 @@ impl From<Stored> for Task {
             workspace: s.workspace,
             kind: s.kind,
             repo: s.repo,
-            branch: s.branch,
+            branch: s.branch.filter(|b| !b.is_empty()),
             origin,
             role,
             phase,
@@ -945,7 +947,7 @@ impl App {
                 day: today(),
                 machine: t.machine.clone(),
                 repo: t.repo.clone(),
-                branch: t.branch.clone(),
+                branch: t.branch.clone().unwrap_or_default(),
                 text: entry.into(),
             })
             .await?;
@@ -1333,7 +1335,10 @@ impl App {
         };
         let who = format!(
             "crew {} on {} ({} {})",
-            t.pane.0, t.machine, t.repo, t.branch
+            t.pane.0,
+            t.machine,
+            t.repo,
+            t.branch.as_deref().unwrap_or("-")
         );
         let Seen::Agent(now, session) = seen else {
             t.phase = Phase::Gone;
