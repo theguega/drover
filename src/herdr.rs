@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::{Deserialize, Serialize, de::IgnoredAny};
@@ -13,6 +13,7 @@ use serde_json::json;
 use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     process::Command,
+    time::sleep,
 };
 
 use crate::socket::{Link, SSH_OPTS};
@@ -410,13 +411,20 @@ pub async fn start(
         .unwrap_or_default();
     let params =
         json!({"name": name, "kind": kind, "pane_id": pane.0, "args": args, "timeout_ms": 90_000});
-    match m
-        .link
-        .call::<IgnoredAny>("agent.start", params, Duration::from_secs(100))
-        .await
-    {
-        Err(e) if !e.is(&Code::AgentNotReady) => Err(e),
-        _ => Ok(()),
+    // A new pane's shell may still be starting, and agent.start refuses until it prompts.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match m
+            .link
+            .call::<IgnoredAny>("agent.start", params.clone(), Duration::from_secs(100))
+            .await
+        {
+            Err(e) if !e.is(&Code::AgentNotReady) && Instant::now() < deadline => {
+                sleep(Duration::from_millis(500)).await;
+            }
+            Err(e) if !e.is(&Code::AgentNotReady) => return Err(e),
+            _ => return Ok(()),
+        }
     }
 }
 
