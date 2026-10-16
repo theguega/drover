@@ -1103,12 +1103,15 @@ impl App {
     }
 
     async fn on_push(&self, http: &Http, machine: &str, push: socket::Push) {
+        let detected = matches!(push, socket::Push::Detected(_));
         let (pane, status) = match push {
             socket::Push::Status(pane, s) if s != Status::Unknown => (pane, Some(s)),
             socket::Push::Gone(pane) => (pane, None),
             socket::Push::Status(pane, _) | socket::Push::Detected(pane) => {
                 if self.live(machine, &pane).await.is_some() {
                     self.reconcile(http, machine).await; // the agent may have left or restarted
+                } else if detected {
+                    self.adopt(http, machine, &pane).await;
                 }
                 return;
             }

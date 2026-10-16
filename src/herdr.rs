@@ -627,6 +627,32 @@ pub async fn tab_pane(m: &Machine, tab: &str, cwd: &str) -> Result<(WorkspaceId,
     Ok((workspace, split.pane.pane_id))
 }
 
+// The repo and branch of a folder, for pane awareness. None when the folder is not a git checkout.
+pub async fn checkout(m: &Machine, cwd: &str) -> Result<Option<(String, String)>> {
+    let dir = quote(cwd);
+    let script = format!(
+        "git -C {dir} rev-parse --path-format=absolute --git-common-dir && git -C {dir} rev-parse --abbrev-ref HEAD"
+    );
+    let o = sh(m, &script, Duration::from_secs(10)).await?;
+    if o.code != Some(0) {
+        return Ok(None);
+    }
+    let mut lines = o.out.lines();
+    let common = lines.next().unwrap_or_default();
+    let branch = lines.next().unwrap_or_default();
+    let repo = Path::new(common)
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    Ok(Some((repo.into(), branch.into())))
+}
+
+// Quotes one argument for the shell: the folder comes from herdr, not from the user.
+fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 pub async fn close_pane(m: &Machine, pane: &PaneId) -> Result<()> {
     m.link
         .call::<IgnoredAny>("pane.close", json!({"pane_id": pane.0}), SHORT)
@@ -986,6 +1012,12 @@ mod tests {
         assert!(matches!(last_reply(only_prompt), Scan::Reply(None)));
         let no_prompt = r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"x"}]}}"#;
         assert!(matches!(last_reply(no_prompt), Scan::NoPrompt));
+    }
+
+    #[test]
+    fn quote_keeps_one_argument() {
+        assert_eq!(quote("/a b/c"), "'/a b/c'");
+        assert_eq!(quote("it's"), "'it'\\''s'");
     }
 
     #[test]

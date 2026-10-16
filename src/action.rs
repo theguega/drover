@@ -584,6 +584,66 @@ impl App {
         Ok(format!("<#{th}>"))
     }
 
+    // A new agent nobody started through drover: link it to a mate that works on the same repo and branch.
+    // Same repo on another branch is asked about in the mate's thread. Anything else is left alone.
+    pub(crate) async fn adopt(&self, http: &Http, machine: &str, pane: &PaneId) {
+        if let Err(e) = self.adopt_pane(http, machine, pane).await {
+            eprintln!("adopt {}: {e}", pane.0);
+        }
+    }
+
+    async fn adopt_pane(&self, http: &Http, machine: &str, pane: &PaneId) -> Result<()> {
+        let m = self.machine(machine)?;
+        let Some(agent) = herdr::agents(m)
+            .await?
+            .into_iter()
+            .find(|a| a.pane_id == *pane)
+        else {
+            return Ok(());
+        };
+        let Some((repo, branch)) = herdr::checkout(m, &agent.cwd).await? else {
+            return Ok(());
+        };
+
+        let mut exact = None;
+        let mut near = None;
+        for (_, cell) in self.cells() {
+            let t = cell.lock().await;
+            let Some(name) = &t.mate else { continue };
+            if t.repo != repo {
+                continue;
+            }
+            if t.branch == branch {
+                exact = Some(name.clone());
+            } else {
+                near = Some(name.clone());
+            }
+        }
+
+        if let Some(name) = exact {
+            let at = Attach {
+                machine: machine.into(),
+                pane: pane.0.clone(),
+                mate: Some(name),
+            };
+            self.cmd_attach(http, &at).await?;
+        } else if let Some(name) = near {
+            for (id, cell) in self.cells() {
+                let t = cell.lock().await;
+                if t.mate.as_deref() == Some(name.as_str()) && t.repo == "mates" {
+                    let text = format!(
+                        "a new agent on {repo} {branch} at {} is not linked to you: `drover link --machine {machine} --pane {} --mate {name}` links it",
+                        pane.0, pane.0
+                    );
+                    drop(t);
+                    id.say(http, text).await?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
     // The panes linked to a mate and who may drive each one, for the mate to read before it sends input.
     // `skip` leaves out a pane that is closing.
     pub(crate) async fn write_owners(&self, name: &str, skip: Option<&PaneId>) -> Result<()> {
