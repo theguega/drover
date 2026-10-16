@@ -688,7 +688,9 @@ impl App {
         let Some(cell) = self.mate_cell(name).await else {
             return Ok(());
         };
+        // the event already says crew
         let head = text.lines().next().unwrap_or_default();
+        let head = head.strip_prefix("crew ").unwrap_or(head);
         log::append(&self.mate_dir(name), log::Event::Crew, head)?;
         let mut t = cell.lock().await;
         let m = self.machine(&t.machine)?;
