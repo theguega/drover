@@ -68,9 +68,10 @@ Names must match `[a-z][a-z0-9_-]{0,31}`.
 - The pane goes into the `drover` workspace, tab `mates`, with cwd `mates/` in the drover checkout: the folder that holds its `AGENTS.md`.
 - Up to three mates. drover refuses a fourth.
 - A mate dispatches crewmates with `drover new --mate <name>`. The crewmate's pane is owned by that mate, and it is listed in the mate's owner list.
-- A mate's playbook (`mates/AGENTS.md`) covers dispatch, review, handoff and close, with the practices it works by: spec before code, small diffs, tests as the check, a second look before merge, bounded context, and asking when ambiguous. Public references: [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and the open [Agent Skills spec](https://agentskills.io). Borrow checkpoints, do not copy whole packs.
+- A mate's playbook (`mates/AGENTS.md`) covers the goal graph, model routing, dispatch, the loop, handoff and close, with the practices it works by: spec before code, small diffs, the check decides, a second look before merge, bounded context, and asking when ambiguous.
+- A goal is a small graph in `state/<name>/goal.md`: nodes are crewmates, each with one check the mate runs itself, and edges are `after <node>`. One node is the default, since a crewmate runs its own subagents. Each node loops on crew news for at most three rounds without progress, then escalates. drover does not read the graph: it only carries the news. Public references: [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and the open [Agent Skills spec](https://agentskills.io). Borrow checkpoints, do not copy whole packs.
 - A mate's reports are bounded: what changed, what was checked, what is left.
-- `drover escalate --mate <name> --text ...` posts a question in the mate's thread and logs it.
+- `drover escalate --mate <name> --text ...` posts in the mate's thread and logs it. A mate escalates a decision that is the desk's, a node stuck three rounds, and the finished graph, nothing else.
 - A crewmate the mate owns has no thread of its own, so drover sends its replies, dialogs and exit to the mate's pane, or holds them in the mate's inbox until its turn ends.
 - The mate's thread carries only answers to the desk's own messages, the mate's dialogs, and `drover escalate`. A turn started by crew news posts nothing.
 
