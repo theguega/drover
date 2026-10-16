@@ -17,8 +17,10 @@ done
 
 ln -sfn "$root/bin/drover-wt" "$bin/drover-wt"
 
-mkdir -p ~/.local/share/bash-completion/completions
+mkdir -p ~/.local/share/bash-completion/completions ~/.local/share/zsh/site-functions
 ln -sfn "$root/completions/drover.bash" ~/.local/share/bash-completion/completions/drover
+ln -sfn "$root/completions/_drover" ~/.local/share/zsh/site-functions/_drover
+echo "zsh: put \`fpath=(~/.local/share/zsh/site-functions \$fpath)\` before compinit in .zshrc"
 
 # ask on the terminal, so this also works when the script arrives through curl
 ask() {
@@ -33,7 +35,7 @@ if ((remote)); then
   repos=$default_repos
   [[ -r /dev/tty ]] && repos=$(ask "REPOS_ROOT: where repositories and worktrees live" "$default_repos")
   mkdir -p "${repos/#\~/$HOME}"
-  echo "linked drover-wt and bash completion"
+  echo "linked drover-wt and completions"
   [[ "$repos" == "$default_repos" ]] || echo "set REPOS_ROOT=$repos in your shell environment"
   echo "this machine needs herdr, python3 and ssh from the host"
   exit 0

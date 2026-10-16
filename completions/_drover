@@ -1,0 +1,76 @@
+#compdef drover
+# zsh completion for drover; installed by install.sh into a site-functions directory.
+
+_drover() {
+  local -a commands
+  commands=(
+    'new:worktree and agent in a new Discord thread'
+    'attach:follow an agent already running in herdr'
+    'link:attach a running agent to a mate'
+    'escalate:post a question in the mate thread'
+    'brief:add a note to a mate log'
+    'agents:agents on every machine'
+    'worktrees:worktrees on every machine'
+    'usage:usage of each agent'
+    'screen:the terminal of a task agent'
+    'keys:send keys to a task agent'
+    'scout:a short look with no repo'
+    'mate:start a mate'
+    'send:send a prompt to a task agent'
+    'take:give the pane back to you'
+    'release:let the mate drive the pane'
+    'done:journal entry, then close the task'
+    'recall:search the journal'
+    'config:show this service setup'
+    'help:show help'
+  )
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'drover command' commands
+    return
+  fi
+
+  local -a machines mates threads
+  local machine i
+  for (( i = 3; i < CURRENT; i++ )); do
+    [[ $words[i] == --machine ]] && machine=$words[i+1]
+  done
+
+  case $words[2] in
+    new) _arguments \
+      "--machine=[machine]:machine:(${(f)"$(drover complete machines 2>/dev/null)"})" \
+      '--repo=[repository]:repo:' \
+      '--branch=[branch, new name, or #pr]:branch:' \
+      '--prompt=[prompt]:prompt:' \
+      '--agent=[agent]:agent:' \
+      '--model=[model]:model:' \
+      '--scout[report only, no changes]' \
+      "--mate=[mate]:mate:(${(f)"$(drover complete mates 2>/dev/null)"})" ;;
+    attach|link) _arguments \
+      "--machine=[machine]:machine:(${(f)"$(drover complete machines 2>/dev/null)"})" \
+      "--pane=[pane]:pane:(${(f)"$(drover complete panes "$machine" 2>/dev/null)"})" \
+      "--mate=[mate]:mate:(${(f)"$(drover complete mates 2>/dev/null)"})" ;;
+    escalate|brief) _arguments \
+      "--mate=[mate]:mate:(${(f)"$(drover complete mates 2>/dev/null)"})" \
+      '--text=[text]:text:' ;;
+    screen|take|release) _arguments \
+      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" ;;
+    keys) _arguments \
+      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" \
+      '--keys=[keys, space separated]:keys:' ;;
+    send) _arguments \
+      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" \
+      '--text=[prompt]:text:' ;;
+    scout) _arguments \
+      '1: :(close)' \
+      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" ;;
+    done) _arguments \
+      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" \
+      '--remove[delete the checkout if clean and merged]' \
+      '--no-journal[close without a journal entry]' ;;
+    mate) _arguments "1: :(${(f)"$(drover complete mates 2>/dev/null)"})" ;;
+    help) _describe -t commands 'drover command' commands ;;
+  esac
+}
+
+_drover "$@"
