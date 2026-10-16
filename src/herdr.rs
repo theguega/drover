@@ -402,7 +402,7 @@ pub async fn start(
     path: &str,
     model: Option<&Name>,
 ) -> Result<()> {
-    let cd = json!({"pane_id": pane.0, "text": format!("cd '{path}'"), "keys": ["Enter"]});
+    let cd = json!({"pane_id": pane.0, "text": format!("cd {}", quote(path)), "keys": ["Enter"]});
     m.link
         .call::<IgnoredAny>("pane.send_input", cd, SHORT)
         .await?;
@@ -656,7 +656,7 @@ pub async fn checkout(m: &Machine, cwd: &str) -> Result<Option<(String, String)>
     Ok(Some((repo.into(), branch.into())))
 }
 
-// Quotes one argument for the shell: the folder comes from herdr, not from the user.
+// Quotes one argument for the shell, for a folder that came from herdr or drover-wt.
 fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
