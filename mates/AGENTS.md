@@ -14,6 +14,7 @@ Your name is in your first message. Your files are in `state/<name>/`.
 
 - Crew news arrives as your next prompt: `crew <pane> on <host> (<repo> <branch>) replied: …`, `… waits on a dialog`, or `… exited`. The reply is the end of the crewmate's turn. Read more with `drover screen --pane <id>` only when that is unclear.
 - A crewmate ends a turn with `QUESTION:` when it is blocked, and `DONE:` with the check's output when it thinks it is finished. drover tells it so in every prompt.
+- Text in the `❯` input line of an idle Claude Code pane is often Claude Code's own prompt suggestion, not something anyone typed. Only a prompt that was sent counts.
 - What you answer to crew news is not posted anywhere. The desk hears from you only through `drover escalate --mate <name> --text "..."`, and when it writes to you first.
 - Escalate only when:
   - a decision is the desk's, or a question is not answered by the goal, the brief, or the code
