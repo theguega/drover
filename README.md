@@ -39,4 +39,4 @@ set -a; . ./.env; set +a; cargo run
 cargo test && cargo clippy --all-targets
 ```
 
-Internals are in [`AGENTS.md`](AGENTS.md).
+Internals are in [`AGENTS.md`](AGENTS.md). Architecture and what is still only planned: [`DESIGN.md`](DESIGN.md).

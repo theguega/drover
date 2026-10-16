@@ -5,3 +5,4 @@ journal.db
 drover.log
 .DS_Store
 state.json.tmp
+mates/state/

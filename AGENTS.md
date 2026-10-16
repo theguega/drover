@@ -1,6 +1,6 @@
 # drover
 
-The user-facing guide is `README.md`. This file is how the program is put together.
+The user-facing guide is `README.md`. This file is how the program is put together. The design, including what is built and what is only designed, is in [`DESIGN.md`](DESIGN.md).
 
 ## Layout
 
@@ -11,6 +11,8 @@ src/herdr.rs    herdr calls per machine, herdr-wt and transcripts over sh / ssh
 src/format.rs   agent markdown to discord: tables, rules, fences cut across messages
 src/journal.rs  journal store, search, context for new tasks
 install.sh      build + user service (systemd or launchd) from this checkout
+mates/          mate instructions and playbooks (designed, see DESIGN.md)
+mates/state/    mate logs and scout directories (gitignored)
 state.json      thread → task map (gitignored)
 journal.db      journal (gitignored)
 ```
