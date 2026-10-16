@@ -225,6 +225,8 @@ struct App {
     started: AtomicBool,
     /// Watchers resubscribe when the set of panes for a machine changes.
     wake: Notify,
+    /// Saves share one temp file, so they take turns.
+    saving: Mutex<()>,
 }
 
 impl App {
@@ -267,6 +269,7 @@ impl App {
             journal: Journal::open("journal.db")?,
             started: AtomicBool::new(false),
             wake: Notify::new(),
+            saving: Mutex::new(()),
         })
     }
 
@@ -321,12 +324,18 @@ impl App {
 
     // Never call while holding a task lock.
     async fn save(&self) {
+        let _turn = self.saving.lock().await;
         let mut all = BTreeMap::new();
         for (id, cell) in self.cells() {
             all.insert(id, cell.lock().await.clone());
         }
+        // rename is atomic, so a crash mid-write keeps the previous state file
+        let tmp = format!("{STATE}.tmp");
         let written = match serde_json::to_string_pretty(&all) {
-            Ok(json) => tokio::fs::write(STATE, json).await.map_err(Error::from),
+            Ok(json) => match tokio::fs::write(&tmp, json).await {
+                Ok(()) => tokio::fs::rename(&tmp, STATE).await.map_err(Error::from),
+                Err(e) => Err(e.into()),
+            },
             Err(e) => Err(e.into()),
         };
         if let Err(e) = written {

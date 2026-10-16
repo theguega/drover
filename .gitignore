@@ -4,3 +4,4 @@ state.json
 journal.db
 drover.log
 .DS_Store
+state.json.tmp
