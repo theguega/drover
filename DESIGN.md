@@ -1,6 +1,6 @@
 # Design
 
-drover is a model-free desk runtime. It relays Discord and terminal input to herdr panes, tracks which thread owns which pane, and keeps the journal. Agents are the only thing that thinks.
+drover is an agent runtime for herdr. It starts agents in worktrees, follows them, relays Discord and terminal input to their panes, tracks which thread owns which pane, and keeps the journal. It ships its own worktree tool (`drover-wt`) and its own skill, and it installs with one curl command. drover is model-free: the agents are the CLIs, and they are the only thing that thinks.
 
 Status: **built** is what is in the code today. **designed** is agreed but not yet built.
 
@@ -9,10 +9,10 @@ Status: **built** is what is in the code today. **designed** is agreed but not y
 | Layer | Owns | Status |
 |---|---|---|
 | herdr | workspaces, tabs, panes, agent status, named agents | built |
-| herdr-wt | worktrees: new branch, existing branch, `#pr`, remove | built |
+| drover-wt | worktrees: new branch, existing branch, `#pr`, remove | built |
 | drover | Discord threads, thread → pane map, journal, usage, event log | built (log designed) |
 | `mates/` | mate instructions and playbooks (`AGENTS.md`, short playbooks), `state/` | designed |
-| skills | one copy in `~/.dotfiles/agents/.agents/skills`, symlinked from `~/.claude/skills` | built (dotfiles) |
+| skills | `skills/drover` in the repo, an Agent Skills folder that people copy into their own skills directory | built |
 
 ## Lanes
 
@@ -30,16 +30,16 @@ Every agent pane has one owner, `user` or `mate`. Owner changes only by an expli
 
 ## Harnesses
 
-A harness is data: how to start it, submit a prompt, find its transcript, read its usage, and what it can do (resume, usage, visible subagents). claude and cursor are the two today.
+A harness is data: how to start it, submit a prompt, find its transcript, read its usage, and what it can do (resume, usage, visible subagents). Two harnesses are built today.
 
 Adding a harness adds one entry. A trait waits for a third harness that actually differs.
 
-Skills location is per harness data too. Claude reads `~/.claude/skills` (symlink). Cursor reads `.agents` directly.
+Skills are not drover's business. drover ships the `skills/drover` folder, and each person copies it where their agents read skills.
 
 ## Context
 
-- A new task's context travels in the prompt drover sends, the same way `/new` appends journal recall. herdr-wt and herdr do not inject anything.
-- Claude reads `AGENTS.md` and `CLAUDE.md` from the working directory on its own.
+- A new task's context travels in the prompt drover sends, the same way `/new` appends journal recall. drover-wt and herdr do not inject anything.
+- An agent reads the project instructions in its working directory on its own, so every worktree gets `AGENTS.md`.
 - Long tasks rely on the agent's own compaction. drover holds no conversation.
 
 ## Pane awareness
@@ -67,7 +67,7 @@ Names must match `[a-z][a-z0-9_-]{0,31}`.
 - Started from Discord (`/mate <name>`) or the terminal. Both call one code path.
 - The pane goes into the `drover` workspace, tab `mates`, with cwd `drover/mates/`, the directory that holds its `AGENTS.md`.
 - Up to three mates. drover refuses a fourth.
-- A mate creates crewmate worktrees with `herdr-wt`. Repos resolve under `REPOS_ROOT`, so `mates/` needs no worktree of its own.
+- A mate creates crewmate worktrees with `drover-wt`. Repos resolve under `REPOS_ROOT`, so `mates/` needs no worktree of its own.
 - A mate's SOP is a few short playbooks in `mates/`: dispatch, review, handoff, close. They cover spec before code, small diffs, tests as the check, a second look before merge, bounded context, and asking when ambiguous. Public references: [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and the open [Agent Skills spec](https://agentskills.io). Borrow checkpoints, do not copy whole packs.
 - A mate's crewmates report only bounded output: the same five-line entry `/done` writes, plus status changes.
 
@@ -79,7 +79,7 @@ A scout is a short, unrelated look. No task, no repo, no journal.
 - It gets its own pane in a `scouts` tab, owned by the scout.
 - It ends on `/scout close` only. drover closes the pane and deletes that one directory.
 - The delete is restricted to the scouts root, and that path check is tested first.
-- If a scout turns into real work, promote it to a task and use the normal `herdr-wt` path.
+- If a scout turns into real work, promote it to a task and use the normal `drover-wt` path.
 
 ## CLI (built)
 
@@ -101,7 +101,7 @@ drover writes an append-only log per mate under `mates/state/<name>/log`. Lines 
 `/done` (direct tasks) and a mate's close step do the same thing:
 
 1. journal entry (unless `journal:false`)
-2. `herdr-wt rm` only on a checkout drover opened, and only if clean and merged
+2. `drover-wt rm` only on a checkout drover opened, and only if clean and merged
 3. pane closed
 4. state marked closed
 

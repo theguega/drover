@@ -1,42 +1,91 @@
 # drover
 
-**The same herdr workspace, from the desk or from Discord.**
+**An agent runtime for herdr.** drover starts coding agents in git worktrees, follows them in herdr, and carries their answers to Discord or your terminal. Every task is an ordinary herdr workspace, so you can take over any agent at any time.
 
-One branch → one worktree → one herdr workspace → one agent. At the desk you type into that agent. Away from it, a Discord thread types into the same pane and brings the answer back. drover has no model.
+drover calls no model itself. The agents are the CLIs you already use.
+
+## What you get
+
+- **Tasks:** `drover new` opens a worktree, starts an agent in it, and opens a Discord thread for it. Messages in the thread are the next prompts.
+- **Terminal and Discord are the same thing.** Every Discord command has a terminal form, and both act on the same tasks.
+- **`drover-wt`:** worktrees for herdr, from a branch, a new name, or a GitHub pull request (`#123`).
+- **A journal:** `drover done` asks the agent for a five-line entry, and `drover recall` searches them later.
+- **Remotes:** drive herdr servers on other machines over ssh from the same desk.
+- **A skill:** `skills/drover` teaches agents to use all of this. See [Skill](#skill).
 
 ## Install
 
-The dotfiles first, on every machine (`herdr-wt`, herdr keys, `.zshenv`). Then on the one host that runs drover:
+You need herdr, git, jq, ssh, zsh and Rust (for `cargo`). On the machine that runs drover:
 
 ```sh
-git clone git@github.com:theguega/drover.git ~/Developer/drover
-cd ~/Developer/drover && ./install.sh   # seeds .env and stops; fill it, rerun
+curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh
 ```
 
-`install.sh` builds a release and (re)starts a user service from this checkout: systemd on Linux, launchd on macOS. Update with `git pull && ./install.sh`.
+It clones drover to `~/.local/share/drover`, asks for the Discord settings (below) and where your repositories live, builds it, puts `drover` and `drover-wt` on your PATH, links the skill, and starts the service (systemd on Linux, launchd on macOS). Run the same command again to update.
 
-Remotes need only the dotfiles, a running herdr, `python3`, and passwordless `ssh <name>`.
+On each remote machine, install only the worktree tool and the skill:
 
-`.env`: `DISCORD_TOKEN`, `DISCORD_GUILD_ID`, `DISCORD_CHANNEL_ID`, `ALLOWED_USER_IDS`, `HOST_NAME`, `REMOTES` (comma-separated ssh names).
+```sh
+curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh -s -- --remote
+```
 
-## Discord
+## Discord setup
 
-| | |
-|---|---|
-| `/new machine repo branch prompt [agent] [model] [scout]` | Worktree + agent. `model` is passed to the agent as `--model`. `branch` is a new name, an existing branch, or `#pr`. `scout` asks for a report and no changes. A new checkout gets the clone's untracked files matching `.worktreeinclude` |
-| a message in the thread | Next prompt (queued if the agent is busy) |
-| `/attach machine agent` | Follow an agent you started at the desk |
-| `/screen` · `/keys` | Terminal view and key buttons |
-| `/done [remove] [journal]` | Journal entry, close workspace; `journal:false` skips the entry; `remove` runs `herdr-wt rm` on a checkout drover opened: a dirty checkout and an unmerged branch are kept |
-| `/recall` · `/agents` · `/worktrees` · `/usage` | Journal search, status, and Claude / Cursor usage |
+1. Create an application in the Discord developer portal, add a bot, and copy its token.
+2. Invite the bot to your server with permission to read and send messages, create threads, and add reactions.
+3. Copy the server (guild) id, the text channel where drover posts, and your own user id. Discord's developer mode shows these under "Copy ID".
 
-Default agent is `claude` (`cursor` also). State is one reaction: 👀 working · ⏸️ dialog · ✅ done.
+The installer asks for the token, the guild id, the channel id, the allowed user ids (comma-separated; only these can drive agents), this machine's name, and the remotes (ssh names, comma-separated). It writes `.env` in the install directory. `drover config` shows the live values.
+
+## Use
+
+```sh
+drover help                  # every command, with its Discord equivalent
+drover new --machine host --repo myrepo --branch feature-x --prompt "add retries to the client"
+drover agents                # agents on every machine, and the thread each one is bound to
+drover screen --thread ID    # an agent's terminal
+drover keys --thread ID --keys "esc enter"
+drover done --thread ID      # journal entry, then close the workspace
+drover recall retries        # search the journal
+```
+
+`drover-wt` also works on its own, at the desk or in a shell:
+
+```sh
+drover-wt my-branch          # new or existing branch
+drover-wt '#123'             # a pull request's head
+drover-wt ls                 # worktrees of this repo, or of every repo under REPOS_ROOT
+drover-wt rm                 # remove this worktree, and its branch if merged
+```
+
+## Skill
+
+`skills/drover` is an [Agent Skills](https://agentskills.io) folder: a `SKILL.md` with a name and a description, and nothing else. It documents this CLI for agents, and it points at `drover help` for the full reference, so it doesn't go stale.
+
+To use it, copy the folder into the skills directory of your agent, the same way you'd install any skill:
+
+```sh
+cp -r skills/drover ~/.agents/skills/
+```
+
+Keep your copy in your own dotfiles if you want it on every machine.
+
+## Configuration
+
+drover reads only its own `.env`. Your desk is yours: keybindings, shell aliases, `REPOS_ROOT` and `HERDR_WORKTREE_PREFIX` belong in your dotfiles, and they point at `drover-wt`.
+
+The installer asks where repositories and worktrees live. The default is `~/.drover-workspace`, and the answer goes into `.env` as `REPOS_ROOT`. Clone your repositories under it. Worktrees are created next to their main clone as `<repo>.<branch>`.
+
+If your repositories already live somewhere else, such as `~/Developer`, answer that at the prompt, or set `REPOS_ROOT` in your shell environment for the desk and remotes.
 
 ## Develop
 
 ```sh
-set -a; . ./.env; set +a; cargo run
 cargo test && cargo clippy --all-targets
 ```
 
-Internals are in [`AGENTS.md`](AGENTS.md). Architecture and what is still only planned: [`DESIGN.md`](DESIGN.md).
+The design, with what is built and what is planned, is in [`DESIGN.md`](DESIGN.md). The code's rules and layout are in [`AGENTS.md`](AGENTS.md).
+
+## License
+
+MIT. See [`LICENSE`](LICENSE).

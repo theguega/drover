@@ -1,12 +1,73 @@
 #!/usr/bin/env bash
-# Build drover and run it as a user service from this checkout. Rerun after a pull.
-# herdr-wt, PATH, REPOS_ROOT and HERDR_WORKTREE_PREFIX come from the dotfiles: the service starts through zsh.
+# Install drover from this checkout. Rerun after a pull. Skills are copied by hand, see README.
+#   ./install.sh           host: ask for .env, build, link the tools, run the service
+#   ./install.sh --remote  remote: link drover-wt only; no service, no .env
+# The desk's own config (keys, aliases, REPOS_ROOT) stays in your dotfiles.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-zsh=$(command -v zsh)
-[[ -f "$root/.env" ]] || { cp "$root/.env.example" "$root/.env"; echo "fill $root/.env, then rerun"; exit 1; }
+remote=0
+[[ "${1:-}" == --remote ]] && remote=1
+bin=~/.local/bin
+mkdir -p "$bin"
+
+for cmd in git jq herdr ssh; do
+  command -v "$cmd" >/dev/null || echo "warning: $cmd is not on PATH" >&2
+done
+
+ln -sfn "$root/bin/drover-wt" "$bin/drover-wt"
+
+# ask on the terminal, so this also works when the script arrives through curl
+ask() {
+  local value default=${2:-}
+  read -rp "$1${default:+ [$default]}: " value </dev/tty
+  echo "${value:-$default}"
+}
+
+default_repos=$HOME/.drover-workspace
+
+if ((remote)); then
+  repos=$default_repos
+  [[ -r /dev/tty ]] && repos=$(ask "REPOS_ROOT: where repositories and worktrees live" "$default_repos")
+  mkdir -p "${repos/#\~/$HOME}"
+  echo "linked drover-wt"
+  [[ "$repos" == "$default_repos" ]] || echo "set REPOS_ROOT=$repos in your shell environment"
+  echo "this machine needs herdr, python3 and ssh from the host"
+  exit 0
+fi
+
+if [[ ! -f "$root/.env" ]]; then
+  [[ -r /dev/tty ]] || { echo "no .env: copy .env.example to .env and fill it, then rerun" >&2; exit 1; }
+  echo "drover needs a Discord bot, a server and a channel. See README.md, Discord setup."
+  token=
+  read -rsp "DISCORD_TOKEN: " token </dev/tty; echo
+  guild=$(ask DISCORD_GUILD_ID)
+  channel=$(ask DISCORD_CHANNEL_ID)
+  allowed=$(ask "ALLOWED_USER_IDS (comma-separated)")
+  host=$(ask HOST_NAME "$(hostname -s)")
+  remotes=$(ask "REMOTES (ssh names, comma-separated, empty for none)")
+  repos=$(ask "REPOS_ROOT: where repositories and worktrees live" "$default_repos")
+  repos=${repos/#\~/$HOME}
+  mkdir -p "${repos/#\~/$HOME}"
+  umask 077
+  cat >"$root/.env" <<ENV
+DISCORD_TOKEN=$token
+DISCORD_GUILD_ID=$guild
+DISCORD_CHANNEL_ID=$channel
+ALLOWED_USER_IDS=$allowed
+HOST_NAME=$host
+REMOTES=$remotes
+REPOS_ROOT=$repos
+ENV
+  echo "wrote $root/.env"
+fi
+
+command -v cargo >/dev/null || { echo "drover is built with cargo: install Rust from https://rustup.rs" >&2; exit 1; }
 cargo build --release --manifest-path "$root/Cargo.toml"
+ln -sfn "$root/target/release/drover" "$bin/drover"
+
+zsh=$(command -v zsh || true)
+[[ -n "$zsh" ]] || { echo "the service starts through zsh: install it first" >&2; exit 1; }
 run="set -a; . ./.env; set +a; exec ./target/release/drover"
 
 case "$(uname -s)" in
@@ -14,7 +75,7 @@ case "$(uname -s)" in
     mkdir -p ~/.config/systemd/user
     cat >~/.config/systemd/user/drover.service <<UNIT
 [Unit]
-Description=drover, Discord bridge for herdr
+Description=drover, agent runtime for herdr
 After=network-online.target
 
 [Service]

@@ -7,32 +7,41 @@ The user-facing guide is `README.md`. This file is how the program is put togeth
 ```
 src/main.rs     discord: commands, threads, reactions, event watchers, prompt queue
 src/socket.rs   herdr socket: requests and `events.subscribe` (direct locally, one ssh relay per remote)
-src/herdr.rs    herdr calls per machine, herdr-wt and transcripts over sh / ssh
+src/herdr.rs    herdr calls per machine, drover-wt and transcripts over sh / ssh
 src/format.rs   agent markdown to discord: tables, rules, fences cut across messages
 src/journal.rs  journal store, search, context for new tasks
-install.sh      build + user service (systemd or launchd) from this checkout
+src/action.rs   every command as one `Action`, run once for Discord and the terminal
+src/control.rs  unix socket the service listens on, and the client `drover <cmd>` uses
+src/cli.rs      argv to `Action`, and `drover help`
+bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not from dotfiles)
+skills/drover/  the drover skill, linked into ~/.agents/skills
+install.sh      link the tools and skill; host: .env, build, user service. --remote: links only
+bootstrap.sh    curl entry point: clones into ~/.local/share/drover, runs install.sh
+LICENSE         MIT
 mates/          mate instructions and playbooks (designed, see DESIGN.md)
 mates/state/    mate logs and scout directories (gitignored)
 state.json      thread → task map (gitignored)
 journal.db      journal (gitignored)
 ```
 
-drover has no model. It opens a worktree, starts the real `claude` (or `cursor`) TUI inside herdr, and posts the final answer. Every task is an ordinary herdr workspace, so the desk can take it over at any point.
+drover is an agent runtime, and it has no model. It opens a worktree, starts the real agent TUI inside herdr, and posts the final answer. Every task is an ordinary herdr workspace, so the desk can take it over at any point. The model lives in the agent CLI, never in drover.
 
 ```
 phone ─ discord ─▶ drover  (Rust, a user service on the host)
                      │
-                     ├─ herdr.sock + herdr-wt    $REPOS_ROOT/<repo>.<branch>
+                     ├─ herdr.sock + drover-wt    $REPOS_ROOT/<repo>.<branch>
                      └─ ssh relay + ssh          the same on each remote
 ```
 
 ## Dotfiles
 
-Personal tool, not a product. Everything about the desk lives in `~/.dotfiles` on every machine: `herdr-wt` (stowed to `~/.local/bin`), the herdr keys in `herdr/.config/herdr/config.toml`, the `wt` alias, and the env (`PATH`, `REPOS_ROOT`, `HERDR_WORKTREE_PREFIX`) in `.zshenv`. drover reads none of those itself. The service starts through `zsh -c`, and ssh runs the login shell, so every machine's own dotfiles decide.
+drover ships with its own worktree tool (`bin/drover-wt`), linked to `~/.local/bin` by `install.sh`, and its own skill. Your desk is personal and lives in your dotfiles: the herdr keys in `herdr/.config/herdr/config.toml`, the `wt` alias, and the env (`PATH`, `REPOS_ROOT`, `HERDR_WORKTREE_PREFIX`) in `.zshenv`. Those point at `drover-wt`. drover reads none of them itself. The service starts through `zsh -c`, and ssh runs the login shell, so every machine's own dotfiles decide.
+
+Remotes need `drover-wt` on PATH, so they run `install.sh --remote` too.
 
 ## Worktrees
 
-`herdr-wt` is the one entry point for the desk popup, the `wt` shell alias, and `/new`. Do not switch those to native `herdr worktree create`.
+`drover-wt` is the one entry point for the desk popup, the `wt` shell alias, and `/new`. Do not switch those to native `herdr worktree create`.
 
 Native herdr worktree (0.9.3):
 
@@ -42,11 +51,11 @@ Native herdr worktree (0.9.3):
 - checkouts go under `~/.herdr/worktrees/<repo>/<branch>`, not `$REPOS_ROOT/<repo>.<branch>`
 - remove deletes the checkout and never the merged branch
 
-The dotfiles blank native `new_worktree` so `prefix+shift+g` can run `herdr-wt prompt`. `prefix+o` focuses the first blocked agent, else the first done one — the native toast target is gone with `ui.toast.delivery = "system"`.
+The dotfiles blank native `new_worktree` so `prefix+shift+g` can run `drover-wt prompt`. `prefix+o` focuses the first blocked agent, else the first done one — the native toast target is gone with `ui.toast.delivery = "system"`.
 
 ## Event loop
 
-herdr's socket takes one request per connection and closes it after the reply. Locally drover connects to `~/.config/herdr/herdr.sock` per request (~0.1 ms). Each remote keeps one ssh open to a short Python relay that opens a socket connection per request line and streams every reply line back, matched by `id` (~1 RTT, about 100 ms to remote, against ~2 s for `herdr --machine`). The relay needs `python3` on the remote. Only git (`herdr-wt`) and remote transcript reads still spawn a shell.
+herdr's socket takes one request per connection and closes it after the reply. Locally drover connects to `~/.config/herdr/herdr.sock` per request (~0.1 ms). Each remote keeps one ssh open to a short Python relay that opens a socket connection per request line and streams every reply line back, matched by `id` (~1 RTT, about 100 ms to remote, against ~2 s for `herdr --machine`). The relay needs `python3` on the remote. Only git (`drover-wt`) and remote transcript reads still spawn a shell.
 
 Each machine gets a watcher holding one `events.subscribe` — `pane.agent_status_changed` per followed pane, plus `pane.agent_detected`, `pane.closed`, `pane.exited`, and `workspace.closed` anywhere.
 
@@ -60,7 +69,7 @@ any ──pane gone──▶ Gone
 
 If Discord sends a prompt while the agent is busy (`agent_not_ready` / `agent_not_idle`), drover keeps one message in `queued` and sends it on the next idle push.
 
-`Origin::Opened` means drover created the worktree, so `/done remove` may run `herdr-wt rm` on it, which keeps a dirty checkout and an unmerged branch. `Attached` is an agent that was started at the desk.
+`Origin::Opened` means drover created the worktree, so `/done remove` may run `drover-wt rm` on it, which keeps a dirty checkout and an unmerged branch. `Attached` is an agent that was started at the desk.
 
 ## Memory
 
@@ -107,4 +116,4 @@ cargo test
 cargo clippy --all-targets
 ```
 
-`cargo run` reads its config from the environment: `set -a; . ./.env; set +a` first, with a test server and channel. Startup refuses to launch if `herdr`, `herdr-wt`, `git`, `jq`, or `ssh` is missing from `PATH`.
+`cargo run` reads its config from the environment: `set -a; . ./.env; set +a` first, with a test server and channel. Startup refuses to launch if `herdr`, `drover-wt`, `git`, `jq`, or `ssh` is missing from `PATH`.
