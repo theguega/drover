@@ -45,9 +45,11 @@ _drover() {
       '--agent=[agent]:agent:' \
       '--model=[model]:model:' \
       '--scout[report only, no changes]' \
+      '--discord[open a Discord thread]' \
       "--mate=[mate]:mate:(${(f)"$(drover complete mates 2>/dev/null)"})" ;;
     attach|link) _arguments \
       "--machine=[machine]:machine:(${(f)"$(drover complete machines 2>/dev/null)"})" \
+      '--discord[open a Discord thread]' \
       "--pane=[pane]:pane:(${(f)"$(drover complete panes "$machine" 2>/dev/null)"})" \
       "--mate=[mate]:mate:(${(f)"$(drover complete mates 2>/dev/null)"})" ;;
     escalate|brief) _arguments \
@@ -63,12 +65,13 @@ _drover() {
       '--text=[prompt]:text:' ;;
     scout) _arguments \
       '1: :(close)' \
-      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" ;;
+      '--pane=[pane]:pane:' \
+      '--discord[open a Discord thread]' ;;
     done) _arguments \
       "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" \
       '--remove[delete the checkout if clean and merged]' \
       '--no-journal[close without a journal entry]' ;;
-    mate) _arguments "1: :(${(f)"$(drover complete mates 2>/dev/null)"})" ;;
+    mate) _arguments "1: :(${(f)"$(drover complete mates 2>/dev/null)"})" '--discord[open a Discord thread]' ;;
     help) _describe -t commands 'drover command' commands ;;
   esac
 }

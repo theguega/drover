@@ -25,16 +25,16 @@ _drover() {
     --agent|--model|--branch|--repo|--prompt|--text|--keys) return ;;
     *)
       case $cmd in
-        new) words="--machine --repo --branch --prompt --agent --model --scout --mate" ;;
-        attach) words="--machine --pane" ;;
+        new) words="--machine --repo --branch --prompt --agent --model --scout --mate --discord" ;;
+        attach) words="--machine --pane --discord" ;;
         link) words="--machine --pane --mate" ;;
         escalate|brief) words="--mate --text" ;;
         screen|take|release) words="--thread" ;;
         keys) words="--thread --keys" ;;
         send) words="--thread --text" ;;
-        scout) words="close --thread" ;;
+        scout) words="close --pane --discord" ;;
         done) words="--thread --remove --no-journal" ;;
-        mate) words=$(drover complete mates 2>/dev/null) ;;
+        mate) words="$(drover complete mates 2>/dev/null) --discord" ;;
         help) words=$commands ;;
         *) words= ;;
       esac
