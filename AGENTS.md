@@ -15,7 +15,7 @@ src/control.rs  unix socket the service listens on, and the client `drover <cmd>
 src/cli.rs      argv to `Action`, and `drover help`
 completions/    bash and zsh completion, also copied into the dotfiles; values come from `drover complete`
 bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not from dotfiles)
-skills/drover/  the drover skill, linked into ~/.agents/skills
+skills/drover/  the drover skill, copied by hand into ~/.agents/skills
 install.sh      link the tools and skill; host: .env, build, user service. --remote: links only
 bootstrap.sh    curl entry point: clones into ~/.local/share/drover, runs install.sh
 LICENSE         MIT

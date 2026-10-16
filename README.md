@@ -21,9 +21,9 @@ You need herdr, git, jq, ssh, zsh and Rust (for `cargo`). On the machine that ru
 curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh
 ```
 
-It clones drover to `~/.local/share/drover`, asks for the Discord settings (below) and where your repositories live, builds it, puts `drover` and `drover-wt` on your PATH, links the skill, and starts the service (systemd on Linux, launchd on macOS). Run the same command again to update.
+It clones drover to `~/.local/share/drover`, asks for the Discord settings (below) and where your repositories live, builds it, puts `drover` and `drover-wt` on your PATH, and starts the service (systemd on Linux, launchd on macOS). Run the same command again to update.
 
-On each remote machine, install only the worktree tool and the skill:
+On each remote machine, install only the worktree tool:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh -s -- --remote
@@ -87,7 +87,7 @@ To use it, copy the folder into the skills directory of your agent, the same way
 cp -r skills/drover ~/.agents/skills/
 ```
 
-Keep your copy in your own dotfiles if you want it on every machine.
+Keep your copy in your own dotfiles if you want it on every machine. The installer doesn't touch the skills directory.
 
 ## Configuration
 
