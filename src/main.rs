@@ -1,6 +1,7 @@
 mod format;
 mod herdr;
 mod journal;
+mod log;
 mod socket;
 
 use std::{
