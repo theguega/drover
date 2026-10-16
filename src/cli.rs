@@ -3,7 +3,9 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::action::{Action, Attach, Done, Keys, Mate, New, Note, Recall, Scout, Send, Target};
+use crate::action::{
+    Action, Attach, Candidates, Done, Keys, Mate, New, Note, Recall, Scout, Send, Target,
+};
 
 pub enum Invocation {
     Serve,
@@ -155,6 +157,19 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
         "worktrees" => Action::Worktrees,
         "usage" => Action::Usage,
         "config" => Action::Config,
+        "complete" => Action::Complete(match flags.words.first().map(String::as_str) {
+            Some("threads") => Candidates::Threads,
+            Some("machines") => Candidates::Machines,
+            Some("mates") => Candidates::Mates,
+            Some("panes") => Candidates::Panes(
+                flags
+                    .words
+                    .get(1)
+                    .cloned()
+                    .context("drover complete panes MACHINE")?,
+            ),
+            _ => bail!("drover complete threads|machines|mates|panes [MACHINE]"),
+        }),
         "screen" => Action::Screen(Target {
             thread: flags.req("thread")?,
         }),
@@ -348,6 +363,22 @@ mod tests {
         let scout = command_help("scout").unwrap_or_default();
         assert!(scout.contains("close --thread T") && !scout.contains("A task is"));
         assert!(command_help("frobnicate").is_none());
+    }
+
+    #[test]
+    fn complete_lists_one_kind_of_name() -> Result<()> {
+        assert!(matches!(
+            parse(&args("complete threads"))?,
+            Invocation::Run(Action::Complete(Candidates::Threads))
+        ));
+        let Invocation::Run(Action::Complete(Candidates::Panes(m))) =
+            parse(&args("complete panes meerkat"))?
+        else {
+            bail!("not panes");
+        };
+        assert_eq!(m, "meerkat");
+        assert!(parse(&args("complete panes")).is_err());
+        Ok(())
     }
 
     #[test]

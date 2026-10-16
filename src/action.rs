@@ -33,6 +33,16 @@ pub enum Action {
     Keys(Keys),
     Done(Done),
     Recall(Recall),
+    Complete(Candidates),
+}
+
+// What the shell completion scripts ask for, one name per line.
+#[derive(Serialize, Deserialize)]
+pub enum Candidates {
+    Threads,
+    Machines,
+    Mates,
+    Panes(String), // the machine whose panes to list
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,6 +170,7 @@ impl App {
             Action::Worktrees => self.cmd_worktrees().await,
             Action::Usage => self.cmd_usage().await,
             Action::Config => Ok(self.config()),
+            Action::Complete(c) => self.cmd_complete(c).await,
             Action::Mate(m) => self.cmd_mate(http, &m.name).await,
             Action::Scout(s) => self.cmd_scout(http, &s.prompt).await,
             Action::Brief(b) => self.cmd_brief(&b),
@@ -376,6 +387,42 @@ impl App {
             }
         }
         Ok(lines.join("\n"))
+    }
+
+    async fn cmd_complete(&self, what: Candidates) -> Result<String> {
+        let names: Vec<String> = match what {
+            Candidates::Threads => {
+                let mut ids = vec![];
+                for (id, cell) in self.cells() {
+                    if cell.lock().await.phase != Phase::Gone {
+                        ids.push(id.get().to_string());
+                    }
+                }
+                ids
+            }
+            Candidates::Machines => self.machines().map(|m| m.name.clone()).collect(),
+            Candidates::Mates => {
+                let mut names = vec![];
+                for (_, cell) in self.cells() {
+                    let t = cell.lock().await;
+                    if let (Some(name), false) = (&t.mate, t.phase == Phase::Gone) {
+                        names.push(name.clone());
+                    }
+                }
+                names.sort();
+                names.dedup();
+                names
+            }
+            Candidates::Panes(machine) => {
+                let m = self.machine(&machine)?;
+                herdr::agents(m)
+                    .await?
+                    .into_iter()
+                    .map(|a| a.pane_id.0)
+                    .collect()
+            }
+        };
+        Ok(names.join("\n"))
     }
 
     async fn cmd_usage(&self) -> Result<String> {
