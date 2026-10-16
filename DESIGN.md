@@ -122,8 +122,24 @@ drover writes an append-only log per mate under `mates/state/<name>/log`. Lines 
 - No dashboard until the log proves insufficient.
 - No orchestration across two hosts at once. One host runs drover.
 
-## Open
+## Decided
 
-- Escalation: always to the mate's Discord thread, or to a chosen channel?
-- Mate log format: plain text or one JSON object per line?
-- Scout id format: short random, or a slug from the prompt?
+- **Escalation** goes to the mate's own Discord thread. There is no separate channel.
+- **Mate log** is plain text, one line per event: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `escalated`, `closed`. It is grep-friendly, and it needs no parser.
+- **Scout id** is `scout-` plus 6 random hex characters. It fits the agent name rule.
+
+## Build order
+
+Each step is built, tested, and checked against this doc before the next one starts.
+
+1. Event log: append lines to `mates/state/<name>/log`.
+2. Owner per pane: `user` or `mate`, default `user`. `take` and `release` switch it, and the owner list is written for the mate to read.
+3. Harness as data: one entry per harness, replacing the string checks. Two harnesses today.
+4. `drover mate <name>` and `/mate`: `drover` workspace, `mates` tab, cwd `mates/`, agent `mate-<name>`, a Discord thread, cap of three.
+5. Mate playbooks in `mates/AGENTS.md`: dispatch, review, handoff, close. Short checklists, plus a herdr section that points to `herdr --skill`.
+6. Mate close: `done` on a mate task logs `closed` and clears its owner entries.
+7. Scouts: `drover scout <prompt>` and `/scout`, a `scouts` tab, `mates/state/scouts/<id>/`. `scout close` deletes that one directory. The path guard is tested first.
+8. Pane awareness: `link` and `brief`. Same repo and branch as a known task means linked. Anything else is ignored. Ambiguous cases are asked in the mate's thread.
+9. Escalation: `escalated` lines are posted to the mate's thread.
+10. Docs: README, help text, the `drover` skill, and the status markers in this file match what is built.
+11. Publish: each step is pushed to `theguega/drover` as it lands.
