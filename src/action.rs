@@ -426,7 +426,7 @@ impl App {
             log::Event::Started,
             &pane.0,
         )?;
-        self.write_owners(&name).await?;
+        self.write_owners(&name, None).await?;
         herdr::start(
             &self.host,
             &format!("mate-{name}"),
@@ -440,11 +440,12 @@ impl App {
     }
 
     // The panes linked to a mate and who may drive each one, for the mate to read before it sends input.
-    async fn write_owners(&self, name: &str) -> Result<()> {
+    // `skip` leaves out a pane that is closing.
+    pub(crate) async fn write_owners(&self, name: &str, skip: Option<&PaneId>) -> Result<()> {
         let mut lines = Vec::new();
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
-            if t.mate.as_deref() == Some(name) {
+            if t.mate.as_deref() == Some(name) && skip != Some(&t.pane) {
                 lines.push(format!("{} {}", t.pane.0, t.owner.as_str()));
             }
         }
@@ -470,7 +471,7 @@ impl App {
                 log::Event::Owner,
                 owner.as_str(),
             )?;
-            self.write_owners(&name).await?;
+            self.write_owners(&name, None).await?;
         }
         self.save().await;
         Ok(text)

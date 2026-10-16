@@ -848,6 +848,18 @@ impl App {
         if !note.trim().is_empty() {
             let _ = th.say(http, note.trim()).await;
         }
+        if let Some(name) = &t.mate {
+            // a mate's log records the close, and its owner list drops the pane
+            let closed = log::append(
+                &self.mates.join("state").join(name),
+                log::Event::Closed,
+                &t.pane.0,
+            );
+            let owners = self.write_owners(name, Some(&t.pane)).await;
+            if let Err(e) = closed.and(owners) {
+                eprintln!("mate {name}: {e}");
+            }
+        }
         let _ = th.edit_thread(http, EditThread::new().archived(true)).await;
         Ok(())
     }

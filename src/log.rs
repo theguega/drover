@@ -13,6 +13,7 @@ use super::Result;
 pub enum Event {
     Started,
     Owner,
+    Closed,
 }
 
 impl Event {
@@ -21,6 +22,7 @@ impl Event {
         match self {
             Self::Started => "started",
             Self::Owner => "owner",
+            Self::Closed => "closed",
         }
     }
 }
