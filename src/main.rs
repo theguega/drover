@@ -32,7 +32,8 @@ use tokio::{
 };
 
 use action::{
-    Action, Attach, Done, JournalList, JournalRemove, Keys, Mate, New, Recall, Scout, Target,
+    Action, Attach, Done, JournalList, JournalRemove, Keys, Mate, MateName, New, Recall, Scout,
+    Target,
 };
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
@@ -146,16 +147,16 @@ impl Owner {
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum Role {
-    Task,                                // a task of the desk's own
-    Crew { mate: String, owner: Owner }, // linked to a mate, in its own worktree
-    Mate(String),                        // a mate's pane, in the drover workspace
-    Scout(String),                       // the scout's folder name, while the scout lives
+    Task,                                  // a task of the desk's own
+    Crew { mate: MateName, owner: Owner }, // linked to a mate, in its own worktree
+    Mate(MateName),                        // a mate's pane, in the drover workspace
+    Scout(String),                         // the scout's folder name, while the scout lives
 }
 
 impl Role {
     // The mate whose log and owner list this pane belongs in.
     #[must_use]
-    fn mate(&self) -> Option<&str> {
+    fn mate(&self) -> Option<&MateName> {
         match self {
             Self::Crew { mate, .. } | Self::Mate(mate) => Some(mate),
             Self::Task | Self::Scout(_) => None,
@@ -164,7 +165,7 @@ impl Role {
 
     // A crewmate its mate drives.
     #[must_use]
-    fn crew_of_mate(&self) -> Option<&str> {
+    fn crew_of_mate(&self) -> Option<&MateName> {
         match self {
             Self::Crew {
                 mate,
@@ -219,7 +220,7 @@ struct Stored {
     origin: Option<Origin>,
     role: Option<Role>,
     owner: Option<Owner>,
-    mate: Option<String>,
+    mate: Option<MateName>,
     scout: Option<String>,
     phase: Option<Phase>,
     status: Option<Status>,
@@ -393,6 +394,11 @@ impl App {
         self.machines()
             .find(|m| m.name == name)
             .context(format!("unknown machine {name}"))
+    }
+
+    // A mate's log, owner list and goal.
+    fn mate_dir(&self, name: &MateName) -> PathBuf {
+        self.mates.join("state").join(name.as_str())
     }
 
     // A poisoned lock only means a handler panicked; the map itself is fine.
@@ -980,11 +986,7 @@ impl App {
         }
         if let Some(name) = t.role.mate() {
             // a mate's log records the close, and its owner list drops the pane
-            let closed = log::append(
-                &self.mates.join("state").join(name),
-                log::Event::Closed,
-                &t.pane.0,
-            );
+            let closed = log::append(&self.mate_dir(name), log::Event::Closed, &t.pane.0);
             let owners = self.write_owners(name, Some(&t.pane)).await;
             if let Err(e) = closed.and(owners) {
                 eprintln!("mate {name}: {e}");
@@ -1026,7 +1028,7 @@ impl App {
             }),
             "scout-close" => Action::ScoutClose(Target { thread }),
             "mate" => Action::Mate(Mate {
-                name: req(i, "name")?.into(),
+                name: MateName::parse(req(i, "name")?)?,
                 discord: true,
             }),
             "take" => Action::Take(Target { thread }),
@@ -1324,7 +1326,7 @@ impl App {
             };
         }
         // a crewmate's mate hears of its replies, dialogs and exit, since it has no thread to read
-        let crew = t.role.crew_of_mate().map(String::from);
+        let crew = t.role.crew_of_mate().cloned();
         let tell = |text: String| {
             crew.clone()
                 .map_or(Step::Keep, |mate| Step::Tell { mate, text })
@@ -1485,8 +1487,8 @@ impl App {
 
 enum Step {
     Keep,
-    Drop,                                // the task is over or its thread is gone
-    Tell { mate: String, text: String }, // keep, and pass this crewmate's news to its mate
+    Drop,                                  // the task is over or its thread is gone
+    Tell { mate: MateName, text: String }, // keep, and pass this crewmate's news to its mate
 }
 
 // What herdr says about a task's pane.
@@ -1764,12 +1766,13 @@ mod tests {
             task("p4", "drover", r#","owner":"user""#),
         );
         let tasks = parse_state(&old)?;
+        let a = MateName::parse("a")?;
         let role = |k: &str| tasks.get(k).map(|t| t.role.clone());
-        assert!(role("host:p1") == Some(Role::Mate("a".into())));
+        assert!(role("host:p1") == Some(Role::Mate(a.clone())));
         assert!(
             role("host:p2")
                 == Some(Role::Crew {
-                    mate: "a".into(),
+                    mate: a.clone(),
                     owner: Owner::Mate
                 })
         );

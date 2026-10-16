@@ -4,8 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::action::{
-    Action, Attach, Candidates, Done, JournalList, JournalRemove, Keys, Mate, New, Note, Recall,
-    Scout, Send, Target,
+    Action, Attach, Candidates, Done, JournalList, JournalRemove, Keys, Mate, MateName, New, Note,
+    Recall, Scout, Send, Target,
 };
 
 pub enum Invocation {
@@ -141,7 +141,11 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
             agent: flags.opt("agent"),
             model: flags.opt("model"),
             scout: flags.on("scout"),
-            mate: flags.opt("mate"),
+            mate: flags
+                .opt("mate")
+                .as_deref()
+                .map(MateName::parse)
+                .transpose()?,
             discord: flags.on("discord"),
         }),
         "attach" => Action::Attach(Attach {
@@ -153,15 +157,15 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
         "link" => Action::Attach(Attach {
             machine: Some(flags.req("machine")?),
             pane: flags.req("pane")?,
-            mate: Some(flags.req("mate")?),
+            mate: Some(MateName::parse(&flags.req("mate")?)?),
             discord: flags.on("discord"),
         }),
         "escalate" => Action::Escalate(Note {
-            mate: flags.req("mate")?,
+            mate: MateName::parse(&flags.req("mate")?)?,
             text: flags.req("text")?,
         }),
         "brief" => Action::Brief(Note {
-            mate: flags.req("mate")?,
+            mate: MateName::parse(&flags.req("mate")?)?,
             text: flags.req("text")?,
         }),
         "agents" => Action::Agents,
@@ -210,7 +214,7 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
             }),
         },
         "mate" => Action::Mate(Mate {
-            name: flags.words.first().cloned().context("drover mate NAME")?,
+            name: MateName::parse(flags.words.first().context("drover mate NAME")?)?,
             discord: flags.on("discord"),
         }),
         "take" => Action::Take(Target {
@@ -373,7 +377,7 @@ mod tests {
         else {
             bail!("not an attach");
         };
-        assert_eq!(a.mate.as_deref(), Some("reviewer"));
+        assert_eq!(a.mate.as_ref().map(MateName::as_str), Some("reviewer"));
         assert!(parse(&args("brief --mate reviewer")).is_err());
         Ok(())
     }

@@ -58,14 +58,14 @@ pub struct New {
     pub model: Option<String>,
     pub scout: bool,
     // the mate that dispatches this crewmate, which then owns its pane
-    pub mate: Option<String>,
+    pub mate: Option<MateName>,
     #[serde(default)]
     pub discord: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Note {
-    pub mate: String,
+    pub mate: MateName,
     pub text: String,
 }
 
@@ -78,7 +78,7 @@ pub struct Scout {
 
 #[derive(Serialize, Deserialize)]
 pub struct Mate {
-    pub name: String,
+    pub name: MateName,
     #[serde(default)]
     pub discord: bool,
 }
@@ -88,7 +88,7 @@ pub struct Attach {
     pub machine: Option<String>,
     pub pane: String,
     // set by link: the mate that the pane is linked to
-    pub mate: Option<String>,
+    pub mate: Option<MateName>,
     #[serde(default)]
     pub discord: bool,
 }
@@ -162,24 +162,55 @@ fn remove_scout_dir(root: &Path, id: &str) -> Result<()> {
 const MAX_MATES: usize = 3;
 
 // What a mate is told before its first message: its instructions live in mates/AGENTS.md.
-fn mate_role(name: &str) -> String {
+fn mate_role(name: &MateName) -> String {
     format!(
         "You are mate {name}. Your instructions are in AGENTS.md in this folder. Wait for the desk's first message."
     )
 }
 
-// Agent names take 32 characters, and "mate-" takes five of them.
-fn mate_name(s: &str) -> Result<String> {
-    let valid = s.len() <= 26
-        && s.starts_with(|c: char| c.is_ascii_lowercase())
-        && s.chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
-    if valid {
-        Ok(s.into())
-    } else {
-        bail!(
-            "a mate name is lowercase letters, digits, - or _, starting with a letter, up to 26 characters"
-        )
+// A mate's name, checked once: it becomes an agent name and a folder under mates/state.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct MateName(String);
+
+impl MateName {
+    // Agent names take 32 characters, and "mate-" takes five of them.
+    pub fn parse(s: &str) -> Result<Self> {
+        let valid = s.len() <= 26
+            && s.starts_with(|c: char| c.is_ascii_lowercase())
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        if valid {
+            Ok(Self(s.into()))
+        } else {
+            bail!(
+                "a mate name is lowercase letters, digits, - or _, starting with a letter, up to 26 characters"
+            )
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for MateName {
+    type Error = Error;
+    fn try_from(s: String) -> Result<Self> {
+        Self::parse(&s)
+    }
+}
+
+impl From<MateName> for String {
+    fn from(n: MateName) -> Self {
+        n.0
+    }
+}
+
+impl std::fmt::Display for MateName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
     }
 }
 
@@ -319,11 +350,7 @@ impl App {
         });
         self.save().await;
         if let Some(name) = &n.mate {
-            log::append(
-                &self.mates.join("state").join(name),
-                log::Event::Linked,
-                &wt.pane_id.0,
-            )?;
+            log::append(&self.mate_dir(name), log::Event::Linked, &wt.pane_id.0)?;
             self.write_owners(name, None).await?;
         }
         // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
@@ -388,11 +415,7 @@ impl App {
             drop(t);
             self.save().await;
             if let Some(name) = &at.mate {
-                log::append(
-                    &self.mates.join("state").join(name),
-                    log::Event::Linked,
-                    &pane.0,
-                )?;
+                log::append(&self.mate_dir(name), log::Event::Linked, &pane.0)?;
                 self.write_owners(name, None).await?;
             }
             return Ok(out);
@@ -442,11 +465,7 @@ impl App {
         });
         self.save().await;
         if let Some(name) = &at.mate {
-            log::append(
-                &self.mates.join("state").join(name),
-                log::Event::Linked,
-                &pane.0,
-            )?;
+            log::append(&self.mate_dir(name), log::Event::Linked, &pane.0)?;
             self.write_owners(name, None).await?;
         }
         if let Some(th) = thread {
@@ -505,7 +524,7 @@ impl App {
                     if let Role::Mate(name) = &t.role
                         && t.phase != Phase::Gone
                     {
-                        names.push(name.clone());
+                        names.push(name.to_string());
                     }
                 }
                 names.sort();
@@ -623,7 +642,7 @@ impl App {
     }
 
     // The mate's own task.
-    async fn mate_cell(&self, name: &str) -> Option<Cell> {
+    async fn mate_cell(&self, name: &MateName) -> Option<Cell> {
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
             if matches!(&t.role, Role::Mate(n) if n == name) && t.phase != Phase::Gone {
@@ -635,19 +654,19 @@ impl App {
     }
 
     // The mate's pane and optional Discord thread.
-    pub(crate) async fn mate_task(&self, name: &str) -> Option<(PaneId, Option<ChannelId>)> {
+    pub(crate) async fn mate_task(&self, name: &MateName) -> Option<(PaneId, Option<ChannelId>)> {
         let cell = self.mate_cell(name).await?;
         let t = cell.lock().await;
         Some((t.pane.clone(), t.thread))
     }
 
     // News from a crewmate: prompted to its mate now, or kept in its inbox until the mate's turn ends.
-    pub(crate) async fn tell_mate(&self, name: &str, text: &str) -> Result<()> {
+    pub(crate) async fn tell_mate(&self, name: &MateName, text: &str) -> Result<()> {
         let Some(cell) = self.mate_cell(name).await else {
             return Ok(());
         };
         let head = text.lines().next().unwrap_or_default();
-        log::append(&self.mates.join("state").join(name), log::Event::Crew, head)?;
+        log::append(&self.mate_dir(name), log::Event::Crew, head)?;
         let mut t = cell.lock().await;
         let m = self.machine(&t.machine)?;
         // the phase stays as it is, so the mate's answer to this is not posted
@@ -661,16 +680,12 @@ impl App {
 
     // A question for the desk from a mate: posted in its thread (if any) and kept in its log.
     async fn cmd_escalate(&self, http: &Http, n: &Note) -> Result<String> {
-        let name = mate_name(&n.mate)?;
+        let name = &n.mate;
         let (pane, th) = self
-            .mate_task(&name)
+            .mate_task(name)
             .await
             .context(format!("no running mate {name}"))?;
-        log::append(
-            &self.mates.join("state").join(&name),
-            log::Event::Escalated,
-            &n.text,
-        )?;
+        log::append(&self.mate_dir(name), log::Event::Escalated, &n.text)?;
         if let Some(th) = th {
             th.say(http, &n.text).await?;
             Ok(format!("escalated to <#{th}>"))
@@ -681,12 +696,8 @@ impl App {
 
     // A note for the mate, in its log, for it to read when it next looks.
     fn cmd_brief(&self, b: &Note) -> Result<String> {
-        let name = mate_name(&b.mate)?;
-        log::append(
-            &self.mates.join("state").join(&name),
-            log::Event::Brief,
-            &b.text,
-        )?;
+        let name = &b.mate;
+        log::append(&self.mate_dir(name), log::Event::Brief, &b.text)?;
         Ok(format!("noted for mate {name}"))
     }
 
@@ -757,7 +768,7 @@ impl App {
     }
 
     async fn cmd_mate(&self, http: &Http, m: &Mate) -> Result<String> {
-        let name = mate_name(&m.name)?;
+        let name = m.name.clone();
         let mut live = 0;
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
@@ -807,11 +818,7 @@ impl App {
             inbox: Vec::new(),
         });
         self.save().await;
-        log::append(
-            &self.mates.join("state").join(&name),
-            log::Event::Started,
-            &pane.0,
-        )?;
+        log::append(&self.mate_dir(&name), log::Event::Started, &pane.0)?;
         self.write_owners(&name, None).await?;
         herdr::start(
             &self.host,
@@ -888,7 +895,7 @@ impl App {
 
     // The panes linked to a mate and who may drive each one, for the mate to read before it sends input.
     // `skip` leaves out a pane that is closing.
-    pub(crate) async fn write_owners(&self, name: &str, skip: Option<&PaneId>) -> Result<()> {
+    pub(crate) async fn write_owners(&self, name: &MateName, skip: Option<&PaneId>) -> Result<()> {
         let mut lines = Vec::new();
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
@@ -899,7 +906,7 @@ impl App {
                 lines.push(format!("{} {}", t.pane.0, owner.as_str()));
             }
         }
-        let dir = self.mates.join("state").join(name);
+        let dir = self.mate_dir(name);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("owners"), lines.join("\n") + "\n")?;
         Ok(())
@@ -916,11 +923,7 @@ impl App {
             *o = owner;
             (pane, mate.clone())
         };
-        log::append(
-            &self.mates.join("state").join(&name),
-            log::Event::Owner,
-            owner.as_str(),
-        )?;
+        log::append(&self.mate_dir(&name), log::Event::Owner, owner.as_str())?;
         self.write_owners(&name, None).await?;
         self.save().await;
         Ok(format!("{pane} is {}", owner.as_str()))
@@ -1010,9 +1013,9 @@ mod tests {
 
     #[test]
     fn mate_names_are_short_and_lowercase() {
-        assert!(mate_name("reviewer-2").is_ok());
-        assert!(mate_name("Reviewer").is_err());
-        assert!(mate_name("2fast").is_err());
-        assert!(mate_name(&"a".repeat(27)).is_err());
+        assert!(MateName::parse("reviewer-2").is_ok());
+        assert!(MateName::parse("Reviewer").is_err());
+        assert!(MateName::parse("2fast").is_err());
+        assert!(MateName::parse(&"a".repeat(27)).is_err());
     }
 }
