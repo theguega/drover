@@ -125,6 +125,7 @@ drover release --pane <pane-id>
 ```
 
 - `drover new ... --mate <name>` or `drover link ... --mate <name>` assigns a task pane to a mate.
+- Name panes by role and host: `crew:<repo>-<branch>` for a task, `cell:<host>` and `teleop:<host>` for robot machines, `mate:<name>` for a dispatcher, `desk` for the user's own pane. The name says where the pane runs, so check it before sending input.
 - `take` hands control of a pane back to the desk user (`Owner::User`); `release` returns control to the mate (`Owner::Mate`). A mate checks `mates/state/<name>/owners` before every `send` and never writes to a pane owned by `user`.
 
 ## Journal, recall, and usage
