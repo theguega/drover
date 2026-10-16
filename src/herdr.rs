@@ -1,10 +1,19 @@
 // herdr and shell access per machine: herdr over its socket, git and transcripts over sh or ssh.
 
-use std::{process::Stdio, sync::Arc, time::Duration};
+use std::{
+    io::SeekFrom,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::json;
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    process::Command,
+};
 
 use crate::socket::{Link, SSH_OPTS};
 
@@ -256,6 +265,8 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 const ROOT: &str = r#""${REPOS_ROOT:-$HOME/Developer}""#;
 
 const SHORT: Duration = Duration::from_secs(15);
+// bytes read from the end of a transcript; a turn's reply sits well inside this
+const TAIL: u64 = 8 << 20;
 const LONG: Duration = Duration::from_secs(120);
 
 struct Out {
@@ -708,45 +719,105 @@ pub struct Reply {
 }
 
 // Last assistant text after the latest real prompt in a Claude Code transcript.
-pub async fn reply(m: &Machine, session: &SessionId) -> Option<Reply> {
+// Reads from the end and doubles the window until it reaches that prompt, so a long
+// session crosses ssh only as far as its latest turn.
+pub async fn reply(m: &Machine, session: &SessionId) -> Result<Option<Reply>> {
     let file = format!("{}.jsonl", session.0);
-    if m.reach == Reach::Ssh {
-        let o = sh(m, &format!("cat ~/.claude/projects/*/{file}"), SHORT)
-            .await
-            .ok()?;
-        return if o.code == Some(0) {
-            last_reply(&o.out)
-        } else {
-            None
+    let local = match m.reach {
+        Reach::Ssh => None,
+        Reach::Local => match find_local(&file).await? {
+            Some(path) => Some(path),
+            None => return Ok(None),
+        },
+    };
+    let mut window = TAIL;
+    loop {
+        let (text, whole) = match &local {
+            Some(path) => tail(path, window).await?,
+            None => match ssh_tail(m, &file, window).await? {
+                Some(t) => t,
+                None => return Ok(None),
+            },
         };
-    }
-    let projects = std::path::Path::new(&std::env::var("HOME").ok()?).join(".claude/projects");
-    let mut dirs = tokio::fs::read_dir(projects).await.ok()?;
-    while let Ok(Some(d)) = dirs.next_entry().await {
-        if let Ok(text) = tokio::fs::read_to_string(d.path().join(&file)).await {
-            return last_reply(&text);
+        match last_reply(&text) {
+            Scan::Reply(r) => return Ok(r),
+            Scan::NoPrompt if whole => return Ok(None),
+            Scan::NoPrompt => window *= 2,
         }
     }
-    None
+}
+
+async fn find_local(file: &str) -> Result<Option<PathBuf>> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    let mut dirs = match tokio::fs::read_dir(Path::new(&home).join(".claude/projects")).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(d) = dirs.next_entry().await? {
+        let path = d.path().join(file);
+        if tokio::fs::try_exists(&path).await? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+// The last `window` bytes, and whether they reach the start of the file.
+async fn tail(path: &Path, window: u64) -> Result<(String, bool)> {
+    let mut f = tokio::fs::File::open(path).await?;
+    let len = f.metadata().await?.len();
+    let from = len.saturating_sub(window);
+    f.seek(SeekFrom::Start(from)).await?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).await?;
+    // the first line may be cut mid-way; it fails to parse and is skipped
+    Ok((String::from_utf8_lossy(&buf).into_owned(), from == 0))
+}
+
+// None when the file is not there.
+async fn ssh_tail(m: &Machine, file: &str, window: u64) -> Result<Option<(String, bool)>> {
+    let o = sh(
+        m,
+        &format!("tail -c {window} ~/.claude/projects/*/{file}"),
+        SHORT,
+    )
+    .await?;
+    if o.code != Some(0) {
+        return Ok(None);
+    }
+    // tail returns fewer bytes than asked only when the file is shorter
+    let whole = (o.out.len() as u64) < window;
+    Ok(Some((o.out, whole)))
+}
+
+enum Scan {
+    NoPrompt,
+    Reply(Option<Reply>),
 }
 
 #[must_use]
-fn last_reply(jsonl: &str) -> Option<Reply> {
+fn last_reply(jsonl: &str) -> Scan {
     let lines: Vec<Line> = jsonl
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
-    let from = lines.iter().rposition(Line::is_prompt).unwrap_or(0);
-    lines
-        .iter()
-        .skip(from)
-        .filter(|e| e.kind == "assistant")
-        .flat_map(|e| e.texts().filter(|t| !t.is_empty()).map(move |t| (e, t)))
-        .last()
-        .map(|(e, t)| Reply {
-            id: e.uuid.clone(),
-            text: t.into(),
-        })
+    let Some(from) = lines.iter().rposition(Line::is_prompt) else {
+        return Scan::NoPrompt;
+    };
+    Scan::Reply(
+        lines
+            .iter()
+            .skip(from)
+            .filter(|e| e.kind == "assistant")
+            .flat_map(|e| e.texts().filter(|t| !t.is_empty()).map(move |t| (e, t)))
+            .last()
+            .map(|(e, t)| Reply {
+                id: e.uuid.clone(),
+                text: t.into(),
+            }),
+    )
 }
 
 #[cfg(test)]
@@ -786,14 +857,15 @@ mod tests {
             "not json",
         ]
         .join("\n");
-        let r = last_reply(&jsonl);
-        assert_eq!(
-            r.as_ref().map(|r| (r.id.as_str(), r.text.as_str())),
-            Some(("a2", "new"))
-        );
+        assert!(matches!(
+            last_reply(&jsonl),
+            Scan::Reply(Some(r)) if r.id == "a2" && r.text == "new"
+        ));
 
         let only_prompt = r#"{"type":"user","message":{"content":"hi"}}"#;
-        assert!(last_reply(only_prompt).is_none());
+        assert!(matches!(last_reply(only_prompt), Scan::Reply(None)));
+        let no_prompt = r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"x"}]}}"#;
+        assert!(matches!(last_reply(no_prompt), Scan::NoPrompt));
     }
 
     #[test]

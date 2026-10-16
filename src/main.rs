@@ -225,6 +225,8 @@ struct App {
     started: AtomicBool,
     /// Watchers resubscribe when the set of panes for a machine changes.
     wake: Notify,
+    /// Saves share one temp file, so they take turns.
+    saving: Mutex<()>,
 }
 
 impl App {
@@ -267,6 +269,7 @@ impl App {
             journal: Journal::open("journal.db")?,
             started: AtomicBool::new(false),
             wake: Notify::new(),
+            saving: Mutex::new(()),
         })
     }
 
@@ -321,12 +324,18 @@ impl App {
 
     // Never call while holding a task lock.
     async fn save(&self) {
+        let _turn = self.saving.lock().await;
         let mut all = BTreeMap::new();
         for (id, cell) in self.cells() {
             all.insert(id, cell.lock().await.clone());
         }
+        // rename is atomic, so a crash mid-write keeps the previous state file
+        let tmp = format!("{STATE}.tmp");
         let written = match serde_json::to_string_pretty(&all) {
-            Ok(json) => tokio::fs::write(STATE, json).await.map_err(Error::from),
+            Ok(json) => match tokio::fs::write(&tmp, json).await {
+                Ok(()) => tokio::fs::rename(&tmp, STATE).await.map_err(Error::from),
+                Err(e) => Err(e.into()),
+            },
             Err(e) => Err(e.into()),
         };
         if let Err(e) = written {
@@ -520,7 +529,7 @@ fn agent_name(s: &str) -> String {
             let d = (n % 36) as u32;
             n /= 36;
             // INVARIANT: d < 36, the radix.
-            #[allow(clippy::expect_used)]
+            #[expect(clippy::expect_used, reason = "d is below the radix")]
             char::from_digit(d, 36).expect("digit below radix")
         })
         .collect();
@@ -799,7 +808,7 @@ impl App {
             )
             .await?;
 
-        let memory = self.journal.context(repo, text, 2000)?;
+        let memory = self.journal.context(repo, text, 2000).await?;
         let mut prompt = if scout {
             format!("{SCOUT}\n\n{text}")
         } else {
@@ -864,7 +873,7 @@ impl App {
             .await?;
         let session = a.session();
         let last_reply = match &session {
-            Some(s) => herdr::reply(m, s).await.map(|r| r.id),
+            Some(s) => herdr::reply(m, s).await?.map(|r| r.id),
             None => None,
         };
         self.insert(
@@ -1011,13 +1020,15 @@ impl App {
         teardown: Teardown,
         entry: &str,
     ) -> Result<()> {
-        self.journal.add(&journal::Entry {
-            day: today(),
-            machine: t.machine.clone(),
-            repo: t.repo.clone(),
-            branch: t.branch.clone(),
-            text: entry.into(),
-        })?;
+        self.journal
+            .add(journal::Entry {
+                day: today(),
+                machine: t.machine.clone(),
+                repo: t.repo.clone(),
+                branch: t.branch.clone(),
+                text: entry.into(),
+            })
+            .await?;
         th.say(http, format!("```\n{}\n```", entry.replace("```", "")))
             .await?;
         self.teardown(http, th, t, teardown).await
@@ -1075,7 +1086,7 @@ impl App {
                 Ok(())
             }
             "recall" => {
-                let hits = self.journal.search(req(i, "query")?, 5)?;
+                let hits = self.journal.search(req(i, "query")?, 5).await?;
                 let text = match hits.is_empty() {
                     true => "nothing".into(),
                     false => tail(
@@ -1347,7 +1358,7 @@ impl App {
         if let Phase::Starting { prompt } = &t.phase {
             let prompt = prompt.clone();
             if let Some(s) = &t.session {
-                t.last_reply = herdr::reply(m, s).await.map(|r| r.id);
+                t.last_reply = herdr::reply(m, s).await?.map(|r| r.id);
             }
             t.phase = match herdr::prompt(m, &t.pane, &prompt).await {
                 Ok(()) => Phase::Waiting,
@@ -1367,7 +1378,7 @@ impl App {
             let Some(s) = t.session.clone() else {
                 return Ok(Step::Keep);
             };
-            let Some(r) = fresh_reply(m, &s, t.last_reply.as_deref()).await else {
+            let Some(r) = fresh_reply(m, &s, t.last_reply.as_deref()).await? else {
                 return Ok(Step::Keep);
             };
             t.last_reply = Some(r.id);
@@ -1432,17 +1443,21 @@ enum Seen {
 }
 
 // The transcript can trail the status flip by a moment, so look again briefly.
-async fn fresh_reply(m: &Machine, s: &SessionId, last: Option<&str>) -> Option<herdr::Reply> {
+async fn fresh_reply(
+    m: &Machine,
+    s: &SessionId,
+    last: Option<&str>,
+) -> Result<Option<herdr::Reply>> {
     for _ in 0..4 {
         if let Some(r) = herdr::reply(m, s)
-            .await
+            .await?
             .filter(|r| Some(r.id.as_str()) != last)
         {
-            return Some(r);
+            return Ok(Some(r));
         }
         sleep(Duration::from_millis(250)).await;
     }
-    None
+    Ok(None)
 }
 
 // ── wiring ─────────────────────────────────────────────────
@@ -1548,14 +1563,15 @@ async fn watch_machine(app: Arc<App>, http: Arc<Http>, m: Machine) {
 
 async fn watch_session(app: &App, http: &Http, m: &Machine) -> Result<()> {
     let watched = loop {
+        // enabled before the check, so a pane added after it still wakes us
+        let woke = app.wake.notified();
+        tokio::pin!(woke);
+        woke.as_mut().enable();
         let panes = app.panes_on(&m.name).await;
         if !panes.is_empty() {
             break panes;
         }
-        tokio::select! {
-            () = app.wake.notified() => {}
-            () = sleep(Duration::from_secs(5)) => {}
-        }
+        woke.await;
     };
 
     // herdr rejects a subscription naming a pane that is gone; reconcile marks those
@@ -1572,16 +1588,18 @@ async fn watch_session(app: &App, http: &Http, m: &Machine) -> Result<()> {
     app.reconcile(http, &m.name).await;
 
     loop {
+        let woke = app.wake.notified();
+        tokio::pin!(woke);
+        woke.as_mut().enable();
+        if app.panes_on(&m.name).await != watched {
+            return Ok(()); // resubscribe with the new pane set
+        }
         tokio::select! {
             ev = conn.recv() => match ev? {
                 socket::Push::Lost => bail!("events_lost on {}", m.name),
                 push => app.on_push(http, &m.name, push).await,
             },
-            () = app.wake.notified() => {}
-        }
-        // checked after every push too: a wake while busy above is not stored
-        if app.panes_on(&m.name).await != watched {
-            return Ok(()); // resubscribe with the new pane set
+            () = &mut woke => {}
         }
     }
 }

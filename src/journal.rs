@@ -2,10 +2,13 @@
 
 use std::{
     collections::HashSet,
-    sync::{Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
 };
 
-use rusqlite::{Connection, Result, Row, params};
+use rusqlite::{Connection, Row, params};
+
+type Error = Box<dyn std::error::Error + Send + Sync>;
+type Result<T, E = Error> = std::result::Result<T, E>;
 
 pub struct Entry {
     pub day: String,
@@ -15,9 +18,7 @@ pub struct Entry {
     pub text: String,
 }
 
-pub struct Journal(Mutex<Connection>);
-
-fn entry(r: &Row) -> Result<Entry> {
+fn entry(r: &Row) -> rusqlite::Result<Entry> {
     Ok(Entry {
         day: r.get(0)?,
         machine: r.get(1)?,
@@ -46,58 +47,78 @@ pub fn format(e: &Entry) -> String {
     format!("{} {} {}\n{}", e.day, e.repo, e.branch, e.text)
 }
 
-impl Journal {
-    // A poisoned lock only means another query panicked; the connection itself is fine.
-    fn db(&self) -> MutexGuard<'_, Connection> {
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
+pub struct Journal(Arc<Mutex<Connection>>);
 
-    pub fn open(path: &str) -> Result<Self> {
+impl Journal {
+    pub fn open(path: &str) -> rusqlite::Result<Self> {
         let db = Connection::open(path)?;
         db.execute(
             "create virtual table if not exists journal using fts5(day unindexed, machine unindexed, repo, branch, text)",
             [],
         )?;
-        Ok(Self(Mutex::new(db)))
+        Ok(Self(Arc::new(Mutex::new(db))))
     }
 
-    pub fn add(&self, e: &Entry) -> Result<()> {
-        self.db().execute(
-            "insert into journal values (?1, ?2, ?3, ?4, ?5)",
-            params![e.day, e.machine, e.repo, e.branch, e.text],
-        )?;
-        Ok(())
+    // Queries run on a blocking thread so they never stall the runtime.
+    async fn run<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
+    ) -> Result<T> {
+        let db = self.0.clone();
+        Ok(tokio::task::spawn_blocking(move || {
+            // a poisoned lock only means another query panicked; the connection is fine
+            let db = db.lock().unwrap_or_else(PoisonError::into_inner);
+            f(&db)
+        })
+        .await??)
     }
 
-    pub fn search(&self, q: &str, limit: u32) -> Result<Vec<Entry>> {
+    pub async fn add(&self, e: Entry) -> Result<()> {
+        self.run(move |db| {
+            db.execute(
+                "insert into journal values (?1, ?2, ?3, ?4, ?5)",
+                params![e.day, e.machine, e.repo, e.branch, e.text],
+            )
+            .map(drop)
+        })
+        .await
+    }
+
+    pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<Entry>> {
         let m = terms(q);
         if m.is_empty() {
             return Ok(vec![]);
         }
-        let db = self.db();
-        let mut st = db.prepare(&format!(
-            "{COLS} where journal match ?1 order by rank limit ?2"
-        ))?;
-        st.query_map(params![m, limit], entry)?.collect()
+        self.run(move |db| {
+            let mut st = db.prepare(&format!(
+                "{COLS} where journal match ?1 order by rank limit ?2"
+            ))?;
+            st.query_map(params![m, limit], entry)?.collect()
+        })
+        .await
     }
 
-    fn recent(&self, repo: &str, limit: u32) -> Result<Vec<Entry>> {
-        let db = self.db();
-        let mut st = db.prepare(&format!(
-            "{COLS} where repo = ?1 order by rowid desc limit ?2"
-        ))?;
-        st.query_map(params![repo, limit], entry)?.collect()
+    async fn recent(&self, repo: &str, limit: u32) -> Result<Vec<Entry>> {
+        let repo = repo.to_string();
+        self.run(move |db| {
+            let mut st = db.prepare(&format!(
+                "{COLS} where repo = ?1 order by rowid desc limit ?2"
+            ))?;
+            st.query_map(params![repo, limit], entry)?.collect()
+        })
+        .await
     }
 
     // Recent entries for the repo plus matches for the prompt, capped so it never grows the context.
-    pub fn context(&self, repo: &str, prompt: &str, cap: usize) -> Result<String> {
+    pub async fn context(&self, repo: &str, prompt: &str, cap: usize) -> Result<String> {
         let mut seen = HashSet::new();
         let mut lines = vec![];
         let mut size = 0;
         for e in self
-            .recent(repo, 3)?
+            .recent(repo, 3)
+            .await?
             .into_iter()
-            .chain(self.search(&format!("{repo} {prompt}"), 5)?)
+            .chain(self.search(&format!("{repo} {prompt}"), 5).await?)
         {
             let s = format(&e);
             let n = s.chars().count();
@@ -124,29 +145,34 @@ next: <follow-ups, or none>";
 mod tests {
     use super::*;
 
-    #[test]
-    fn search_and_context() -> Result<()> {
-        let j = Journal::open(":memory:")?;
-        let e = |repo: &str, text: &str| Entry {
+    fn entry(repo: &str, text: &str) -> Entry {
+        Entry {
             day: "2026-10-01".into(),
             machine: "host".into(),
             repo: repo.into(),
             branch: "feature/x".into(),
             text: text.into(),
-        };
-        j.add(&e("drover", "what: rust port of the discord bridge"))?;
-        j.add(&e("other", "what: unrelated sqlite tuning"))?;
+        }
+    }
+
+    #[tokio::test]
+    async fn search_and_context() -> Result<()> {
+        let j = Journal::open(":memory:")?;
+        j.add(entry("drover", "what: rust port of the discord bridge"))
+            .await?;
+        j.add(entry("other", "what: unrelated sqlite tuning"))
+            .await?;
 
         assert_eq!(
             terms("a Rust, PORT!! of x_y"),
             r#""rust" OR "port" OR "x_y""#
         );
-        assert_eq!(j.search("rust", 5)?.len(), 1);
-        assert!(j.search("a b", 5)?.is_empty());
+        assert_eq!(j.search("rust", 5).await?.len(), 1);
+        assert!(j.search("a b", 5).await?.is_empty());
 
-        let ctx = j.context("drover", "sqlite", 2000)?;
+        let ctx = j.context("drover", "sqlite", 2000).await?;
         assert!(ctx.contains("rust port") && ctx.contains("sqlite tuning"));
-        assert!(j.context("drover", "sqlite", 10)?.is_empty());
+        assert!(j.context("drover", "sqlite", 10).await?.is_empty());
         Ok(())
     }
 }

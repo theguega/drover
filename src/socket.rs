@@ -195,6 +195,10 @@ impl Link {
         {
             return Ok(reply);
         }
+        r.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(id);
         // the ssh died; the next call starts a fresh one
         let mut slot = self.relay.lock().await;
         if slot.as_ref().is_some_and(|s| Arc::ptr_eq(s, &r)) {
