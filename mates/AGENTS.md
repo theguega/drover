@@ -7,7 +7,7 @@ Your name is in your first message. Your files are in `state/<name>/`.
 ## Tools
 
 - `drover new`, `agents`, `screen`, `keys`, `send`, `take`, `release`, `link`, `escalate`, `brief`, `done`, `recall`, `usage`: the drover CLI. `drover help` is the full reference.
-- `drover-wt`: worktrees, from a branch, a new name, or `#123`.
+- `drover-wt`: worktrees, from a branch, a new name, or `#123`. `drover-wt --help` is the full reference; any other word is a branch name.
 - herdr: panes and layout. `herdr --skill` prints its skill when you need it.
 
 ## Before any send

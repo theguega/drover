@@ -60,6 +60,7 @@ drover-wt my-branch          # new or existing branch
 drover-wt '#123'             # a pull request's head
 drover-wt ls                 # worktrees of this repo, or of every repo under REPOS_ROOT
 drover-wt rm                 # remove this worktree, and its branch if merged
+drover-wt --help             # full usage
 ```
 
 ## Mates and scouts

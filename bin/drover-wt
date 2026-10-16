@@ -78,7 +78,7 @@ case "${1:-}" in
     ;;
   rm) shift; rm_worktree "$@"; exit ;;
   ls) shift ;;
-  -h|--help) awk 'NR>1 && !/^#/{exit} NR>1{sub(/^# ?/, ""); print}' "$0"; exit ;;
+  -h|--help|help) awk 'NR>1 && !/^#/{exit} NR>1{sub(/^# ?/, ""); print}' "$0"; exit ;;
   # a flag here would otherwise become a branch named after it
   -*) echo "unknown option $1, see --help" >&2; exit 1 ;;
 esac
