@@ -33,6 +33,8 @@ pub enum Action {
     Keys(Keys),
     Done(Done),
     Recall(Recall),
+    JournalList(JournalList),
+    JournalRemove(JournalRemove),
     Complete(Candidates),
 }
 
@@ -43,6 +45,7 @@ pub enum Candidates {
     Machines,
     Mates,
     Panes(String), // the machine whose panes to list
+    Journal,       // the newest entry ids
 }
 
 #[derive(Serialize, Deserialize)]
@@ -118,6 +121,17 @@ pub struct Done {
 #[derive(Serialize, Deserialize)]
 pub struct Recall {
     pub query: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct JournalList {
+    // a task, by pane or thread id: list its repo's entries instead of all
+    pub task: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct JournalRemove {
+    pub id: i64,
 }
 
 // A scout's id: "scout-" and six hex digits, which the agent name rule allows.
@@ -210,6 +224,11 @@ impl App {
                         .join("\n\n"),
                 })
             }
+            Action::JournalList(l) => self.cmd_journal_list(&l).await,
+            Action::JournalRemove(r) => Ok(match self.journal.remove(r.id).await? {
+                true => format!("removed #{}", r.id),
+                false => format!("no journal entry #{}", r.id),
+            }),
         }
     }
 
@@ -486,8 +505,38 @@ impl App {
                     .map(|a| a.pane_id.0)
                     .collect()
             }
+            Candidates::Journal => self
+                .journal
+                .list(None, 25)
+                .await?
+                .into_iter()
+                .map(|(id, _)| id.to_string())
+                .collect(),
         };
         Ok(names.join("\n"))
+    }
+
+    // The repo of a task, by pane or thread id.
+    async fn repo_of(&self, task: &str) -> Result<String> {
+        let (_, cell) = self.find_task(task).await?;
+        let repo = cell.lock().await.repo.clone();
+        Ok(repo)
+    }
+
+    async fn cmd_journal_list(&self, l: &JournalList) -> Result<String> {
+        let repo = match &l.task {
+            Some(task) => Some(self.repo_of(task).await?),
+            None => None,
+        };
+        let rows = self.journal.list(repo, 5).await?;
+        Ok(match rows.is_empty() {
+            true => "no entries".into(),
+            false => rows
+                .iter()
+                .map(|(id, e)| format!("#{id} {}", journal::format(e)))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        })
     }
 
     async fn cmd_usage(&self) -> Result<String> {

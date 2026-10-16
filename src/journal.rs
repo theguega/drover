@@ -109,6 +109,25 @@ impl Journal {
         .await
     }
 
+    // Newest first, with the id `remove` takes. A repo narrows it to that repo.
+    pub async fn list(&self, repo: Option<String>, limit: u32) -> Result<Vec<(i64, Entry)>> {
+        self.run(move |db| {
+            let mut st = db.prepare(
+                "select day, machine, repo, branch, text, rowid from journal where ?1 is null or repo = ?1 order by rowid desc limit ?2",
+            )?;
+            st.query_map(params![repo, limit], |r| Ok((r.get::<_, i64>(5)?, entry(r)?)))?
+                .collect()
+        })
+        .await
+    }
+
+    pub async fn remove(&self, id: i64) -> Result<bool> {
+        self.run(move |db| {
+            Ok(db.execute("delete from journal where rowid = ?1", params![id])? == 1)
+        })
+        .await
+    }
+
     // Recent entries for the repo plus matches for the prompt, capped so it never grows the context.
     pub async fn context(&self, repo: &str, prompt: &str, cap: usize) -> Result<String> {
         let mut seen = HashSet::new();
@@ -173,6 +192,15 @@ mod tests {
         let ctx = j.context("drover", "sqlite", 2000).await?;
         assert!(ctx.contains("rust port") && ctx.contains("sqlite tuning"));
         assert!(j.context("drover", "sqlite", 10).await?.is_empty());
+
+        let (id, _) = j
+            .list(Some("drover".into()), 5)
+            .await?
+            .pop()
+            .ok_or("no row")?;
+        assert!(j.remove(id).await? && !j.remove(id).await?);
+        assert!(j.list(Some("drover".into()), 5).await?.is_empty());
+        assert_eq!(j.list(None, 5).await?.len(), 1);
         Ok(())
     }
 }

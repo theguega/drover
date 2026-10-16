@@ -4,7 +4,8 @@ use std::collections::{HashMap, HashSet};
 
 use super::*;
 use crate::action::{
-    Action, Attach, Candidates, Done, Keys, Mate, New, Note, Recall, Scout, Send, Target,
+    Action, Attach, Candidates, Done, JournalList, JournalRemove, Keys, Mate, New, Note, Recall,
+    Scout, Send, Target,
 };
 
 pub enum Invocation {
@@ -60,7 +61,11 @@ Commands (Discord command in brackets):
              --no-journal closes without an entry.
   recall     WORDS...
              [/recall] search the journal
-  config     show this service's host, remotes, channel and paths
+  journal    [--pane P | --thread T]
+             [/journal] the five newest entries, of the task's repo when given
+  journal rm ID
+             [/journal-rm] delete one entry, by the id `journal` prints
+  config    show this service's host, remotes, channel and paths
   help       this text
 
 Terminal commands stay in the terminal by default and print the pane id.
@@ -174,7 +179,8 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
                     .cloned()
                     .context("drover complete panes MACHINE")?,
             ),
-            _ => bail!("drover complete threads|machines|mates|panes [MACHINE]"),
+            Some("journal") => Candidates::Journal,
+            _ => bail!("drover complete threads|machines|mates|panes [MACHINE]|journal"),
         }),
         "screen" => Action::Screen(Target {
             thread: flags.target()?,
@@ -226,6 +232,18 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
                 query: flags.words.join(" "),
             })
         }
+        "journal" => match flags.words.split_first() {
+            Some((first, rest)) if first == "rm" => Action::JournalRemove(JournalRemove {
+                id: rest
+                    .first()
+                    .context("drover journal rm ID")?
+                    .parse::<i64>()?,
+            }),
+            Some(_) => bail!("drover journal [--pane P | --thread T], or drover journal rm ID"),
+            None => Action::JournalList(JournalList {
+                task: flags.opt("pane").or_else(|| flags.opt("thread")),
+            }),
+        },
         other => bail!("unknown command {other}"),
     })
 }
@@ -367,6 +385,11 @@ mod tests {
         };
         assert_eq!(r.query, "fts5 index");
         assert!(parse(&args("recall")).is_err());
+        let Invocation::Run(Action::JournalRemove(r)) = parse(&args("journal rm 12"))? else {
+            bail!("not a journal rm");
+        };
+        assert_eq!(r.id, 12);
+        assert!(parse(&args("journal rm")).is_err());
         Ok(())
     }
 

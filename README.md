@@ -50,6 +50,7 @@ drover keys --pane ID --keys "esc enter"
 drover attach --pane ID --discord  # open a Discord thread for a running task to continue there
 drover done --pane ID        # journal entry, then close the workspace
 drover recall retries        # search the journal
+drover journal rm 12         # delete an entry; /journal-rm in Discord picks one from a list
 ```
 
 `drover-wt` also works on its own, at the desk or in a shell:

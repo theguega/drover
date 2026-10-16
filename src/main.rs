@@ -31,7 +31,9 @@ use tokio::{
     time::sleep,
 };
 
-use action::{Action, Attach, Done, Keys, Mate, New, Recall, Scout, Target};
+use action::{
+    Action, Attach, Done, JournalList, JournalRemove, Keys, Mate, New, Recall, Scout, Target,
+};
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
 
@@ -856,6 +858,15 @@ impl App {
             CreateCommand::new("recall")
                 .description("Search the journal")
                 .add_option(string("query", "words").required(true)),
+            CreateCommand::new("journal")
+                .description("Latest journal entries, of this task's repo inside a task thread"),
+            CreateCommand::new("journal-rm")
+                .description("Delete a journal entry")
+                .add_option(
+                    string("entry", "entry")
+                        .required(true)
+                        .set_autocomplete(true),
+                ),
         ]
     }
 
@@ -991,6 +1002,16 @@ impl App {
             "recall" => Action::Recall(Recall {
                 query: req(i, "query")?.into(),
             }),
+            "journal" => Action::JournalList(JournalList {
+                task: self
+                    .find_task(&thread)
+                    .await
+                    .is_ok()
+                    .then(|| thread.clone()),
+            }),
+            "journal-rm" => Action::JournalRemove(JournalRemove {
+                id: req(i, "entry")?.parse::<i64>()?,
+            }),
             _ => return Ok(()),
         };
         let terminal = matches!(action, Action::Screen(_) | Action::Keys(_));
@@ -1041,6 +1062,27 @@ impl App {
                     .unwrap_or_default()
                     .into_iter()
                     .map(|x| (x.clone(), x))
+                    .collect()
+            }
+            Some("entry") => {
+                // inside a task thread, only that task's repo
+                let repo = match self.find_task(&i.channel_id.to_string()).await {
+                    Ok((_, cell)) => {
+                        let repo = cell.lock().await.repo.clone();
+                        Some(repo)
+                    }
+                    Err(_) => None,
+                };
+                self.journal
+                    .list(repo, 25)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(id, e)| {
+                        let line = e.text.lines().next().unwrap_or_default();
+                        let name = format!("#{id} {} {} {line}", e.day, e.repo);
+                        (head(&name, 100), id.to_string())
+                    })
                     .collect()
             }
             _ => herdr::agents(m)
