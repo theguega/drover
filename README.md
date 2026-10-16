@@ -89,6 +89,30 @@ cp -r skills/drover ~/.agents/skills/
 
 Keep your copy in your own dotfiles if you want it on every machine. The installer doesn't touch the skills directory.
 
+## Completion
+
+Completion is opt-in: the installer doesn't set it up. Values such as machines, mates, threads and panes come from `drover complete`, so the scripts work with a running service.
+
+Bash, with the `bash-completion` package:
+
+```sh
+mkdir -p ~/.local/share/bash-completion/completions
+cp completions/drover.bash ~/.local/share/bash-completion/completions/drover
+```
+
+zsh, in any directory on `fpath`:
+
+```sh
+mkdir -p ~/.zsh/completions
+cp completions/_drover ~/.zsh/completions/
+```
+
+Then add these lines to `.zshrc` before `compinit`:
+
+```sh
+fpath=(~/.zsh/completions $fpath)
+```
+
 ## Configuration
 
 drover reads only its own `.env`. Your desk is yours: keybindings, shell aliases, `REPOS_ROOT` and `HERDR_WORKTREE_PREFIX` belong in your dotfiles, and they point at `drover-wt`.
