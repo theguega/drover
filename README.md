@@ -23,14 +23,14 @@ Remotes need only the dotfiles, a running herdr, `python3`, and passwordless `ss
 
 | | |
 |---|---|
-| `/new machine repo branch prompt [agent] [scout]` | Worktree + agent. `branch` is a new name, an existing branch, or `#pr`. `scout` asks for a report and no changes. A new checkout gets the clone's untracked files matching `.worktreeinclude` |
+| `/new machine repo branch prompt [agent] [model] [scout]` | Worktree + agent. `model` is passed to the agent as `--model`. `branch` is a new name, an existing branch, or `#pr`. `scout` asks for a report and no changes. A new checkout gets the clone's untracked files matching `.worktreeinclude` |
 | a message in the thread | Next prompt (queued if the agent is busy) |
 | `/attach machine agent` | Follow an agent you started at the desk |
 | `/screen` · `/keys` | Terminal view and key buttons |
 | `/done [remove] [journal]` | Journal entry, close workspace; `journal:false` skips the entry; `remove` runs `herdr-wt rm` on a checkout drover opened: a dirty checkout and an unmerged branch are kept |
-| `/recall` · `/agents` · `/worktrees` · `/usage` | Journal search, status, and Claude / Cursor / pi usage |
+| `/recall` · `/agents` · `/worktrees` · `/usage` | Journal search, status, and Claude / Cursor usage |
 
-Default agent is `claude` (`codex`, `cursor`, `opencode`, `pi` also). State is one reaction: 👀 working · ⏸️ dialog · ✅ done.
+Default agent is `claude` (`cursor` also). State is one reaction: 👀 working · ⏸️ dialog · ✅ done.
 
 ## Develop
 

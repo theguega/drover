@@ -382,12 +382,23 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
 
 // Resolves once the agent is ready or blocked at startup (folder trust and similar dialogs).
 // A reopened workspace keeps its shell wherever it was left, so cd to the checkout first.
-pub async fn start(m: &Machine, name: &str, kind: &str, pane: &PaneId, path: &str) -> Result<()> {
+pub async fn start(
+    m: &Machine,
+    name: &str,
+    kind: &str,
+    pane: &PaneId,
+    path: &str,
+    model: Option<&Name>,
+) -> Result<()> {
     let cd = json!({"pane_id": pane.0, "text": format!("cd '{path}'"), "keys": ["Enter"]});
     m.link
         .call::<IgnoredAny>("pane.send_input", cd, SHORT)
         .await?;
-    let params = json!({"name": name, "kind": kind, "pane_id": pane.0, "timeout_ms": 90_000});
+    let args: Vec<&str> = model
+        .map(|model| vec!["--model", model.as_str()])
+        .unwrap_or_default();
+    let params =
+        json!({"name": name, "kind": kind, "pane_id": pane.0, "args": args, "timeout_ms": 90_000});
     match m
         .link
         .call::<IgnoredAny>("agent.start", params, Duration::from_secs(100))
@@ -555,30 +566,6 @@ const CURSOR_USAGE: &str = r#"t=$(jq -er .accessToken ~/.config/cursor/auth.json
 printf 'Authorization: Bearer %s' "$t" |
 curl -sSf -m 10 -H @- -H 'Content-Type: application/json' -H 'Connect-Protocol-Version: 1' -d '{}' https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"#;
 
-/// pi has no plan of its own: tokens and cost it logged per message, over any provider.
-#[derive(Deserialize)]
-pub struct Pi {
-    pub day: Spend,
-    pub week: Spend,
-    pub month: Spend,
-    pub providers: Vec<String>,
-}
-
-#[derive(Deserialize)]
-pub struct Spend {
-    pub tokens: f64,
-    pub cost: f64, // dollars
-}
-
-const PI_USAGE: &str = r#"d=~/.pi/agent/sessions; [ -d "$d" ] || exit 3
-find "$d" -name '*.jsonl' -mtime -30 -exec cat {} + | jq -nRc --argjson now "$(date +%s)" '
-  [inputs | fromjson? | try (select(.message.usage) | {
-    age: ($now - (.timestamp | sub("\\.[0-9]+Z$"; "Z") | fromdate)),
-    p: .message.provider, t: (.message.usage.totalTokens // 0), c: (.message.usage.cost.total // 0)
-  }) | select(.age < 2592000)] as $r
-  | def spend($s): [$r[] | select(.age < $s)] | {tokens: (map(.t) | add // 0), cost: (map(.c) | add // 0)};
-  {day: spend(86400), week: spend(604800), month: spend(2592000), providers: ([$r[].p | strings] | unique)}'"#;
-
 /// A number that proto JSON may send as a string (int64).
 #[derive(Clone, Copy, Deserialize)]
 #[serde(try_from = "NumOrString")]
@@ -621,8 +608,18 @@ pub async fn cursor_usage(m: &Machine) -> Result<Option<Cursor>> {
     usage_of(m, CURSOR_USAGE).await
 }
 
-pub async fn pi_usage(m: &Machine) -> Result<Option<Pi>> {
-    usage_of(m, PI_USAGE).await
+// claude takes these aliases; cursor-agent lists its own as "id - Name" lines.
+pub async fn models(m: &Machine, kind: &str) -> Result<Vec<String>> {
+    if kind == "cursor" {
+        let o = sh(m, "cursor-agent models", SHORT).await?;
+        return Ok(o
+            .out
+            .lines()
+            .filter_map(|l| l.split_once(" - ").map(|(id, _)| id.to_string()))
+            .filter(|id| Name::parse(id).is_ok())
+            .collect());
+    }
+    Ok(["opus", "sonnet", "haiku"].map(String::from).into())
 }
 
 // Main clones only: a worktree has a .git file, a clone a .git directory.

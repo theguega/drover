@@ -571,15 +571,6 @@ fn bar(name: &str, pct: f64, reset: Option<i64>) -> String {
     )
 }
 
-#[must_use]
-fn tokens(n: f64) -> String {
-    match n {
-        n if n >= 1e6 => format!("{:.1}M", n / 1e6),
-        n if n >= 1e3 => format!("{:.0}k", n / 1e3),
-        n => format!("{n:.0}"),
-    }
-}
-
 // One machine's plans; an agent that isn't logged in there is left out.
 async fn usage_lines(m: &Machine) -> Vec<String> {
     fn failed(lines: &mut Vec<String>, agent: &str, e: &herdr::Error) {
@@ -588,8 +579,7 @@ async fn usage_lines(m: &Machine) -> Vec<String> {
             head(&e.to_string(), 200)
         ));
     }
-    let (claude, cursor, pi) =
-        tokio::join!(herdr::usage(m), herdr::cursor_usage(m), herdr::pi_usage(m));
+    let (claude, cursor) = tokio::join!(herdr::usage(m), herdr::cursor_usage(m));
     let mut lines = vec![format!("**{}**", m.name)];
     match claude {
         Ok(None) => {}
@@ -661,23 +651,6 @@ async fn usage_lines(m: &Machine) -> Vec<String> {
         }
         Err(e) => failed(&mut lines, "cursor", &e),
     }
-    match pi {
-        Ok(None) => {}
-        Ok(Some(p)) => {
-            let spend = |s: &herdr::Spend| format!("{} ${:.2}", tokens(s.tokens), s.cost);
-            lines.push(format!(
-                "*pi* tokens and cost it logged, via {}",
-                p.providers.join(", ")
-            ));
-            lines.push(format!(
-                "`24h {} · 7d {} · 30d {}`",
-                spend(&p.day),
-                spend(&p.week),
-                spend(&p.month)
-            ));
-        }
-        Err(e) => failed(&mut lines, "pi", &e),
-    }
     lines
 }
 
@@ -702,7 +675,7 @@ impl App {
                     o.add_string_choice(&m.name, &m.name)
                 })
         };
-        let kinds = ["claude", "codex", "cursor", "opencode", "pi"];
+        let kinds = ["claude", "cursor"];
         vec![
             CreateCommand::new("new")
                 .description("Worktree + agent in a new thread")
@@ -721,6 +694,7 @@ impl App {
                             o.add_string_choice(*k, *k)
                         }),
                 )
+                .add_option(string("model", "default if empty").set_autocomplete(true))
                 .add_option(CreateCommandOption::new(
                     CommandOptionType::Boolean,
                     "scout",
@@ -736,7 +710,7 @@ impl App {
                 ),
             CreateCommand::new("agents").description("Agents on every machine"),
             CreateCommand::new("worktrees").description("Worktrees on every machine"),
-            CreateCommand::new("usage").description("Claude, Cursor and pi usage on every machine"),
+            CreateCommand::new("usage").description("Claude and Cursor usage on every machine"),
             CreateCommand::new("screen").description("This thread's terminal"),
             CreateCommand::new("keys")
                 .description("Send keys to this thread's agent")
@@ -783,6 +757,7 @@ impl App {
         let r#ref = Name::parse(req(i, "branch")?)?;
         let text = req(i, "prompt")?;
         let kind = opt(i, "agent").unwrap_or("claude");
+        let model = opt(i, "model").map(Name::parse).transpose()?;
         let scout = flag(i, "scout") == Some(true);
 
         i.defer(http).await?;
@@ -857,7 +832,15 @@ impl App {
         self.save().await;
         th.create_reaction(http, head.id, emoji("👀")).await?;
         // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
-        Ok(herdr::start(m, &agent_name(&wt.branch), kind, &wt.pane_id, &wt.path).await?)
+        Ok(herdr::start(
+            m,
+            &agent_name(&wt.branch),
+            kind,
+            &wt.pane_id,
+            &wt.path,
+            model.as_ref(),
+        )
+        .await?)
     }
 
     async fn cmd_attach(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
@@ -1133,13 +1116,23 @@ impl App {
             );
             (head(&name, 100), a.pane_id.0)
         };
-        let choices: Vec<(String, String)> = match i.data.name.as_str() {
-            "new" => herdr::repos(m)
+        let focused = i.data.autocomplete().map(|a| a.name);
+        let choices: Vec<(String, String)> = match focused {
+            Some("repo") => herdr::repos(m)
                 .await
                 .unwrap_or_default()
                 .into_iter()
                 .map(|r| (r.clone(), r))
                 .collect(),
+            Some("model") => {
+                let kind = opt(i, "agent").unwrap_or("claude");
+                herdr::models(m, kind)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|x| (x.clone(), x))
+                    .collect()
+            }
             _ => herdr::agents(m)
                 .await
                 .unwrap_or_default()

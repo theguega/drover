@@ -15,7 +15,7 @@ state.json      thread → task map (gitignored)
 journal.db      journal (gitignored)
 ```
 
-drover has no model. It opens a worktree, starts the real `claude` (or `codex`, `cursor`, `opencode`, `pi`) TUI inside herdr, and posts the final answer. Every task is an ordinary herdr workspace, so the desk can take it over at any point.
+drover has no model. It opens a worktree, starts the real `claude` (or `cursor`) TUI inside herdr, and posts the final answer. Every task is an ordinary herdr workspace, so the desk can take it over at any point.
 
 ```
 phone ─ discord ─▶ drover  (Rust, a user service on the host)
@@ -92,7 +92,6 @@ Enforced by the lints in `Cargo.toml`:
 
 - claude: the login token (`~/.claude/.credentials.json`, or the macOS keychain) goes to curl on stdin for `api.anthropic.com/api/oauth/usage`, the endpoint behind Claude Code's own `/usage`
 - cursor: the cursor-agent token (`~/.config/cursor/auth.json`, or the keychain) goes the same way to `DashboardService/GetCurrentPeriodUsage` on `api2.cursor.sh`, what the editor's usage view reads
-- pi: no plan and no token. jq sums the tokens and cost pi logs per message in `~/.pi/agent/sessions`, over 24 h, 7 d and 30 d
 
 The two endpoints are undocumented and may change without notice.
 
