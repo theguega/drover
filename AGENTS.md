@@ -55,7 +55,7 @@ The dotfiles blank native `new_worktree` so `prefix+shift+g` can run `drover-wt 
 
 ## Event loop
 
-herdr's socket takes one request per connection and closes it after the reply. Locally drover connects to `~/.config/herdr/herdr.sock` per request (~0.1 ms). Each remote keeps one ssh open to a short Python relay that opens a socket connection per request line and streams every reply line back, matched by `id` (~1 RTT, about 100 ms to remote, against ~2 s for `herdr --machine`). The relay needs `python3` on the remote. Only git (`drover-wt`) and remote transcript reads still spawn a shell.
+herdr's socket takes one request per connection and closes it after the reply. Locally drover connects to `~/.config/herdr/herdr.sock` per request (~0.1 ms). Each remote keeps one ssh open to a short Python relay that opens a socket connection per request line and streams every reply line back, matched by `id` (~1 RTT, about 100 ms to a remote, against ~2 s for `herdr --machine`). The relay needs `python3` on the remote. Only git (`drover-wt`) and remote transcript reads still spawn a shell.
 
 Each machine gets a watcher holding one `events.subscribe` — `pane.agent_status_changed` per followed pane, plus `pane.agent_detected`, `pane.closed`, `pane.exited`, and `workspace.closed` anywhere.
 

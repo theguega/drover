@@ -1445,8 +1445,8 @@ mod tests {
     #[test]
     fn helpers() {
         assert_eq!(slug("Feature/Fix-Bug!!x"), "feature-fix-bug-x");
-        assert_eq!(home("/Users/you/Developer/x"), "~/Developer/x");
-        assert_eq!(home("/home/you"), "~");
+        assert_eq!(home("/Users/alice/Developer/x"), "~/Developer/x");
+        assert_eq!(home("/home/alice"), "~");
         assert_eq!(home("/opt/x"), "/opt/x");
         assert_eq!(tail("abcdef", 3), "…def");
         assert_eq!(today().len(), 10);
