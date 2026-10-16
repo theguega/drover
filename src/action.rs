@@ -1,6 +1,10 @@
 // What drover does, once. Discord and the terminal both build an Action and print the text run returns.
 
-use std::time::Duration;
+use std::{
+    hash::{BuildHasher, Hasher, RandomState},
+    path::Path,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Serialize};
 use serenity::all::{ChannelId, Http};
@@ -19,6 +23,8 @@ pub enum Action {
     Config,
     Screen(Target),
     Mate(Mate),
+    Scout(Scout),
+    ScoutClose(Target),
     Take(Target),
     Send(Send),
     Release(Target),
@@ -36,6 +42,11 @@ pub struct New {
     pub agent: Option<String>,
     pub model: Option<String>,
     pub scout: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Scout {
+    pub prompt: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -79,6 +90,30 @@ pub struct Recall {
     pub query: String,
 }
 
+// A scout's id: "scout-" and six hex digits, which the agent name rule allows.
+fn scout_id() -> String {
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u128(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+    );
+    format!("scout-{:06x}", hasher.finish() & 0xff_ffff)
+}
+
+// Deletes one scout's folder. Only a direct child of the scouts folder named scout-* goes.
+fn remove_scout_dir(root: &Path, id: &str) -> Result<()> {
+    let dir = root.join(id);
+    if dir.parent() != Some(root) || !id.starts_with("scout-") {
+        bail!("refusing to delete {}: not a scout folder", dir.display());
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
 // Most mates a desk runs at once.
 const MAX_MATES: usize = 3;
 
@@ -114,6 +149,8 @@ impl App {
             Action::Usage => self.cmd_usage().await,
             Action::Config => Ok(self.config()),
             Action::Mate(m) => self.cmd_mate(http, &m.name).await,
+            Action::Scout(s) => self.cmd_scout(http, &s.prompt).await,
+            Action::ScoutClose(t) => self.cmd_scout_close(http, &t.thread).await,
             Action::Send(s) => self.cmd_send(&s).await,
             Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
             Action::Release(t) => self.set_owner(&t.thread, Owner::Mate).await,
@@ -205,6 +242,7 @@ impl App {
                 origin: Origin::Opened,
                 owner: Owner::User,
                 mate: None,
+                scout: None,
                 phase: Phase::Starting { prompt },
                 status: None,
                 session: None,
@@ -262,6 +300,7 @@ impl App {
                 origin: Origin::Attached,
                 owner: Owner::User,
                 mate: None,
+                scout: None,
                 phase: Phase::Idle,
                 status: Some(a.agent_status),
                 session,
@@ -373,6 +412,68 @@ impl App {
         Ok(outcome.into())
     }
 
+    // A scout: a short look with no repo, in its own folder and pane, with nothing to journal.
+    async fn cmd_scout(&self, http: &Http, prompt: &str) -> Result<String> {
+        let id = scout_id();
+        let dir = self.mates.join("state").join("scouts").join(&id);
+        std::fs::create_dir_all(&dir)?;
+        let cwd = dir.to_string_lossy().into_owned();
+        let (workspace, pane) = herdr::tab_pane(&self.host, "scouts", &cwd).await?;
+        let th = self
+            .open_thread(http, &format!("scout · {id} · {}", self.host.name))
+            .await?;
+        let head = th.say(http, format!("scout in `{cwd}`")).await?;
+        self.insert(
+            th,
+            Task {
+                machine: self.host.name.clone(),
+                pane: pane.clone(),
+                workspace,
+                kind: harness::DEFAULT.into(),
+                repo: "scouts".into(),
+                branch: String::new(),
+                origin: Origin::Attached,
+                owner: Owner::User,
+                mate: None,
+                scout: Some(id.clone()),
+                phase: Phase::Starting {
+                    prompt: format!("{SCOUT}\n\n{prompt}"),
+                },
+                status: None,
+                session: None,
+                last_reply: None,
+                prompt_msg: Some(head.id),
+                dialog_msg: None,
+                queued: None,
+            },
+        );
+        self.save().await;
+        herdr::start(
+            &self.host,
+            &format!("scout-{id}"),
+            harness::DEFAULT,
+            &pane,
+            &cwd,
+            None,
+        )
+        .await?;
+        Ok(format!("<#{th}>"))
+    }
+
+    async fn cmd_scout_close(&self, http: &Http, thread: &str) -> Result<String> {
+        let th = id::<ChannelId>(thread)?;
+        let cell = self.task_in(th)?;
+        let t = cell.lock().await.clone();
+        let Some(scout) = t.scout.clone() else {
+            bail!("this thread is not a scout");
+        };
+        self.remove(th);
+        self.save().await;
+        self.teardown(http, th, &t, Teardown::Close).await?;
+        remove_scout_dir(&self.mates.join("state").join("scouts"), &scout)?;
+        Ok(format!("closed {scout}"))
+    }
+
     async fn cmd_mate(&self, http: &Http, name: &str) -> Result<String> {
         let name = mate_name(name)?;
         let mut live = 0;
@@ -392,7 +493,7 @@ impl App {
         }
 
         let cwd = self.mates.to_string_lossy().into_owned();
-        let (workspace, pane) = herdr::mate_pane(&self.host, &cwd).await?;
+        let (workspace, pane) = herdr::tab_pane(&self.host, "mates", &cwd).await?;
         let th = self
             .open_thread(http, &format!("mate · {name} · {}", self.host.name))
             .await?;
@@ -409,6 +510,7 @@ impl App {
                 origin: Origin::Attached,
                 owner: Owner::Mate,
                 mate: Some(name.clone()),
+                scout: None,
                 phase: Phase::Starting {
                     prompt: mate_role(&name),
                 },
@@ -509,6 +611,9 @@ impl App {
         };
         {
             let mut t = cell.lock().await;
+            if t.scout.is_some() {
+                bail!("a scout ends with scout-close");
+            }
             if teardown == Teardown::Remove && t.origin == Origin::Attached {
                 bail!("drover didn't open this worktree, remove it by hand");
             }
@@ -535,6 +640,22 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scout_folders_are_removed_only_when_they_are_scouts() -> Result<()> {
+        let root = std::env::temp_dir().join(format!("drover-scouts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("scout-abc123"))?;
+        assert!(remove_scout_dir(&root, "").is_err());
+        assert!(remove_scout_dir(&root, "../scout-abc123").is_err());
+        assert!(remove_scout_dir(&root, "other").is_err());
+        assert!(root.join("scout-abc123").exists());
+        remove_scout_dir(&root, "scout-abc123")?;
+        assert!(!root.join("scout-abc123").exists());
+        remove_scout_dir(&root, "scout-abc123")?;
+        std::fs::remove_dir_all(&root)?;
+        Ok(())
+    }
 
     #[test]
     fn mate_names_are_short_and_lowercase() {

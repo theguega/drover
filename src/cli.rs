@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::*;
-use crate::action::{Action, Attach, Done, Keys, Mate, New, Recall, Send, Target};
+use crate::action::{Action, Attach, Done, Keys, Mate, New, Recall, Scout, Send, Target};
 
 pub enum Invocation {
     Serve,
@@ -32,6 +32,10 @@ Commands (Discord command in brackets):
              [/screen] the terminal of a task's agent
   keys       --thread T --keys \"esc shift+tab enter\"
              [/keys] send keys to a task's agent
+  scout      PROMPT...
+             [/scout] a short look with no repo, in its own pane and folder
+  scout      close --thread T
+             [/scout-close] end the scout and delete its folder
   mate       NAME
              [/mate] start a mate: a dispatcher pane in the drover workspace, at most three
   send       --thread T --text \"...\"
@@ -105,6 +109,17 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
             thread: flags.req("thread")?,
             text: flags.req("text")?,
         }),
+        "scout" => match flags.words.split_first() {
+            Some((first, _)) if first == "close" => Action::ScoutClose(Target {
+                thread: flags.req("thread")?,
+            }),
+            _ if flags.words.is_empty() => {
+                bail!("drover scout PROMPT, or drover scout close --thread T")
+            }
+            _ => Action::Scout(Scout {
+                prompt: flags.words.join(" "),
+            }),
+        },
         "mate" => Action::Mate(Mate {
             name: flags.words.first().cloned().context("drover mate NAME")?,
         }),
@@ -213,6 +228,20 @@ mod tests {
         };
         assert_eq!(t.thread, "42");
         assert!(parse(&args("take")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn scout_takes_a_prompt_or_close() -> Result<()> {
+        let Invocation::Run(Action::Scout(s)) = parse(&args("scout look at the cache"))? else {
+            bail!("not a scout");
+        };
+        assert_eq!(s.prompt, "look at the cache");
+        let Invocation::Run(Action::ScoutClose(t)) = parse(&args("scout close --thread 9"))? else {
+            bail!("not a scout close");
+        };
+        assert_eq!(t.thread, "9");
+        assert!(parse(&args("scout")).is_err());
         Ok(())
     }
 

@@ -514,7 +514,7 @@ pub async fn worktrees(m: &Machine) -> Result<String> {
     Ok(text.trim_end().into())
 }
 
-// The mates tab of the drover workspace. The first mate creates both, later mates split from a pane in it.
+// A pane in the named tab of the drover workspace. The first pane creates both, later ones split from a pane in it.
 #[derive(Deserialize)]
 struct PaneRef {
     pane_id: PaneId,
@@ -537,7 +537,7 @@ struct WorkspaceRef {
     workspace_id: WorkspaceId,
 }
 
-pub async fn mate_pane(m: &Machine, cwd: &str) -> Result<(WorkspaceId, PaneId)> {
+pub async fn tab_pane(m: &Machine, tab: &str, cwd: &str) -> Result<(WorkspaceId, PaneId)> {
     #[derive(Deserialize)]
     struct Workspaces {
         workspaces: Vec<Ws>,
@@ -584,7 +584,7 @@ pub async fn mate_pane(m: &Machine, cwd: &str) -> Result<(WorkspaceId, PaneId)> 
         m.link
             .call::<IgnoredAny>(
                 "tab.rename",
-                json!({"tab_id": made.root_pane.tab_id, "label": "mates"}),
+                json!({"tab_id": made.root_pane.tab_id, "label": tab}),
                 SHORT,
             )
             .await?;
@@ -596,12 +596,12 @@ pub async fn mate_pane(m: &Machine, cwd: &str) -> Result<(WorkspaceId, PaneId)> 
         .call::<Tabs>("tab.list", json!({"workspace_id": workspace.0}), SHORT)
         .await?
         .tabs;
-    let Some(tab) = tabs.into_iter().find(|t| t.label == "mates") else {
+    let Some(tab) = tabs.into_iter().find(|t| t.label == tab) else {
         let made = m
             .link
             .call::<Created>(
                 "tab.create",
-                json!({"workspace_id": workspace.0, "label": "mates", "cwd": cwd, "focus": false}),
+                json!({"workspace_id": workspace.0, "label": tab, "cwd": cwd, "focus": false}),
                 SHORT,
             )
             .await?;

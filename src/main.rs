@@ -31,7 +31,7 @@ use tokio::{
     time::sleep,
 };
 
-use action::{Action, Attach, Done, Keys, Mate, New, Recall, Target};
+use action::{Action, Attach, Done, Keys, Mate, New, Recall, Scout, Target};
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
 
@@ -151,6 +151,8 @@ struct Task {
     owner: Owner,
     #[serde(skip_serializing_if = "Option::is_none")]
     mate: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scout: Option<String>, // the scout's folder name, while the scout lives
     phase: Phase,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<Status>, // none until the poller has seen the agent
@@ -179,6 +181,7 @@ struct Stored {
     origin: Option<Origin>,
     owner: Option<Owner>,
     mate: Option<String>,
+    scout: Option<String>,
     phase: Option<Phase>,
     status: Option<Status>,
     session: Option<String>,
@@ -231,6 +234,7 @@ impl From<Stored> for Task {
             origin,
             owner: s.owner.unwrap_or(Owner::User),
             mate: s.mate,
+            scout: s.scout,
             phase,
             status: s.status,
             last_reply: s.last_reply,
@@ -750,6 +754,10 @@ impl App {
             CreateCommand::new("agents").description("Agents on every machine"),
             CreateCommand::new("worktrees").description("Worktrees on every machine"),
             CreateCommand::new("usage").description("Claude and Cursor usage on every machine"),
+            CreateCommand::new("scout")
+                .description("Start a scout: a short look with no repo, deleted when closed")
+                .add_option(string("prompt", "what to look at").required(true)),
+            CreateCommand::new("scout-close").description("End this scout and delete its folder"),
             CreateCommand::new("mate")
                 .description("Start a mate: a dispatcher pane in the drover workspace")
                 .add_option(string("name", "lowercase, up to 26 characters").required(true)),
@@ -835,9 +843,11 @@ impl App {
             Ok(said) => said,
             Err(kept) => {
                 // a mate shares its workspace with the other mates, so only its pane goes
-                let closed = match t.mate {
-                    Some(_) => herdr::close_pane(m, &t.pane).await,
-                    None => herdr::close(m, &t.workspace).await,
+                // mates and scouts share the drover workspace, so only their pane goes
+                let closed = if t.mate.is_some() || t.scout.is_some() {
+                    herdr::close_pane(m, &t.pane).await
+                } else {
+                    herdr::close(m, &t.workspace).await
                 };
                 match closed {
                     Ok(()) => kept,
@@ -884,6 +894,10 @@ impl App {
             "agents" => Action::Agents,
             "worktrees" => Action::Worktrees,
             "usage" => Action::Usage,
+            "scout" => Action::Scout(Scout {
+                prompt: req(i, "prompt")?.into(),
+            }),
+            "scout-close" => Action::ScoutClose(Target { thread }),
             "mate" => Action::Mate(Mate {
                 name: req(i, "name")?.into(),
             }),
