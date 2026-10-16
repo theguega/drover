@@ -1,10 +1,13 @@
 // herdr and shell access per machine: herdr over its socket, git and transcripts over sh or ssh.
 
-use std::{process::Stdio, sync::Arc, time::Duration};
+use std::{io::SeekFrom, path::Path, process::Stdio, sync::Arc, time::Duration};
 
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::json;
-use tokio::process::Command;
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    process::Command,
+};
 
 use crate::socket::{Link, SSH_OPTS};
 
@@ -256,6 +259,8 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 const ROOT: &str = r#""${REPOS_ROOT:-$HOME/Developer}""#;
 
 const SHORT: Duration = Duration::from_secs(15);
+// bytes read from the end of a transcript; a turn's reply sits well inside this
+const TAIL: u64 = 8 << 20;
 const LONG: Duration = Duration::from_secs(120);
 
 struct Out {
@@ -708,26 +713,46 @@ pub struct Reply {
 }
 
 // Last assistant text after the latest real prompt in a Claude Code transcript.
-pub async fn reply(m: &Machine, session: &SessionId) -> Option<Reply> {
+// Only the tail is read: a long session would otherwise cross ssh on every push.
+pub async fn reply(m: &Machine, session: &SessionId) -> Result<Option<Reply>> {
     let file = format!("{}.jsonl", session.0);
     if m.reach == Reach::Ssh {
-        let o = sh(m, &format!("cat ~/.claude/projects/*/{file}"), SHORT)
-            .await
-            .ok()?;
-        return if o.code == Some(0) {
-            last_reply(&o.out)
-        } else {
-            None
-        };
+        let o = sh(
+            m,
+            &format!("tail -c {TAIL} ~/.claude/projects/*/{file}"),
+            SHORT,
+        )
+        .await?;
+        return Ok(match o.code {
+            Some(0) => last_reply(&o.out),
+            _ => None,
+        });
     }
-    let projects = std::path::Path::new(&std::env::var("HOME").ok()?).join(".claude/projects");
-    let mut dirs = tokio::fs::read_dir(projects).await.ok()?;
-    while let Ok(Some(d)) = dirs.next_entry().await {
-        if let Ok(text) = tokio::fs::read_to_string(d.path().join(&file)).await {
-            return last_reply(&text);
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
+    let mut dirs = match tokio::fs::read_dir(Path::new(&home).join(".claude/projects")).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(d) = dirs.next_entry().await? {
+        match tail(&d.path().join(&file)).await {
+            Ok(text) => return Ok(last_reply(&text)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
         }
     }
-    None
+    Ok(None)
+}
+
+async fn tail(path: &Path) -> std::io::Result<String> {
+    let mut f = tokio::fs::File::open(path).await?;
+    let len = f.metadata().await?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(TAIL))).await?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf).await?;
+    // the first line may be cut mid-way; it fails to parse and is skipped
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 #[must_use]
@@ -736,7 +761,8 @@ fn last_reply(jsonl: &str) -> Option<Reply> {
         .lines()
         .filter_map(|l| serde_json::from_str(l).ok())
         .collect();
-    let from = lines.iter().rposition(Line::is_prompt).unwrap_or(0);
+    // no prompt in the window means the reply may lie before it, so none
+    let from = lines.iter().rposition(Line::is_prompt)?;
     lines
         .iter()
         .skip(from)

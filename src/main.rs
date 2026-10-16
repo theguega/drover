@@ -873,7 +873,7 @@ impl App {
             .await?;
         let session = a.session();
         let last_reply = match &session {
-            Some(s) => herdr::reply(m, s).await.map(|r| r.id),
+            Some(s) => herdr::reply(m, s).await?.map(|r| r.id),
             None => None,
         };
         self.insert(
@@ -1356,7 +1356,7 @@ impl App {
         if let Phase::Starting { prompt } = &t.phase {
             let prompt = prompt.clone();
             if let Some(s) = &t.session {
-                t.last_reply = herdr::reply(m, s).await.map(|r| r.id);
+                t.last_reply = herdr::reply(m, s).await?.map(|r| r.id);
             }
             t.phase = match herdr::prompt(m, &t.pane, &prompt).await {
                 Ok(()) => Phase::Waiting,
@@ -1376,7 +1376,7 @@ impl App {
             let Some(s) = t.session.clone() else {
                 return Ok(Step::Keep);
             };
-            let Some(r) = fresh_reply(m, &s, t.last_reply.as_deref()).await else {
+            let Some(r) = fresh_reply(m, &s, t.last_reply.as_deref()).await? else {
                 return Ok(Step::Keep);
             };
             t.last_reply = Some(r.id);
@@ -1441,17 +1441,21 @@ enum Seen {
 }
 
 // The transcript can trail the status flip by a moment, so look again briefly.
-async fn fresh_reply(m: &Machine, s: &SessionId, last: Option<&str>) -> Option<herdr::Reply> {
+async fn fresh_reply(
+    m: &Machine,
+    s: &SessionId,
+    last: Option<&str>,
+) -> Result<Option<herdr::Reply>> {
     for _ in 0..4 {
         if let Some(r) = herdr::reply(m, s)
-            .await
+            .await?
             .filter(|r| Some(r.id.as_str()) != last)
         {
-            return Some(r);
+            return Ok(Some(r));
         }
         sleep(Duration::from_millis(250)).await;
     }
-    None
+    Ok(None)
 }
 
 // ── wiring ─────────────────────────────────────────────────
