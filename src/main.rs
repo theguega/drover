@@ -28,6 +28,7 @@ use tokio::{
     time::sleep,
 };
 
+use action::{Action, Attach, Done, Keys, New, Recall, Target};
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
 
@@ -59,6 +60,10 @@ impl<T> WithContext<T> for Option<T> {
         self.ok_or_else(|| err!("{what}"))
     }
 }
+
+mod action;
+mod cli;
+mod control;
 
 // ── config ─────────────────────────────────────────────────
 
@@ -490,11 +495,6 @@ fn req<'a>(i: &'a CommandInteraction, name: &str) -> Result<&'a str> {
 }
 
 #[must_use]
-fn reply(content: impl Into<String>) -> CreateInteractionResponse {
-    CreateInteractionResponse::Message(CreateInteractionResponseMessage::new().content(content))
-}
-
-#[must_use]
 fn ephemeral(content: impl Into<String>) -> CreateInteractionResponse {
     CreateInteractionResponse::Message(
         CreateInteractionResponseMessage::new()
@@ -760,258 +760,6 @@ impl App {
         Ok((self.machine(&t.machine)?, t.pane.clone()))
     }
 
-    async fn cmd_new(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
-        let m = self.machine(req(i, "machine")?)?;
-        let repo = Name::parse(req(i, "repo")?)?;
-        let r#ref = Name::parse(req(i, "branch")?)?;
-        let text = req(i, "prompt")?;
-        let kind = opt(i, "agent").unwrap_or("claude");
-        let model = opt(i, "model").map(Name::parse).transpose()?;
-        let scout = flag(i, "scout") == Some(true);
-
-        i.defer(http).await?;
-        let wt = herdr::worktree(m, &repo, &r#ref).await?;
-        if let Some(bound) = self.live(&m.name, &wt.pane_id).await {
-            i.edit_response(http, edit(format!("already open in <#{bound}>")))
-                .await?;
-            return Ok(());
-        }
-        if herdr::agents(m)
-            .await?
-            .iter()
-            .any(|a| a.pane_id == wt.pane_id)
-        {
-            i.edit_response(
-                http,
-                edit(format!(
-                    "an agent already runs in {}, /attach it",
-                    wt.pane_id.0
-                )),
-            )
-            .await?;
-            return Ok(());
-        }
-
-        let repo = repo.as_str();
-        let th = self
-            .open_thread(http, &format!("{repo} · {} · {}", wt.branch, m.name))
-            .await?;
-        i.edit_response(http, edit(format!("<#{th}>"))).await?;
-        let head = th
-            .say(
-                http,
-                format!(
-                    "`{}`\n> {}",
-                    wt.path,
-                    tail(text, 1500).replace('\n', "\n> ")
-                ),
-            )
-            .await?;
-
-        let memory = self.journal.context(repo, text, 2000).await?;
-        let mut prompt = if scout {
-            format!("{SCOUT}\n\n{text}")
-        } else {
-            text.into()
-        };
-        if !memory.is_empty() {
-            prompt = format!(
-                "{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"
-            );
-        }
-        self.insert(
-            th,
-            Task {
-                machine: m.name.clone(),
-                pane: wt.pane_id.clone(),
-                workspace: wt.workspace_id,
-                kind: kind.into(),
-                repo: repo.into(),
-                branch: wt.branch.clone(),
-                origin: Origin::Opened,
-                phase: Phase::Starting { prompt },
-                status: None,
-                session: None,
-                last_reply: None,
-                prompt_msg: Some(head.id),
-                dialog_msg: None,
-                queued: None,
-            },
-        );
-        self.save().await;
-        th.create_reaction(http, head.id, emoji("👀")).await?;
-        // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
-        Ok(herdr::start(
-            m,
-            &agent_name(&wt.branch),
-            kind,
-            &wt.pane_id,
-            &wt.path,
-            model.as_ref(),
-        )
-        .await?)
-    }
-
-    async fn cmd_attach(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
-        let m = self.machine(req(i, "machine")?)?;
-        let pane = PaneId(req(i, "agent")?.into());
-        let a = herdr::agents(m)
-            .await?
-            .into_iter()
-            .find(|x| x.pane_id == pane)
-            .context(format!("no agent in {} on {}", pane.0, m.name))?;
-        if let Some(bound) = self.live(&m.name, &pane).await {
-            i.create_response(http, reply(format!("already open in <#{bound}>")))
-                .await?;
-            return Ok(());
-        }
-
-        i.defer(http).await?;
-        let repo = a.cwd.rsplit('/').next().unwrap_or_default().to_string();
-        let th = self
-            .open_thread(http, &format!("{repo} · {} · {}", a.agent, m.name))
-            .await?;
-        let session = a.session();
-        let last_reply = match &session {
-            Some(s) => herdr::reply(m, s).await?.map(|r| r.id),
-            None => None,
-        };
-        self.insert(
-            th,
-            Task {
-                machine: m.name.clone(),
-                pane: pane.clone(),
-                workspace: a.workspace_id,
-                kind: a.agent,
-                repo,
-                branch: String::new(),
-                origin: Origin::Attached,
-                phase: Phase::Idle,
-                status: Some(a.agent_status),
-                session,
-                last_reply,
-                prompt_msg: None,
-                dialog_msg: None,
-                queued: None,
-            },
-        );
-        self.save().await;
-        i.edit_response(http, edit(format!("<#{th}>"))).await?;
-        th.send_message(http, screen_msg(m, &pane).await).await?;
-        Ok(())
-    }
-
-    async fn cmd_agents(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
-        i.defer(http).await?;
-        let mut lines = vec![];
-        for m in self.machines() {
-            lines.push(format!("**{}**", m.name));
-            let list = match herdr::agents(m).await {
-                Ok(list) => list,
-                Err(e) => {
-                    lines.push(format!("unreachable: {e}"));
-                    continue;
-                }
-            };
-            for a in list {
-                let bound = self
-                    .live(&m.name, &a.pane_id)
-                    .await
-                    .map(|b| format!(" <#{b}>"))
-                    .unwrap_or_default();
-                let icon = a.agent_status.icon();
-                lines.push(format!(
-                    "`{icon} {}` {} {}{bound}",
-                    a.pane_id.0,
-                    a.agent,
-                    home(&a.cwd)
-                ));
-            }
-        }
-        i.edit_response(http, edit(tail(&lines.join("\n"), 1990)))
-            .await?;
-        Ok(())
-    }
-
-    async fn cmd_usage(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
-        i.defer(http).await?;
-        let jobs: Vec<_> = self
-            .machines()
-            .cloned()
-            .map(|m| tokio::spawn(async move { usage_lines(&m).await }))
-            .collect();
-        let mut lines = vec![];
-        for job in jobs {
-            lines.extend(job.await?);
-        }
-        i.edit_response(http, edit(tail(&lines.join("\n"), 1990)))
-            .await?;
-        Ok(())
-    }
-
-    async fn cmd_worktrees(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
-        i.defer(http).await?;
-        let jobs: Vec<_> = self
-            .machines()
-            .cloned()
-            .map(|m| {
-                tokio::spawn(async move {
-                    let s = match herdr::worktrees(&m).await {
-                        Ok(s) if s.is_empty() => "none".into(),
-                        Ok(s) => s,
-                        Err(e) => format!("unreachable: {e}"),
-                    };
-                    format!("**{}**\n```\n{s}\n```", m.name)
-                })
-            })
-            .collect();
-        let mut parts = Vec::new();
-        for job in jobs {
-            parts.push(job.await?);
-        }
-        i.edit_response(http, edit(tail(&parts.join("\n"), 1990)))
-            .await?;
-        Ok(())
-    }
-
-    async fn cmd_done(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
-        let cell = self.task_in(i.channel_id)?;
-        let teardown = if flag(i, "remove") == Some(true) {
-            Teardown::Remove
-        } else {
-            Teardown::Close
-        };
-        let journal = flag(i, "journal") != Some(false);
-        i.defer(http).await?;
-        {
-            let mut t = cell.lock().await;
-            if teardown == Teardown::Remove && t.origin == Origin::Attached {
-                bail!("drover didn't open this worktree, remove it by hand");
-            }
-            if journal {
-                herdr::prompt(self.machine(&t.machine)?, &t.pane, journal::ENTRY_PROMPT).await?;
-                t.phase = Phase::Ending(teardown);
-            }
-        }
-        if !journal {
-            let t = cell.lock().await.clone();
-            self.remove(i.channel_id);
-            self.save().await;
-            i.edit_response(http, edit("closing without a journal entry"))
-                .await?;
-            return self.teardown(http, i.channel_id, &t, teardown).await;
-        }
-        let msg = i
-            .edit_response(http, edit("writing the journal entry"))
-            .await?;
-        cell.lock().await.prompt_msg = Some(msg.id);
-        self.save().await;
-        i.channel_id
-            .create_reaction(http, msg.id, emoji("👀"))
-            .await?;
-        Ok(())
-    }
-
     async fn finish(
         &self,
         http: &Http,
@@ -1062,47 +810,53 @@ impl App {
         Ok(())
     }
 
+    // Discord turns an interaction into an Action; the text it gets back is what the thread sees.
     async fn on_command(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
-        match i.data.name.as_str() {
-            "new" => self.cmd_new(http, i).await,
-            "attach" => self.cmd_attach(http, i).await,
-            "agents" => self.cmd_agents(http, i).await,
-            "worktrees" => self.cmd_worktrees(http, i).await,
-            "usage" => self.cmd_usage(http, i).await,
-            "done" => self.cmd_done(http, i).await,
-            "screen" | "keys" => {
-                let (m, pane) = self.target(i.channel_id).await?;
-                i.defer(http).await?;
-                if i.data.name == "keys" {
-                    let keys: Vec<&str> = req(i, "keys")?.split_whitespace().collect();
-                    herdr::keys(m, &pane, &keys).await?;
-                    sleep(Duration::from_millis(700)).await;
-                }
-                i.edit_response(
-                    http,
-                    edit(screen(m, &pane, "").await).components(key_rows()),
-                )
-                .await?;
-                Ok(())
-            }
-            "recall" => {
-                let hits = self.journal.search(req(i, "query")?, 5).await?;
-                let text = match hits.is_empty() {
-                    true => "nothing".into(),
-                    false => tail(
-                        &hits
-                            .iter()
-                            .map(journal::format)
-                            .collect::<Vec<_>>()
-                            .join("\n\n"),
-                        1990,
-                    ),
-                };
-                i.create_response(http, reply(text)).await?;
-                Ok(())
-            }
-            _ => Ok(()),
+        let thread = i.channel_id.to_string();
+        let action = match i.data.name.as_str() {
+            "new" => Action::New(New {
+                machine: req(i, "machine")?.into(),
+                repo: req(i, "repo")?.into(),
+                branch: req(i, "branch")?.into(),
+                prompt: req(i, "prompt")?.into(),
+                agent: opt(i, "agent").map(String::from),
+                model: opt(i, "model").map(String::from),
+                scout: flag(i, "scout") == Some(true),
+            }),
+            "attach" => Action::Attach(Attach {
+                machine: req(i, "machine")?.into(),
+                pane: req(i, "agent")?.into(),
+            }),
+            "agents" => Action::Agents,
+            "worktrees" => Action::Worktrees,
+            "usage" => Action::Usage,
+            "screen" => Action::Screen(Target { thread }),
+            "keys" => Action::Keys(Keys {
+                thread,
+                keys: req(i, "keys")?
+                    .split_whitespace()
+                    .map(String::from)
+                    .collect(),
+            }),
+            "done" => Action::Done(Done {
+                thread,
+                remove: flag(i, "remove") == Some(true),
+                journal: flag(i, "journal") != Some(false),
+            }),
+            "recall" => Action::Recall(Recall {
+                query: req(i, "query")?.into(),
+            }),
+            _ => return Ok(()),
+        };
+        let terminal = matches!(action, Action::Screen(_) | Action::Keys(_));
+        i.defer(http).await?;
+        let text = self.act(http, action).await?;
+        let mut reply = edit(tail(&text, 1990));
+        if terminal {
+            reply = reply.components(key_rows());
         }
+        i.edit_response(http, reply).await?;
+        Ok(())
     }
 
     async fn on_autocomplete(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
@@ -1168,17 +922,18 @@ impl App {
         let Some(k) = i.data.custom_id.strip_prefix("key:") else {
             return Ok(());
         };
-        let (m, pane) = self.target(i.channel_id).await?;
+        let thread = i.channel_id.to_string();
+        let action = match k {
+            "refresh" => Action::Screen(Target { thread }),
+            key => Action::Keys(Keys {
+                thread,
+                keys: vec![key.into()],
+            }),
+        };
         i.defer(http).await?;
-        if k != "refresh" {
-            herdr::keys(m, &pane, &[k]).await?;
-            sleep(Duration::from_millis(700)).await;
-        }
-        i.edit_response(
-            http,
-            edit(screen(m, &pane, "").await).components(key_rows()),
-        )
-        .await?;
+        let text = self.act(http, action).await?;
+        i.edit_response(http, edit(tail(&text, 1990)).components(key_rows()))
+            .await?;
         Ok(())
     }
 
@@ -1544,6 +1299,12 @@ impl EventHandler for Handler {
                 watch_machine(app, http, m).await;
             });
         }
+        let (control_app, control_http) = (app.clone(), http.clone());
+        tokio::spawn(async move {
+            if let Err(e) = control::serve(control_app, control_http).await {
+                eprintln!("control: {e}");
+            }
+        });
     }
 }
 
@@ -1624,7 +1385,28 @@ fn require_runtime() -> Result<()> {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let out = match cli::parse(&args) {
+        Ok(cli::Invocation::Serve) => return fail(serve().await),
+        Ok(cli::Invocation::Help) => Ok(cli::HELP.into()),
+        Ok(cli::Invocation::Run(action)) => control::send(&action).await,
+        Err(e) => Err(e),
+    };
+    match out {
+        Ok(text) => println!("{text}"),
+        Err(e) => fail(Err(e)),
+    }
+}
+
+fn fail(r: Result<()>) {
+    if let Err(e) = r {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
+async fn serve() -> Result<()> {
     require_runtime()?;
     let app = Arc::new(App::load()?);
     let intents =

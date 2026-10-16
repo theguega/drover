@@ -1,0 +1,203 @@
+// Terminal front end: argv becomes one Action, sent to the running service.
+
+use std::collections::{HashMap, HashSet};
+
+use super::*;
+use crate::action::{Action, Attach, Done, Keys, New, Recall, Target};
+
+pub enum Invocation {
+    Serve,
+    Help,
+    Run(Action),
+}
+
+// Flags that take no value.
+const SWITCHES: [&str; 3] = ["scout", "remove", "no-journal"];
+
+pub const HELP: &str = "\
+drover: the same herdr desk from the terminal, Discord, or an agent.
+
+Usage: drover <command> [--flag value ...]
+
+Commands (Discord command in brackets):
+  new        --machine M --repo R --branch B --prompt P [--agent claude|cursor] [--model X] [--scout]
+             [/new] worktree and agent in a new Discord thread. --branch is a new name,
+             an existing branch, or #pr. --scout asks for a report and no changes.
+  attach     --machine M --pane P
+             [/attach] follow an agent already running in herdr. P is from `agents`.
+  agents     [/agents] agents on every machine, with the thread each one is bound to
+  worktrees  [/worktrees] worktrees on every machine
+  usage      [/usage] Claude and Cursor usage on every machine
+  screen     --thread T
+             [/screen] the terminal of a task's agent
+  keys       --thread T --keys \"esc shift+tab enter\"
+             [/keys] send keys to a task's agent
+  done       --thread T [--remove] [--no-journal]
+             [/done] ask for a journal entry, then close the workspace.
+             --remove also deletes the checkout, only if drover opened it and it is clean and merged.
+             --no-journal closes without an entry.
+  recall     WORDS...
+             [/recall] search the journal
+  config     show this service's host, remotes, channel and paths
+  help       this text
+
+A task is its Discord thread. Thread ids come from `agents` (<#id>).
+Inside a task thread, a plain Discord message is the next prompt; it is queued while the agent works.
+Reactions on the prompt: 👀 working, ⏸️ the agent asks a dialog, ✅ done.
+
+Setup:
+  The service runs `drover` with no arguments, from this checkout, as a user service.
+  It reads .env: DISCORD_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID, ALLOWED_USER_IDS,
+  HOST_NAME, REMOTES (comma-separated ssh names). Run `drover config` for the live values.
+  Needs on PATH: herdr, herdr-wt, git, jq, ssh. Remotes need the dotfiles, herdr, python3, and ssh.
+  The terminal commands talk to the service over a unix socket under ~/.local/state/drover.
+  Install or update: ./install.sh in the checkout. Logs: journalctl --user -u drover, or drover.log on macOS.
+";
+
+pub fn parse(args: &[String]) -> Result<Invocation> {
+    let Some((cmd, rest)) = args.split_first() else {
+        return Ok(Invocation::Serve);
+    };
+    let flags = Flags::read(rest)?;
+    let action = match cmd.as_str() {
+        "serve" => return Ok(Invocation::Serve),
+        "help" | "-h" | "--help" => return Ok(Invocation::Help),
+        "new" => Action::New(New {
+            machine: flags.req("machine")?,
+            repo: flags.req("repo")?,
+            branch: flags.req("branch")?,
+            prompt: flags.req("prompt")?,
+            agent: flags.opt("agent"),
+            model: flags.opt("model"),
+            scout: flags.on("scout"),
+        }),
+        "attach" => Action::Attach(Attach {
+            machine: flags.req("machine")?,
+            pane: flags.req("pane")?,
+        }),
+        "agents" => Action::Agents,
+        "worktrees" => Action::Worktrees,
+        "usage" => Action::Usage,
+        "config" => Action::Config,
+        "screen" => Action::Screen(Target {
+            thread: flags.req("thread")?,
+        }),
+        "keys" => Action::Keys(Keys {
+            thread: flags.req("thread")?,
+            keys: flags
+                .req("keys")?
+                .split_whitespace()
+                .map(String::from)
+                .collect(),
+        }),
+        "done" => Action::Done(Done {
+            thread: flags.req("thread")?,
+            remove: flags.on("remove"),
+            journal: !flags.on("no-journal"),
+        }),
+        "recall" => {
+            if flags.words.is_empty() {
+                bail!("recall needs words to search for");
+            }
+            Action::Recall(Recall {
+                query: flags.words.join(" "),
+            })
+        }
+        other => bail!("unknown command {other}, see `drover help`"),
+    };
+    Ok(Invocation::Run(action))
+}
+
+// `--name value` pairs, `--switch` flags, and bare words.
+struct Flags {
+    values: HashMap<String, String>,
+    switches: HashSet<String>,
+    words: Vec<String>,
+}
+
+impl Flags {
+    fn read(args: &[String]) -> Result<Self> {
+        let mut flags = Self {
+            values: HashMap::new(),
+            switches: HashSet::new(),
+            words: Vec::new(),
+        };
+        let mut it = args.iter();
+        while let Some(arg) = it.next() {
+            let Some(name) = arg.strip_prefix("--") else {
+                flags.words.push(arg.clone());
+                continue;
+            };
+            if SWITCHES.contains(&name) {
+                flags.switches.insert(name.into());
+                continue;
+            }
+            let Some(value) = it.next() else {
+                bail!("--{name} needs a value");
+            };
+            flags.values.insert(name.into(), value.clone());
+        }
+        Ok(flags)
+    }
+
+    fn req(&self, name: &str) -> Result<String> {
+        self.opt(name).context(format!("--{name} is required"))
+    }
+
+    fn opt(&self, name: &str) -> Option<String> {
+        self.values.get(name).cloned()
+    }
+
+    fn on(&self, name: &str) -> bool {
+        self.switches.contains(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn new_takes_flags_and_switches() -> Result<()> {
+        let Invocation::Run(Action::New(n)) = parse(&args(
+            "new --machine host --repo drover --branch feature/x --prompt fix --scout",
+        ))?
+        else {
+            bail!("not a new");
+        };
+        assert!(n.scout && n.agent.is_none() && n.branch == "feature/x");
+        Ok(())
+    }
+
+    #[test]
+    fn done_defaults_to_journal_and_no_remove() -> Result<()> {
+        let Invocation::Run(Action::Done(d)) = parse(&args("done --thread 42"))? else {
+            bail!("not a done");
+        };
+        assert!(d.journal && !d.remove && d.thread == "42");
+        Ok(())
+    }
+
+    #[test]
+    fn recall_joins_words() -> Result<()> {
+        let Invocation::Run(Action::Recall(r)) = parse(&args("recall fts5 index"))? else {
+            bail!("not a recall");
+        };
+        assert_eq!(r.query, "fts5 index");
+        assert!(parse(&args("recall")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn missing_and_unknown_are_errors() {
+        assert!(parse(&args("new --machine host")).is_err());
+        assert!(parse(&args("new --machine")).is_err());
+        assert!(parse(&args("frobnicate")).is_err());
+        assert!(matches!(parse(&[]), Ok(Invocation::Serve)));
+        assert!(matches!(parse(&args("help")), Ok(Invocation::Help)));
+    }
+}
