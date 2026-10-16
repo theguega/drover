@@ -170,6 +170,8 @@ struct Task {
     dialog_msg: Option<MessageId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     queued: Option<String>, // one Discord prompt waiting while the agent works
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    inbox: Vec<String>, // crewmates' news waiting for their mate's turn to end
 }
 
 // What state.json may hold: this format, or the flags of the TypeScript drover.
@@ -194,6 +196,8 @@ struct Stored {
     prompt_msg: Option<MessageId>,
     dialog_msg: Option<MessageId>,
     queued: Option<String>,
+    #[serde(default)]
+    inbox: Vec<String>,
     #[serde(default)]
     owned: bool,
     #[serde(default)]
@@ -247,6 +251,7 @@ impl From<Stored> for Task {
             prompt_msg: s.prompt_msg,
             dialog_msg: s.dialog_msg,
             queued: s.queued,
+            inbox: s.inbox,
         }
     }
 }
@@ -1351,6 +1356,9 @@ impl App {
         }
 
         let was_working = prev == Some(Status::Working);
+        // a mate's turn that crew news started stays out of its thread; the mate escalates what matters
+        let quiet = t.repo == "mates" && !t.phase.waiting();
+        let th = th.filter(|_| !quiet);
         let mut said = None;
         if !(t.phase.waiting() || was_working) {
             return self.drain_queue(http, &mut t, m).await;
@@ -1406,6 +1414,14 @@ impl App {
             return Ok(Step::Keep);
         }
         let Some(text) = t.queued.take() else {
+            if !t.inbox.is_empty() {
+                let news = t.inbox.join("\n\n");
+                match herdr::prompt(m, &t.pane, &news).await {
+                    Ok(()) => t.inbox.clear(),
+                    Err(e) if e.is_busy() || e.is(&herdr::Code::AgentBlocked) => {}
+                    Err(e) => eprintln!("mate inbox {}: {e}", t.pane.0),
+                }
+            }
             return Ok(Step::Keep);
         };
         match herdr::prompt(m, &t.pane, &text).await {

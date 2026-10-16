@@ -70,6 +70,8 @@ any ──pane gone──▶ Gone
 
 If Discord sends a prompt while the agent is busy (`agent_not_ready` / `agent_not_idle`), drover keeps one message in `queued` and sends it on the next idle push.
 
+A crewmate a mate owns reports to that mate instead of a thread: each reply, dialog and exit goes to the mate's pane, or into its `inbox` while the mate works. Turns started that way post nothing to the mate's thread.
+
 `Origin::Opened` means drover created the worktree, so `/done remove` may run `drover-wt rm` on it, which keeps a dirty checkout and an unmerged branch. `Attached` is an agent that was started at the desk.
 
 ## Memory

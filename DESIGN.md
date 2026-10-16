@@ -71,6 +71,8 @@ Names must match `[a-z][a-z0-9_-]{0,31}`.
 - A mate's playbook (`mates/AGENTS.md`) covers dispatch, review, handoff and close, with the practices it works by: spec before code, small diffs, tests as the check, a second look before merge, bounded context, and asking when ambiguous. Public references: [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and the open [Agent Skills spec](https://agentskills.io). Borrow checkpoints, do not copy whole packs.
 - A mate's reports are bounded: what changed, what was checked, what is left.
 - `drover escalate --mate <name> --text ...` posts a question in the mate's thread and logs it.
+- A crewmate the mate owns has no thread of its own, so drover sends its replies, dialogs and exit to the mate's pane, or holds them in the mate's inbox until its turn ends.
+- The mate's thread carries only answers to the desk's own messages, the mate's dialogs, and `drover escalate`. A turn started by crew news posts nothing.
 
 ## Scouts
 

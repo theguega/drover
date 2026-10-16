@@ -315,6 +315,7 @@ impl App {
             prompt_msg,
             dialog_msg: None,
             queued: None,
+            inbox: Vec::new(),
         });
         self.save().await;
         if let Some(name) = &n.mate {
@@ -426,6 +427,7 @@ impl App {
             prompt_msg: None,
             dialog_msg: None,
             queued: None,
+            inbox: Vec::new(),
         });
         self.save().await;
         if let Some(name) = &at.mate {
@@ -626,7 +628,7 @@ impl App {
         Some((t.pane.clone(), t.thread))
     }
 
-    // News from a crewmate: prompted to its mate now, or queued behind the mate's turn.
+    // News from a crewmate: prompted to its mate now, or kept in its inbox until the mate's turn ends.
     pub(crate) async fn tell_mate(&self, name: &str, text: &str) -> Result<()> {
         let Some(cell) = self.mate_cell(name).await else {
             return Ok(());
@@ -635,18 +637,10 @@ impl App {
         log::append(&self.mates.join("state").join(name), log::Event::Crew, head)?;
         let mut t = cell.lock().await;
         let m = self.machine(&t.machine)?;
+        // the phase stays as it is, so the mate's answer to this is not posted
         match herdr::prompt(m, &t.pane, text).await {
-            Ok(()) => {
-                if t.phase == Phase::Idle {
-                    t.phase = Phase::Waiting;
-                }
-            }
-            Err(e) if e.is_busy() || e.is(&herdr::Code::AgentBlocked) => {
-                t.queued = Some(match t.queued.take() {
-                    Some(q) => format!("{q}\n\n{text}"),
-                    None => text.into(),
-                });
-            }
+            Ok(()) => {}
+            Err(e) if e.is_busy() || e.is(&herdr::Code::AgentBlocked) => t.inbox.push(text.into()),
             Err(e) => return Err(e.into()),
         }
         Ok(())
@@ -720,6 +714,7 @@ impl App {
             prompt_msg,
             dialog_msg: None,
             queued: None,
+            inbox: Vec::new(),
         });
         self.save().await;
         herdr::start(
@@ -800,6 +795,7 @@ impl App {
             prompt_msg,
             dialog_msg: None,
             queued: None,
+            inbox: Vec::new(),
         });
         self.save().await;
         log::append(
