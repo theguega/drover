@@ -304,13 +304,10 @@ impl App {
             repo: repo.into(),
             branch: wt.branch.clone(),
             origin: Origin::Opened,
-            owner: if n.mate.is_some() {
-                Owner::Mate
-            } else {
-                Owner::User
-            },
-            mate: n.mate.clone(),
-            scout: None,
+            role: n.mate.clone().map_or(Role::Task, |mate| Role::Crew {
+                mate,
+                owner: Owner::Mate,
+            }),
             phase: Phase::Starting { prompt },
             status: None,
             session: None,
@@ -354,7 +351,17 @@ impl App {
         if let Some((_, cell)) = self.live_cell(&m.name, &pane).await {
             let mut t = cell.lock().await;
             if let Some(name) = &at.mate {
-                t.mate = Some(name.clone());
+                t.role = match &t.role {
+                    Role::Task => Role::Crew {
+                        mate: name.clone(),
+                        owner: Owner::User,
+                    },
+                    Role::Crew { owner, .. } => Role::Crew {
+                        mate: name.clone(),
+                        owner: *owner,
+                    },
+                    Role::Mate(_) | Role::Scout(_) => bail!("a mate or a scout can't be linked"),
+                };
             }
             if let Some(th) = t.thread {
                 if at.mate.is_none() {
@@ -420,9 +427,10 @@ impl App {
             repo,
             branch: String::new(),
             origin: Origin::Attached,
-            owner: Owner::User,
-            mate: at.mate.clone(),
-            scout: None,
+            role: at.mate.clone().map_or(Role::Task, |mate| Role::Crew {
+                mate,
+                owner: Owner::User,
+            }),
             phase: Phase::Idle,
             status: Some(a.agent_status),
             session,
@@ -494,7 +502,9 @@ impl App {
                 let mut names = vec![];
                 for (_, cell) in self.cells() {
                     let t = cell.lock().await;
-                    if let (Some(name), false) = (&t.mate, t.phase == Phase::Gone) {
+                    if let Role::Mate(name) = &t.role
+                        && t.phase != Phase::Gone
+                    {
                         names.push(name.clone());
                     }
                 }
@@ -616,7 +626,7 @@ impl App {
     async fn mate_cell(&self, name: &str) -> Option<Cell> {
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
-            if t.mate.as_deref() == Some(name) && t.repo == "mates" && t.phase != Phase::Gone {
+            if matches!(&t.role, Role::Mate(n) if n == name) && t.phase != Phase::Gone {
                 drop(t);
                 return Some(cell);
             }
@@ -705,9 +715,7 @@ impl App {
             repo: "scouts".into(),
             branch: String::new(),
             origin: Origin::Attached,
-            owner: Owner::User,
-            mate: None,
-            scout: Some(id.clone()),
+            role: Role::Scout(id.clone()),
             phase: Phase::Starting {
                 prompt: format!("{SCOUT}\n\n{}", s.prompt),
             },
@@ -738,7 +746,7 @@ impl App {
     async fn cmd_scout_close(&self, http: &Http, target: &str) -> Result<String> {
         let (key, cell) = self.find_task(target).await?;
         let t = cell.lock().await.clone();
-        let Some(scout) = t.scout.clone() else {
+        let Role::Scout(scout) = t.role.clone() else {
             bail!("this task is not a scout");
         };
         self.remove(&key);
@@ -756,10 +764,10 @@ impl App {
             if t.phase == Phase::Gone {
                 continue;
             }
-            match t.mate.as_deref() {
-                Some(n) if n == name => bail!("mate {name} is already running"),
-                Some(_) => live += 1,
-                None => {}
+            match &t.role {
+                Role::Mate(n) if *n == name => bail!("mate {name} is already running"),
+                Role::Mate(_) => live += 1,
+                _ => {}
             }
         }
         if live >= MAX_MATES {
@@ -786,9 +794,7 @@ impl App {
             repo: "mates".into(),
             branch: String::new(),
             origin: Origin::Attached,
-            owner: Owner::Mate,
-            mate: Some(name.clone()),
-            scout: None,
+            role: Role::Mate(name.clone()),
             phase: Phase::Starting {
                 prompt: mate_role(&name),
             },
@@ -847,7 +853,9 @@ impl App {
         let mut near = None;
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
-            let Some(name) = &t.mate else { continue };
+            let Role::Crew { mate: name, .. } = &t.role else {
+                continue;
+            };
             if t.repo != repo {
                 continue;
             }
@@ -884,8 +892,11 @@ impl App {
         let mut lines = Vec::new();
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
-            if t.mate.as_deref() == Some(name) && skip != Some(&t.pane) {
-                lines.push(format!("{} {}", t.pane.0, t.owner.as_str()));
+            if let Role::Crew { mate, owner } = &t.role
+                && mate == name
+                && skip != Some(&t.pane)
+            {
+                lines.push(format!("{} {}", t.pane.0, owner.as_str()));
             }
         }
         let dir = self.mates.join("state").join(name);
@@ -896,24 +907,23 @@ impl App {
 
     async fn set_owner(&self, target: &str, owner: Owner) -> Result<String> {
         let (_, cell) = self.find_task(target).await?;
-        let (text, mate) = {
+        let (pane, name) = {
             let mut t = cell.lock().await;
-            t.owner = owner;
-            (
-                format!("{} is {}", t.pane.0, owner.as_str()),
-                t.mate.clone(),
-            )
+            let pane = t.pane.0.clone();
+            let Role::Crew { mate, owner: o } = &mut t.role else {
+                bail!("{pane} is not linked to a mate");
+            };
+            *o = owner;
+            (pane, mate.clone())
         };
-        if let Some(name) = mate {
-            log::append(
-                &self.mates.join("state").join(&name),
-                log::Event::Owner,
-                owner.as_str(),
-            )?;
-            self.write_owners(&name, None).await?;
-        }
+        log::append(
+            &self.mates.join("state").join(&name),
+            log::Event::Owner,
+            owner.as_str(),
+        )?;
+        self.write_owners(&name, None).await?;
         self.save().await;
-        Ok(text)
+        Ok(format!("{pane} is {}", owner.as_str()))
     }
 
     async fn cmd_worktrees(&self) -> Result<String> {
@@ -947,7 +957,7 @@ impl App {
         };
         let th = {
             let mut t = cell.lock().await;
-            if t.scout.is_some() {
+            if matches!(t.role, Role::Scout(_)) {
                 bail!("a scout ends with scout-close");
             }
             if teardown == Teardown::Remove && t.origin == Origin::Attached {

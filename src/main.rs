@@ -142,6 +142,39 @@ impl Owner {
     }
 }
 
+// What a pane is to drover. Only a crewmate has an owner: the desk takes it from its mate or gives it back.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Role {
+    Task,                                // a task of the desk's own
+    Crew { mate: String, owner: Owner }, // linked to a mate, in its own worktree
+    Mate(String),                        // a mate's pane, in the drover workspace
+    Scout(String),                       // the scout's folder name, while the scout lives
+}
+
+impl Role {
+    // The mate whose log and owner list this pane belongs in.
+    #[must_use]
+    fn mate(&self) -> Option<&str> {
+        match self {
+            Self::Crew { mate, .. } | Self::Mate(mate) => Some(mate),
+            Self::Task | Self::Scout(_) => None,
+        }
+    }
+
+    // A crewmate its mate drives.
+    #[must_use]
+    fn crew_of_mate(&self) -> Option<&str> {
+        match self {
+            Self::Crew {
+                mate,
+                owner: Owner::Mate,
+            } => Some(mate),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", from = "Stored")]
 struct Task {
@@ -154,11 +187,7 @@ struct Task {
     repo: String,
     branch: String,
     origin: Origin,
-    owner: Owner,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mate: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    scout: Option<String>, // the scout's folder name, while the scout lives
+    role: Role,
     phase: Phase,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<Status>, // none until the poller has seen the agent
@@ -188,6 +217,7 @@ struct Stored {
     repo: String,
     branch: String,
     origin: Option<Origin>,
+    role: Option<Role>,
     owner: Option<Owner>,
     mate: Option<String>,
     scout: Option<String>,
@@ -234,6 +264,16 @@ impl From<Stored> for Task {
         } else {
             Origin::Attached
         });
+        // before roles, the mate's own pane was the one in the mates folder
+        let role = s.role.unwrap_or_else(|| match (s.scout, s.mate) {
+            (Some(id), _) => Role::Scout(id),
+            (None, Some(mate)) if s.repo == "mates" => Role::Mate(mate),
+            (None, Some(mate)) => Role::Crew {
+                mate,
+                owner: s.owner.unwrap_or(Owner::User),
+            },
+            (None, None) => Role::Task,
+        });
         Self {
             thread: s.thread,
             session: s.session.as_deref().and_then(SessionId::parse),
@@ -244,9 +284,7 @@ impl From<Stored> for Task {
             repo: s.repo,
             branch: s.branch,
             origin,
-            owner: s.owner.unwrap_or(Owner::User),
-            mate: s.mate,
-            scout: s.scout,
+            role,
             phase,
             status: s.status,
             last_reply: s.last_reply,
@@ -407,7 +445,7 @@ impl App {
                 let t = cell.lock().await;
                 let matches = (thread.is_some() && t.thread == thread)
                     || t.pane.0 == raw
-                    || t.scout.as_deref() == Some(raw);
+                    || matches!(&t.role, Role::Scout(s) if s == raw);
                 (matches, t.phase != Phase::Gone)
             };
             if matches {
@@ -924,7 +962,7 @@ impl App {
             Ok(said) => said,
             Err(kept) => {
                 // mates and scouts share the drover workspace, so only their pane goes
-                let closed = if t.mate.is_some() || t.scout.is_some() {
+                let closed = if matches!(t.role, Role::Mate(_) | Role::Scout(_)) {
                     herdr::close_pane(m, &t.pane).await
                 } else {
                     herdr::close(m, &t.workspace).await
@@ -940,7 +978,7 @@ impl App {
         {
             let _ = th.say(http, note.trim()).await;
         }
-        if let Some(name) = &t.mate {
+        if let Some(name) = t.role.mate() {
             // a mate's log records the close, and its owner list drops the pane
             let closed = log::append(
                 &self.mates.join("state").join(name),
@@ -1286,10 +1324,7 @@ impl App {
             };
         }
         // a crewmate's mate hears of its replies, dialogs and exit, since it has no thread to read
-        let crew = t
-            .mate
-            .clone()
-            .filter(|_| t.owner == Owner::Mate && t.repo != "mates");
+        let crew = t.role.crew_of_mate().map(String::from);
         let tell = |text: String| {
             crew.clone()
                 .map_or(Step::Keep, |mate| Step::Tell { mate, text })
@@ -1359,7 +1394,7 @@ impl App {
 
         let was_working = prev == Some(Status::Working);
         // a mate's turn that crew news started stays out of its thread; the mate escalates what matters
-        let quiet = t.repo == "mates" && !t.phase.waiting();
+        let quiet = matches!(t.role, Role::Mate(_)) && !t.phase.waiting();
         let th = th.filter(|_| !quiet);
         let mut said = None;
         if !(t.phase.waiting() || was_working) {
@@ -1696,7 +1731,7 @@ mod tests {
         assert_eq!(t.thread, Some(ChannelId::new(123)));
         assert!(t.phase == Phase::Ending(Teardown::Remove));
         assert!(t.origin == Origin::Opened && t.session.is_none());
-        assert!(t.owner == Owner::User);
+        assert!(t.role == Role::Task);
         assert_eq!(t.prompt_msg, Some(MessageId::new(456)));
 
         let mut term = t.clone();
@@ -1711,6 +1746,37 @@ mod tests {
                     && t.phase == Phase::Ending(Teardown::Remove))
         );
         assert!(back.get("host:p2").is_some_and(|t| t.thread.is_none()));
+        Ok(())
+    }
+
+    #[test]
+    fn reads_mates_from_before_roles() -> Result<()> {
+        let task = |pane: &str, repo: &str, extra: &str| {
+            format!(
+                r#""host:{pane}": {{"machine":"host","pane":"{pane}","workspace":"w","kind":"claude","repo":"{repo}","branch":"","origin":"attached","phase":"idle"{extra}}}"#
+            )
+        };
+        let old = format!(
+            "{{{}, {}, {}, {}}}",
+            task("p1", "mates", r#","owner":"mate","mate":"a""#),
+            task("p2", "drover", r#","owner":"mate","mate":"a""#),
+            task("p3", "scouts", r#","owner":"user","scout":"scout-abc123""#),
+            task("p4", "drover", r#","owner":"user""#),
+        );
+        let tasks = parse_state(&old)?;
+        let role = |k: &str| tasks.get(k).map(|t| t.role.clone());
+        assert!(role("host:p1") == Some(Role::Mate("a".into())));
+        assert!(
+            role("host:p2")
+                == Some(Role::Crew {
+                    mate: "a".into(),
+                    owner: Owner::Mate
+                })
+        );
+        assert!(role("host:p3") == Some(Role::Scout("scout-abc123".into())));
+        assert!(role("host:p4") == Some(Role::Task));
+        let back = parse_state(&serde_json::to_string(&tasks)?)?;
+        assert!(back.get("host:p2").map(|t| &t.role) == tasks.get("host:p2").map(|t| &t.role));
         Ok(())
     }
 
