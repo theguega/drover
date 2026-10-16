@@ -1557,14 +1557,15 @@ async fn watch_machine(app: Arc<App>, http: Arc<Http>, m: Machine) {
 
 async fn watch_session(app: &App, http: &Http, m: &Machine) -> Result<()> {
     let watched = loop {
+        // enabled before the check, so a pane added after it still wakes us
+        let woke = app.wake.notified();
+        tokio::pin!(woke);
+        woke.as_mut().enable();
         let panes = app.panes_on(&m.name).await;
         if !panes.is_empty() {
             break panes;
         }
-        tokio::select! {
-            () = app.wake.notified() => {}
-            () = sleep(Duration::from_secs(5)) => {}
-        }
+        woke.await;
     };
 
     // herdr rejects a subscription naming a pane that is gone; reconcile marks those
@@ -1581,16 +1582,18 @@ async fn watch_session(app: &App, http: &Http, m: &Machine) -> Result<()> {
     app.reconcile(http, &m.name).await;
 
     loop {
+        let woke = app.wake.notified();
+        tokio::pin!(woke);
+        woke.as_mut().enable();
+        if app.panes_on(&m.name).await != watched {
+            return Ok(()); // resubscribe with the new pane set
+        }
         tokio::select! {
             ev = conn.recv() => match ev? {
                 socket::Push::Lost => bail!("events_lost on {}", m.name),
                 push => app.on_push(http, &m.name, push).await,
             },
-            () = app.wake.notified() => {}
-        }
-        // checked after every push too: a wake while busy above is not stored
-        if app.panes_on(&m.name).await != watched {
-            return Ok(()); // resubscribe with the new pane set
+            () = &mut woke => {}
         }
     }
 }
