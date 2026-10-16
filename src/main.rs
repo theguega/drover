@@ -808,7 +808,7 @@ impl App {
             )
             .await?;
 
-        let memory = self.journal.context(repo, text, 2000)?;
+        let memory = self.journal.context(repo, text, 2000).await?;
         let mut prompt = if scout {
             format!("{SCOUT}\n\n{text}")
         } else {
@@ -1020,13 +1020,15 @@ impl App {
         teardown: Teardown,
         entry: &str,
     ) -> Result<()> {
-        self.journal.add(&journal::Entry {
-            day: today(),
-            machine: t.machine.clone(),
-            repo: t.repo.clone(),
-            branch: t.branch.clone(),
-            text: entry.into(),
-        })?;
+        self.journal
+            .add(journal::Entry {
+                day: today(),
+                machine: t.machine.clone(),
+                repo: t.repo.clone(),
+                branch: t.branch.clone(),
+                text: entry.into(),
+            })
+            .await?;
         th.say(http, format!("```\n{}\n```", entry.replace("```", "")))
             .await?;
         self.teardown(http, th, t, teardown).await
@@ -1084,7 +1086,7 @@ impl App {
                 Ok(())
             }
             "recall" => {
-                let hits = self.journal.search(req(i, "query")?, 5)?;
+                let hits = self.journal.search(req(i, "query")?, 5).await?;
                 let text = match hits.is_empty() {
                     true => "nothing".into(),
                     false => tail(
