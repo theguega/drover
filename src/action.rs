@@ -83,7 +83,11 @@ pub struct Recall {
 const MAX_MATES: usize = 3;
 
 // What a mate is told before its first message: its instructions live in mates/AGENTS.md.
-const MATE_ROLE: &str = "You are a mate. Your instructions are in AGENTS.md in this folder. Wait for the desk's first message in this thread.";
+fn mate_role(name: &str) -> String {
+    format!(
+        "You are mate {name}. Your instructions are in AGENTS.md in this folder. Wait for the desk's first message in this thread."
+    )
+}
 
 // Agent names take 32 characters, and "mate-" takes five of them.
 fn mate_name(s: &str) -> Result<String> {
@@ -406,7 +410,7 @@ impl App {
                 owner: Owner::Mate,
                 mate: Some(name.clone()),
                 phase: Phase::Starting {
-                    prompt: MATE_ROLE.into(),
+                    prompt: mate_role(&name),
                 },
                 status: None,
                 session: None,
