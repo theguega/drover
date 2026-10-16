@@ -20,6 +20,7 @@ pub enum Action {
     Screen(Target),
     Mate(Mate),
     Take(Target),
+    Send(Send),
     Release(Target),
     Keys(Keys),
     Done(Done),
@@ -52,6 +53,12 @@ pub struct Attach {
 #[derive(Serialize, Deserialize)]
 pub struct Target {
     pub thread: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Send {
+    pub thread: String,
+    pub text: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -103,6 +110,7 @@ impl App {
             Action::Usage => self.cmd_usage().await,
             Action::Config => Ok(self.config()),
             Action::Mate(m) => self.cmd_mate(http, &m.name).await,
+            Action::Send(s) => self.cmd_send(&s).await,
             Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
             Action::Release(t) => self.set_owner(&t.thread, Owner::Mate).await,
             Action::Screen(t) => {
@@ -329,6 +337,36 @@ impl App {
             ),
         ]
         .join("\n")
+    }
+
+    // A prompt from the terminal: the same path as a Discord message in the thread.
+    async fn cmd_send(&self, s: &Send) -> Result<String> {
+        let cell = self.task_in(id(&s.thread)?)?;
+        let outcome = {
+            let mut t = cell.lock().await;
+            if t.phase == Phase::Gone {
+                bail!("that agent has exited");
+            }
+            let m = self.machine(&t.machine)?;
+            match herdr::prompt(m, &t.pane, &s.text).await {
+                Ok(()) => {
+                    if t.phase == Phase::Idle {
+                        t.phase = Phase::Waiting;
+                    }
+                    "sent"
+                }
+                Err(e) if e.is_busy() => {
+                    if t.queued.is_some() {
+                        bail!("one prompt is already queued for this agent");
+                    }
+                    t.queued = Some(s.text.clone());
+                    "queued, sent when the agent is idle"
+                }
+                Err(e) => return Err(e.into()),
+            }
+        };
+        self.save().await;
+        Ok(outcome.into())
     }
 
     async fn cmd_mate(&self, http: &Http, name: &str) -> Result<String> {
