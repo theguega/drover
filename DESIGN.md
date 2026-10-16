@@ -88,7 +88,7 @@ drover is also a terminal tool. `drover help` is the full reference, for humans 
 
 - The service holds the state, so the CLI does not write state files. `drover <cmd>` sends one JSON line to the service over a unix socket in the state directory and prints the reply.
 - Discord and the socket call one action layer: a `Command` enum and one `run` function that returns text. Discord handlers only translate interactions into commands and post the text.
-- A task started from the CLI still gets a Discord thread, so the phone sees it too.
+- A task started from the CLI stays in the terminal by default; `--discord` (or `drover attach --pane <id> --discord` later) opens a Discord thread so the phone sees it too.
 - Argument parsing is hand-written. No new dependency.
 - `drover serve` runs the service. Any other first word is a CLI command, so `drover new …` and `drover mate …` need no flags.
 - The `drover` skill documents every command for agents, and lives in the single skills folder described under Layers.

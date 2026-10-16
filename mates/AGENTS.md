@@ -28,12 +28,12 @@ Read `state/<name>/owners`. It lists each pane with `user` or `mate`. Send input
 ### Dispatch
 
 1. Confirm the repo, the branch, and the task with the desk.
-2. `drover new --machine <host> --repo <repo> --branch <branch> --prompt "<task>" --mate <your name>`. The crewmate's pane is then yours.
-3. Keep the thread id it prints. You will need it for review and close.
+2. `drover new --machine <host> --repo <repo> --branch <branch> --prompt "<task>" --mate <your name>`. The crewmate's pane is then yours. Pass `--discord` only if the desk asked for a Discord thread.
+3. Keep the pane id it prints. You will need it for review and close.
 
 ### Review
 
-1. `drover screen --thread <id>` when the crewmate reports done, or when it is quiet too long. Send a correction with `drover send --thread <id> --text "..."`.
+1. `drover screen --pane <id>` when the crewmate reports done, or when it is quiet too long. Send a correction with `drover send --pane <id> --text "..."`.
 2. Read the diff in its worktree. Check the tests it ran.
 3. Send one message with the changes you want, or report it done.
 
@@ -45,11 +45,11 @@ Read `state/<name>/owners`. It lists each pane with `user` or `mate`. Send input
 ### Handoff
 
 1. Write a brief: the task, the state, the open questions, the next step.
-2. Send the brief to the desk's thread and mark the owner as `user` with `drover take --thread <id>`.
+2. Send the brief to the desk and mark the owner as `user` with `drover take --pane <id>`.
 3. Stop sending to that pane.
 
 ### Close
 
 1. Only after the desk confirms the work is done.
-2. `drover done --thread <id>` for each crewmate. Use `--remove` only for a checkout drover opened and the desk asked to remove.
+2. `drover done --pane <id>` for each crewmate. Use `--remove` only for a checkout drover opened and the desk asked to remove.
 3. Report the outcome in one short message.

@@ -15,7 +15,7 @@ pub enum Invocation {
 }
 
 // Flags that take no value.
-const SWITCHES: [&str; 3] = ["scout", "remove", "no-journal"];
+const SWITCHES: [&str; 4] = ["scout", "remove", "no-journal", "discord"];
 
 pub const HELP: &str = "\
 drover: the same herdr desk from the terminal, Discord, or an agent.
@@ -23,37 +23,38 @@ drover: the same herdr desk from the terminal, Discord, or an agent.
 Usage: drover <command> [--flag value ...]
 
 Commands (Discord command in brackets):
-  new        --machine M --repo R --branch B --prompt P [--agent NAME] [--model X] [--scout] [--mate NAME]
-             [/new] worktree and agent in a new Discord thread. --branch is a new name,
-             an existing branch, or #pr. --scout asks for a report and no changes.
-  attach     --machine M --pane P
-             [/attach] follow an agent already running in herdr. P is from `agents`.
+  new        --machine M --repo R --branch B --prompt P [--agent NAME] [--model X] [--scout] [--mate NAME] [--discord]
+             [/new] worktree and agent in herdr (terminal-only unless --discord).
+             --branch is a new name, an existing branch, or #pr. --scout asks for a report and no changes.
+  attach     [--machine M] --pane P [--discord]
+             [/attach] follow an agent running in herdr, or pass --discord to open a Discord thread
+             for a running task so you can continue on Discord. P is from `agents`.
   link       --machine M --pane P --mate NAME
              attach a running agent to a mate: the mate sees it and the desk keeps the pane
   escalate   --mate NAME --text \"...\"
-             post a question for the desk in the mate's thread, and keep it in its log
+             log a question for the desk (and post in the mate's thread if on Discord)
   brief      --mate NAME --text \"...\"
              add a note to a mate's log for it to read
-  agents     [/agents] agents on every machine, with the thread each one is bound to
+  agents     [/agents] agents on every machine, with the Discord thread if bound
   worktrees  [/worktrees] worktrees on every machine
   usage      [/usage] usage of each agent on every machine
-  screen     --thread T
-             [/screen] the terminal of a task's agent
-  keys       --thread T --keys \"esc shift+tab enter\"
+  screen     --pane P
+             [/screen] the terminal of a task's agent (--thread T also works)
+  keys       --pane P --keys \"esc shift+tab enter\"
              [/keys] send keys to a task's agent
-  scout      PROMPT...
+  scout      PROMPT... [--discord]
              [/scout] a short look with no repo, in its own pane and folder
-  scout      close --thread T
+  scout      close --pane P
              [/scout-close] end the scout and delete its folder
-  mate       NAME
+  mate       NAME [--discord]
              [/mate] start a mate: a dispatcher pane in the drover workspace, at most three
-  send       --thread T --text \"...\"
+  send       --pane P --text \"...\"
              send a prompt to a task's agent; queued if the agent is busy
-  take       --thread T
+  take       --pane P
              [/take] give the pane back to you
-  release    --thread T
+  release    --pane P
              [/release] let the mate drive the pane
-  done       --thread T [--remove] [--no-journal]
+  done       --pane P [--remove] [--no-journal]
              [/done] ask for a journal entry, then close the workspace.
              --remove also deletes the checkout, only if drover opened it and it is clean and merged.
              --no-journal closes without an entry.
@@ -62,7 +63,9 @@ Commands (Discord command in brackets):
   config     show this service's host, remotes, channel and paths
   help       this text
 
-A task is its Discord thread. Thread ids come from `agents` (<#id>).
+Terminal commands stay in the terminal by default and print the pane id.
+Pass --discord (or run `drover attach --pane P --discord` later) when you want a Discord thread.
+Commands started from Discord (/new, /attach, /scout, /mate) always open a Discord thread.
 Inside a task thread, a plain Discord message is the next prompt; it is queued while the agent works.
 Reactions on the prompt: 👀 working, ⏸️ the agent asks a dialog, ✅ done.
 
@@ -134,16 +137,19 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
             model: flags.opt("model"),
             scout: flags.on("scout"),
             mate: flags.opt("mate"),
+            discord: flags.on("discord"),
         }),
         "attach" => Action::Attach(Attach {
-            machine: flags.req("machine")?,
+            machine: flags.opt("machine"),
             pane: flags.req("pane")?,
             mate: None,
+            discord: flags.on("discord"),
         }),
         "link" => Action::Attach(Attach {
-            machine: flags.req("machine")?,
+            machine: Some(flags.req("machine")?),
             pane: flags.req("pane")?,
             mate: Some(flags.req("mate")?),
+            discord: flags.on("discord"),
         }),
         "escalate" => Action::Escalate(Note {
             mate: flags.req("mate")?,
@@ -171,10 +177,10 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
             _ => bail!("drover complete threads|machines|mates|panes [MACHINE]"),
         }),
         "screen" => Action::Screen(Target {
-            thread: flags.req("thread")?,
+            thread: flags.target()?,
         }),
         "keys" => Action::Keys(Keys {
-            thread: flags.req("thread")?,
+            thread: flags.target()?,
             keys: flags
                 .req("keys")?
                 .split_whitespace()
@@ -182,31 +188,33 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
                 .collect(),
         }),
         "send" => Action::Send(Send {
-            thread: flags.req("thread")?,
+            thread: flags.target()?,
             text: flags.req("text")?,
         }),
         "scout" => match flags.words.split_first() {
             Some((first, _)) if first == "close" => Action::ScoutClose(Target {
-                thread: flags.req("thread")?,
+                thread: flags.target()?,
             }),
             _ if flags.words.is_empty() => {
-                bail!("drover scout PROMPT, or drover scout close --thread T")
+                bail!("drover scout PROMPT, or drover scout close --pane P")
             }
             _ => Action::Scout(Scout {
                 prompt: flags.words.join(" "),
+                discord: flags.on("discord"),
             }),
         },
         "mate" => Action::Mate(Mate {
             name: flags.words.first().cloned().context("drover mate NAME")?,
+            discord: flags.on("discord"),
         }),
         "take" => Action::Take(Target {
-            thread: flags.req("thread")?,
+            thread: flags.target()?,
         }),
         "release" => Action::Release(Target {
-            thread: flags.req("thread")?,
+            thread: flags.target()?,
         }),
         "done" => Action::Done(Done {
-            thread: flags.req("thread")?,
+            thread: flags.target()?,
             remove: flags.on("remove"),
             journal: !flags.on("no-journal"),
         }),
@@ -258,6 +266,12 @@ impl Flags {
         self.opt(name).context(format!("--{name} is required"))
     }
 
+    fn target(&self) -> Result<String> {
+        self.opt("pane")
+            .or_else(|| self.opt("thread"))
+            .context("--pane or --thread is required")
+    }
+
     fn opt(&self, name: &str) -> Option<String> {
         self.values.get(name).cloned()
     }
@@ -283,25 +297,39 @@ mod tests {
         else {
             bail!("not a new");
         };
-        assert!(n.scout && n.agent.is_none() && n.branch == "feature/x");
+        assert!(n.scout && !n.discord && n.agent.is_none() && n.branch == "feature/x");
+        Ok(())
+    }
+
+    #[test]
+    fn discord_is_opt_in_from_terminal() -> Result<()> {
+        let Invocation::Run(Action::Attach(a)) = parse(&args("attach --pane wAX:p1 --discord"))?
+        else {
+            bail!("not an attach");
+        };
+        assert!(a.discord && a.machine.is_none() && a.pane == "wAX:p1");
         Ok(())
     }
 
     #[test]
     fn done_defaults_to_journal_and_no_remove() -> Result<()> {
-        let Invocation::Run(Action::Done(d)) = parse(&args("done --thread 42"))? else {
+        let Invocation::Run(Action::Done(d)) = parse(&args("done --pane wAX:p1"))? else {
             bail!("not a done");
         };
-        assert!(d.journal && !d.remove && d.thread == "42");
+        assert!(d.journal && !d.remove && d.thread == "wAX:p1");
         Ok(())
     }
 
     #[test]
-    fn take_and_release_name_a_thread() -> Result<()> {
+    fn take_and_release_name_a_pane_or_thread() -> Result<()> {
         let Invocation::Run(Action::Release(t)) = parse(&args("release --thread 42"))? else {
             bail!("not a release");
         };
         assert_eq!(t.thread, "42");
+        let Invocation::Run(Action::Take(t)) = parse(&args("take --pane wAX:p1"))? else {
+            bail!("not a take");
+        };
+        assert_eq!(t.thread, "wAX:p1");
         assert!(parse(&args("take")).is_err());
         Ok(())
     }
@@ -361,7 +389,7 @@ mod tests {
         assert!(new.starts_with("  new ") && new.contains("[/new]"));
         assert!(!new.contains("attach"));
         let scout = command_help("scout").unwrap_or_default();
-        assert!(scout.contains("close --thread T") && !scout.contains("A task is"));
+        assert!(scout.contains("close --pane P") && !scout.contains("A task is"));
         assert!(command_help("frobnicate").is_none());
     }
 
