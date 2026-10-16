@@ -46,6 +46,8 @@ pub struct New {
     pub scout: bool,
     // the mate that dispatches this crewmate, which then owns its pane
     pub mate: Option<String>,
+    #[serde(default)]
+    pub discord: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -57,22 +59,28 @@ pub struct Note {
 #[derive(Serialize, Deserialize)]
 pub struct Scout {
     pub prompt: String,
+    #[serde(default)]
+    pub discord: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Mate {
     pub name: String,
+    #[serde(default)]
+    pub discord: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Attach {
-    pub machine: String,
+    pub machine: Option<String>,
     pub pane: String,
     // set by link: the mate that the pane is linked to
     pub mate: Option<String>,
+    #[serde(default)]
+    pub discord: bool,
 }
 
-// A task is addressed by its Discord thread id, as `agents` prints it.
+// A task is addressed by its herdr pane id or Discord thread id, as `agents` prints them.
 #[derive(Serialize, Deserialize)]
 pub struct Target {
     pub thread: String,
@@ -132,7 +140,7 @@ const MAX_MATES: usize = 3;
 // What a mate is told before its first message: its instructions live in mates/AGENTS.md.
 fn mate_role(name: &str) -> String {
     format!(
-        "You are mate {name}. Your instructions are in AGENTS.md in this folder. Wait for the desk's first message in this thread."
+        "You are mate {name}. Your instructions are in AGENTS.md in this folder. Wait for the desk's first message."
     )
 }
 
@@ -160,8 +168,8 @@ impl App {
             Action::Worktrees => self.cmd_worktrees().await,
             Action::Usage => self.cmd_usage().await,
             Action::Config => Ok(self.config()),
-            Action::Mate(m) => self.cmd_mate(http, &m.name).await,
-            Action::Scout(s) => self.cmd_scout(http, &s.prompt).await,
+            Action::Mate(m) => self.cmd_mate(http, &m).await,
+            Action::Scout(s) => self.cmd_scout(http, &s).await,
             Action::Brief(b) => self.cmd_brief(&b),
             Action::Escalate(n) => self.cmd_escalate(http, &n).await,
             Action::ScoutClose(t) => self.cmd_scout_close(http, &t.thread).await,
@@ -169,11 +177,11 @@ impl App {
             Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
             Action::Release(t) => self.set_owner(&t.thread, Owner::Mate).await,
             Action::Screen(t) => {
-                let (m, pane) = self.target(id(&t.thread)?).await?;
+                let (m, pane) = self.target(&t.thread).await?;
                 Ok(screen(m, &pane, "").await)
             }
             Action::Keys(k) => {
-                let (m, pane) = self.target(id(&k.thread)?).await?;
+                let (m, pane) = self.target(&k.thread).await?;
                 let keys: Vec<&str> = k.keys.iter().map(String::as_str).collect();
                 herdr::keys(m, &pane, &keys).await?;
                 sleep(Duration::from_millis(700)).await;
@@ -204,8 +212,12 @@ impl App {
         let model = n.model.as_deref().map(Name::parse).transpose()?;
 
         let wt = herdr::worktree(m, &repo, &r#ref).await?;
-        if let Some(bound) = self.live(&m.name, &wt.pane_id).await {
-            return Ok(format!("already open in <#{bound}>"));
+        if let Some((_, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
+            let where_at = match cell.lock().await.thread {
+                Some(th) => format!("<#{th}>"),
+                None => wt.pane_id.0,
+            };
+            return Ok(format!("already open in {where_at}"));
         }
         if herdr::agents(m)
             .await?
@@ -219,19 +231,25 @@ impl App {
         }
 
         let repo = repo.as_str();
-        let th = self
-            .open_thread(http, &format!("{repo} · {} · {}", wt.branch, m.name))
-            .await?;
-        let head = th
-            .say(
-                http,
-                format!(
-                    "`{}`\n> {}",
-                    wt.path,
-                    tail(&n.prompt, 1500).replace('\n', "\n> ")
-                ),
-            )
-            .await?;
+        let (thread, prompt_msg) = if n.discord {
+            let th = self
+                .open_thread(http, &format!("{repo} · {} · {}", wt.branch, m.name))
+                .await?;
+            let head = th
+                .say(
+                    http,
+                    format!(
+                        "`{}`\n> {}",
+                        wt.path,
+                        tail(&n.prompt, 1500).replace('\n', "\n> ")
+                    ),
+                )
+                .await?;
+            th.create_reaction(http, head.id, emoji("👀")).await?;
+            (Some(th), Some(head.id))
+        } else {
+            (None, None)
+        };
 
         let memory = self.journal.context(repo, &n.prompt, 2000).await?;
         let mut prompt = if n.scout {
@@ -244,32 +262,30 @@ impl App {
                 "{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"
             );
         }
-        self.insert(
-            th,
-            Task {
-                machine: m.name.clone(),
-                pane: wt.pane_id.clone(),
-                workspace: wt.workspace_id,
-                kind: kind.into(),
-                repo: repo.into(),
-                branch: wt.branch.clone(),
-                origin: Origin::Opened,
-                owner: if n.mate.is_some() {
-                    Owner::Mate
-                } else {
-                    Owner::User
-                },
-                mate: n.mate.clone(),
-                scout: None,
-                phase: Phase::Starting { prompt },
-                status: None,
-                session: None,
-                last_reply: None,
-                prompt_msg: Some(head.id),
-                dialog_msg: None,
-                queued: None,
+        self.insert(Task {
+            thread,
+            machine: m.name.clone(),
+            pane: wt.pane_id.clone(),
+            workspace: wt.workspace_id,
+            kind: kind.into(),
+            repo: repo.into(),
+            branch: wt.branch.clone(),
+            origin: Origin::Opened,
+            owner: if n.mate.is_some() {
+                Owner::Mate
+            } else {
+                Owner::User
             },
-        );
+            mate: n.mate.clone(),
+            scout: None,
+            phase: Phase::Starting { prompt },
+            status: None,
+            session: None,
+            last_reply: None,
+            prompt_msg,
+            dialog_msg: None,
+            queued: None,
+        });
         self.save().await;
         if let Some(name) = &n.mate {
             log::append(
@@ -279,7 +295,6 @@ impl App {
             )?;
             self.write_owners(name, None).await?;
         }
-        th.create_reaction(http, head.id, emoji("👀")).await?;
         // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
         herdr::start(
             m,
@@ -290,52 +305,98 @@ impl App {
             model.as_ref(),
         )
         .await?;
-        Ok(format!("<#{th}>"))
+        Ok(match thread {
+            Some(th) => format!("<#{th}>"),
+            None => wt.pane_id.0,
+        })
     }
 
     async fn cmd_attach(&self, http: &Http, at: &Attach) -> Result<String> {
-        let m = self.machine(&at.machine)?;
+        let m = match at.machine.as_deref() {
+            Some(name) => self.machine(name)?,
+            None => self.machine_of_pane(&at.pane).await.unwrap_or(&self.host),
+        };
         let pane = PaneId(at.pane.clone());
+        if let Some((_, cell)) = self.live_cell(&m.name, &pane).await {
+            let mut t = cell.lock().await;
+            if let Some(name) = &at.mate {
+                t.mate = Some(name.clone());
+            }
+            if let Some(th) = t.thread {
+                if at.mate.is_none() {
+                    return Ok(format!("already open in <#{th}>"));
+                }
+            } else if at.discord {
+                let middle = if t.branch.is_empty() {
+                    &t.kind
+                } else {
+                    &t.branch
+                };
+                let th = self
+                    .open_thread(http, &format!("{} · {middle} · {}", t.repo, m.name))
+                    .await?;
+                t.thread = Some(th);
+                th.send_message(http, screen_msg(m, &pane).await).await?;
+            } else if at.mate.is_none() {
+                return Ok(format!("already open in {}", pane.0));
+            }
+            let out = match t.thread {
+                Some(th) => format!("<#{th}>"),
+                None => pane.0.clone(),
+            };
+            drop(t);
+            self.save().await;
+            if let Some(name) = &at.mate {
+                log::append(
+                    &self.mates.join("state").join(name),
+                    log::Event::Linked,
+                    &pane.0,
+                )?;
+                self.write_owners(name, None).await?;
+            }
+            return Ok(out);
+        }
+
         let a = herdr::agents(m)
             .await?
             .into_iter()
             .find(|x| x.pane_id == pane)
             .context(format!("no agent in {} on {}", pane.0, m.name))?;
-        if let Some(bound) = self.live(&m.name, &pane).await {
-            return Ok(format!("already open in <#{bound}>"));
-        }
 
         let repo = a.cwd.rsplit('/').next().unwrap_or_default().to_string();
-        let th = self
-            .open_thread(http, &format!("{repo} · {} · {}", a.agent, m.name))
-            .await?;
+        let thread = if at.discord {
+            Some(
+                self.open_thread(http, &format!("{repo} · {} · {}", a.agent, m.name))
+                    .await?,
+            )
+        } else {
+            None
+        };
         let session = a.session();
         let last_reply = match &session {
             Some(s) => herdr::reply(m, s).await?.map(|r| r.id),
             None => None,
         };
-        self.insert(
-            th,
-            Task {
-                machine: m.name.clone(),
-                pane: pane.clone(),
-                workspace: a.workspace_id,
-                kind: a.agent,
-                repo,
-                branch: String::new(),
-                origin: Origin::Attached,
-                owner: Owner::User,
-                mate: at.mate.clone(),
-                scout: None,
-                phase: Phase::Idle,
-                status: Some(a.agent_status),
-                session,
-                last_reply,
-                prompt_msg: None,
-                dialog_msg: None,
-                queued: None,
-            },
-        );
+        self.insert(Task {
+            thread,
+            machine: m.name.clone(),
+            pane: pane.clone(),
+            workspace: a.workspace_id,
+            kind: a.agent,
+            repo,
+            branch: String::new(),
+            origin: Origin::Attached,
+            owner: Owner::User,
+            mate: at.mate.clone(),
+            scout: None,
+            phase: Phase::Idle,
+            status: Some(a.agent_status),
+            session,
+            last_reply,
+            prompt_msg: None,
+            dialog_msg: None,
+            queued: None,
+        });
         self.save().await;
         if let Some(name) = &at.mate {
             log::append(
@@ -345,8 +406,12 @@ impl App {
             )?;
             self.write_owners(name, None).await?;
         }
-        th.send_message(http, screen_msg(m, &pane).await).await?;
-        Ok(format!("<#{th}>"))
+        if let Some(th) = thread {
+            th.send_message(http, screen_msg(m, &pane).await).await?;
+            Ok(format!("<#{th}>"))
+        } else {
+            Ok(pane.0)
+        }
     }
 
     async fn cmd_agents(&self) -> Result<String> {
@@ -362,7 +427,7 @@ impl App {
             };
             for a in list {
                 let bound = self
-                    .live(&m.name, &a.pane_id)
+                    .thread_on(&m.name, &a.pane_id)
                     .await
                     .map(|b| format!(" <#{b}>"))
                     .unwrap_or_default();
@@ -418,7 +483,7 @@ impl App {
 
     // A prompt from the terminal: the same path as a Discord message in the thread.
     async fn cmd_send(&self, s: &Send) -> Result<String> {
-        let cell = self.task_in(id(&s.thread)?)?;
+        let (_, cell) = self.find_task(&s.thread).await?;
         let outcome = {
             let mut t = cell.lock().await;
             if t.phase == Phase::Gone {
@@ -446,23 +511,22 @@ impl App {
         Ok(outcome.into())
     }
 
-    // A scout: a short look with no repo, in its own folder and pane, with nothing to journal.
-    // The mate's thread: the one task the mate runs in its own pane.
-    pub(crate) async fn mate_thread(&self, name: &str) -> Option<ChannelId> {
-        for (id, cell) in self.cells() {
+    // The mate's own task (pane and optional Discord thread).
+    pub(crate) async fn mate_task(&self, name: &str) -> Option<(PaneId, Option<ChannelId>)> {
+        for (_, cell) in self.cells() {
             let t = cell.lock().await;
-            if t.mate.as_deref() == Some(name) && t.repo == "mates" {
-                return Some(id);
+            if t.mate.as_deref() == Some(name) && t.repo == "mates" && t.phase != Phase::Gone {
+                return Some((t.pane.clone(), t.thread));
             }
         }
         None
     }
 
-    // A question for the desk from a mate: posted in its thread and kept in its log.
+    // A question for the desk from a mate: posted in its thread (if any) and kept in its log.
     async fn cmd_escalate(&self, http: &Http, n: &Note) -> Result<String> {
         let name = mate_name(&n.mate)?;
-        let th = self
-            .mate_thread(&name)
+        let (pane, th) = self
+            .mate_task(&name)
             .await
             .context(format!("no running mate {name}"))?;
         log::append(
@@ -470,8 +534,12 @@ impl App {
             log::Event::Escalated,
             &n.text,
         )?;
-        th.say(http, &n.text).await?;
-        Ok(format!("escalated to <#{th}>"))
+        if let Some(th) = th {
+            th.say(http, &n.text).await?;
+            Ok(format!("escalated to <#{th}>"))
+        } else {
+            Ok(format!("escalated for mate {name} ({})", pane.0))
+        }
     }
 
     // A note for the mate, in its log, for it to read when it next looks.
@@ -485,40 +553,44 @@ impl App {
         Ok(format!("noted for mate {name}"))
     }
 
-    async fn cmd_scout(&self, http: &Http, prompt: &str) -> Result<String> {
+    // A scout: a short look with no repo, in its own folder and pane, with nothing to journal.
+    async fn cmd_scout(&self, http: &Http, s: &Scout) -> Result<String> {
         let id = scout_id();
         let dir = self.mates.join("state").join("scouts").join(&id);
         std::fs::create_dir_all(&dir)?;
         let cwd = dir.to_string_lossy().into_owned();
         let (workspace, pane) = herdr::tab_pane(&self.host, "scouts", &cwd).await?;
-        let th = self
-            .open_thread(http, &format!("scout · {id} · {}", self.host.name))
-            .await?;
-        let head = th.say(http, format!("scout in `{cwd}`")).await?;
-        self.insert(
-            th,
-            Task {
-                machine: self.host.name.clone(),
-                pane: pane.clone(),
-                workspace,
-                kind: harness::DEFAULT.into(),
-                repo: "scouts".into(),
-                branch: String::new(),
-                origin: Origin::Attached,
-                owner: Owner::User,
-                mate: None,
-                scout: Some(id.clone()),
-                phase: Phase::Starting {
-                    prompt: format!("{SCOUT}\n\n{prompt}"),
-                },
-                status: None,
-                session: None,
-                last_reply: None,
-                prompt_msg: Some(head.id),
-                dialog_msg: None,
-                queued: None,
+        let (thread, prompt_msg) = if s.discord {
+            let th = self
+                .open_thread(http, &format!("scout · {id} · {}", self.host.name))
+                .await?;
+            let head = th.say(http, format!("scout in `{cwd}`")).await?;
+            (Some(th), Some(head.id))
+        } else {
+            (None, None)
+        };
+        self.insert(Task {
+            thread,
+            machine: self.host.name.clone(),
+            pane: pane.clone(),
+            workspace,
+            kind: harness::DEFAULT.into(),
+            repo: "scouts".into(),
+            branch: String::new(),
+            origin: Origin::Attached,
+            owner: Owner::User,
+            mate: None,
+            scout: Some(id.clone()),
+            phase: Phase::Starting {
+                prompt: format!("{SCOUT}\n\n{}", s.prompt),
             },
-        );
+            status: None,
+            session: None,
+            last_reply: None,
+            prompt_msg,
+            dialog_msg: None,
+            queued: None,
+        });
         self.save().await;
         herdr::start(
             &self.host,
@@ -529,25 +601,27 @@ impl App {
             None,
         )
         .await?;
-        Ok(format!("<#{th}>"))
+        Ok(match thread {
+            Some(th) => format!("<#{th}>"),
+            None => pane.0,
+        })
     }
 
-    async fn cmd_scout_close(&self, http: &Http, thread: &str) -> Result<String> {
-        let th = id::<ChannelId>(thread)?;
-        let cell = self.task_in(th)?;
+    async fn cmd_scout_close(&self, http: &Http, target: &str) -> Result<String> {
+        let (key, cell) = self.find_task(target).await?;
         let t = cell.lock().await.clone();
         let Some(scout) = t.scout.clone() else {
-            bail!("this thread is not a scout");
+            bail!("this task is not a scout");
         };
-        self.remove(th);
+        self.remove(&key);
         self.save().await;
-        self.teardown(http, th, &t, Teardown::Close).await?;
+        self.teardown(http, &t, Teardown::Close).await?;
         remove_scout_dir(&self.mates.join("state").join("scouts"), &scout)?;
         Ok(format!("closed {scout}"))
     }
 
-    async fn cmd_mate(&self, http: &Http, name: &str) -> Result<String> {
-        let name = mate_name(name)?;
+    async fn cmd_mate(&self, http: &Http, m: &Mate) -> Result<String> {
+        let name = mate_name(&m.name)?;
         let mut live = 0;
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
@@ -566,34 +640,37 @@ impl App {
 
         let cwd = self.mates.to_string_lossy().into_owned();
         let (workspace, pane) = herdr::tab_pane(&self.host, "mates", &cwd).await?;
-        let th = self
-            .open_thread(http, &format!("mate · {name} · {}", self.host.name))
-            .await?;
-        let head = th.say(http, format!("mate `{name}` in `{cwd}`")).await?;
-        self.insert(
-            th,
-            Task {
-                machine: self.host.name.clone(),
-                pane: pane.clone(),
-                workspace,
-                kind: harness::DEFAULT.into(),
-                repo: "mates".into(),
-                branch: String::new(),
-                origin: Origin::Attached,
-                owner: Owner::Mate,
-                mate: Some(name.clone()),
-                scout: None,
-                phase: Phase::Starting {
-                    prompt: mate_role(&name),
-                },
-                status: None,
-                session: None,
-                last_reply: None,
-                prompt_msg: Some(head.id),
-                dialog_msg: None,
-                queued: None,
+        let (thread, prompt_msg) = if m.discord {
+            let th = self
+                .open_thread(http, &format!("mate · {name} · {}", self.host.name))
+                .await?;
+            let head = th.say(http, format!("mate `{name}` in `{cwd}`")).await?;
+            (Some(th), Some(head.id))
+        } else {
+            (None, None)
+        };
+        self.insert(Task {
+            thread,
+            machine: self.host.name.clone(),
+            pane: pane.clone(),
+            workspace,
+            kind: harness::DEFAULT.into(),
+            repo: "mates".into(),
+            branch: String::new(),
+            origin: Origin::Attached,
+            owner: Owner::Mate,
+            mate: Some(name.clone()),
+            scout: None,
+            phase: Phase::Starting {
+                prompt: mate_role(&name),
             },
-        );
+            status: None,
+            session: None,
+            last_reply: None,
+            prompt_msg,
+            dialog_msg: None,
+            queued: None,
+        });
         self.save().await;
         log::append(
             &self.mates.join("state").join(&name),
@@ -610,7 +687,10 @@ impl App {
             None,
         )
         .await?;
-        Ok(format!("<#{th}>"))
+        Ok(match thread {
+            Some(th) => format!("<#{th}>"),
+            None => pane.0,
+        })
     }
 
     // A new agent nobody started through drover: link it to a mate that works on the same repo and branch.
@@ -651,13 +731,14 @@ impl App {
 
         if let Some(name) = exact {
             let at = Attach {
-                machine: machine.into(),
+                machine: Some(machine.into()),
                 pane: pane.0.clone(),
                 mate: Some(name),
+                discord: false,
             };
             self.cmd_attach(http, &at).await?;
         } else if let Some(name) = near
-            && let Some(th) = self.mate_thread(&name).await
+            && let Some((_, Some(th))) = self.mate_task(&name).await
         {
             let text = format!(
                 "a new agent on {repo} {branch} at {} is not linked to you: `drover link --machine {machine} --pane {} --mate {name}` links it",
@@ -684,8 +765,8 @@ impl App {
         Ok(())
     }
 
-    async fn set_owner(&self, thread: &str, owner: Owner) -> Result<String> {
-        let cell = self.task_in(id(thread)?)?;
+    async fn set_owner(&self, target: &str, owner: Owner) -> Result<String> {
+        let (_, cell) = self.find_task(target).await?;
         let (text, mate) = {
             let mut t = cell.lock().await;
             t.owner = owner;
@@ -729,14 +810,13 @@ impl App {
     }
 
     async fn cmd_done(&self, http: &Http, d: &Done) -> Result<String> {
-        let th = id::<ChannelId>(&d.thread)?;
-        let cell = self.task_in(th)?;
+        let (key, cell) = self.find_task(&d.thread).await?;
         let teardown = if d.remove {
             Teardown::Remove
         } else {
             Teardown::Close
         };
-        {
+        let th = {
             let mut t = cell.lock().await;
             if t.scout.is_some() {
                 bail!("a scout ends with scout-close");
@@ -748,18 +828,23 @@ impl App {
                 herdr::prompt(self.machine(&t.machine)?, &t.pane, journal::ENTRY_PROMPT).await?;
                 t.phase = Phase::Ending(teardown);
             }
-        }
+            t.thread
+        };
         if !d.journal {
             let t = cell.lock().await.clone();
-            self.remove(th);
+            self.remove(&key);
             self.save().await;
-            self.teardown(http, th, &t, teardown).await?;
+            self.teardown(http, &t, teardown).await?;
             return Ok("closed without a journal entry".into());
         }
-        let msg = th.say(http, "writing the journal entry").await?;
-        cell.lock().await.prompt_msg = Some(msg.id);
-        self.save().await;
-        th.create_reaction(http, msg.id, emoji("👀")).await?;
+        if let Some(th) = th {
+            let msg = th.say(http, "writing the journal entry").await?;
+            cell.lock().await.prompt_msg = Some(msg.id);
+            self.save().await;
+            th.create_reaction(http, msg.id, emoji("👀")).await?;
+        } else {
+            self.save().await;
+        }
         Ok("asked the agent for the journal entry".into())
     }
 }

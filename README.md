@@ -6,7 +6,7 @@ drover calls no model itself. The agents are the CLIs you already use.
 
 ## What you get
 
-- **Tasks:** `drover new` opens a worktree, starts an agent in it, and opens a Discord thread for it. Messages in the thread are the next prompts.
+- **Tasks:** `drover new` opens a worktree and starts an agent in herdr. Pass `--discord` (or `drover attach --pane ID --discord` later) to open a Discord thread where messages become the next prompts.
 - **Terminal and Discord are the same thing.** Every Discord command has a terminal form, and both act on the same tasks.
 - **`drover-wt`:** worktrees for herdr, from a branch, a new name, or a GitHub pull request (`#123`).
 - **A journal:** `drover done` asks the agent for a five-line entry, and `drover recall` searches them later.
@@ -42,10 +42,11 @@ The installer asks for the token, the guild id, the channel id, the allowed user
 ```sh
 drover help                  # every command, with its Discord equivalent
 drover new --machine host --repo myrepo --branch feature-x --prompt "add retries to the client"
-drover agents                # agents on every machine, and the thread each one is bound to
-drover screen --thread ID    # an agent's terminal
-drover keys --thread ID --keys "esc enter"
-drover done --thread ID      # journal entry, then close the workspace
+drover agents                # agents on every machine, and the thread if bound to Discord
+drover screen --pane ID      # an agent's terminal
+drover keys --pane ID --keys "esc enter"
+drover attach --pane ID --discord  # open a Discord thread for a running task to continue there
+drover done --pane ID        # journal entry, then close the workspace
 drover recall retries        # search the journal
 ```
 
