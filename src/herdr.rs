@@ -322,12 +322,16 @@ fn failure(o: &Out) -> Error {
 pub async fn agents(m: &Machine) -> Result<Vec<Agent>> {
     #[derive(Deserialize)]
     struct List {
-        agents: Vec<Agent>,
+        agents: Vec<serde_json::Value>,
     }
+    // a pane herdr has not detected an agent in yet is listed without one; it is not an agent yet
     Ok(m.link
         .call::<List>("agent.list", json!({}), SHORT)
         .await?
-        .agents)
+        .agents
+        .into_iter()
+        .filter_map(|a| serde_json::from_value(a).ok())
+        .collect())
 }
 
 pub async fn panes(m: &Machine) -> Result<Vec<PaneId>> {
