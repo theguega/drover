@@ -384,6 +384,7 @@ impl App {
             log::Event::Started,
             &pane.0,
         )?;
+        self.write_owners(&name).await?;
         herdr::start(
             &self.host,
             &format!("mate-{name}"),
@@ -394,6 +395,21 @@ impl App {
         )
         .await?;
         Ok(format!("<#{th}>"))
+    }
+
+    // The panes linked to a mate and who may drive each one, for the mate to read before it sends input.
+    async fn write_owners(&self, name: &str) -> Result<()> {
+        let mut lines = Vec::new();
+        for (_, cell) in self.cells() {
+            let t = cell.lock().await;
+            if t.mate.as_deref() == Some(name) {
+                lines.push(format!("{} {}", t.pane.0, t.owner.as_str()));
+            }
+        }
+        let dir = self.mates.join("state").join(name);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("owners"), lines.join("\n") + "\n")?;
+        Ok(())
     }
 
     async fn set_owner(&self, thread: &str, owner: Owner) -> Result<String> {
@@ -408,10 +424,11 @@ impl App {
         };
         if let Some(name) = mate {
             log::append(
-                &self.mates.join("state").join(name),
+                &self.mates.join("state").join(&name),
                 log::Event::Owner,
                 owner.as_str(),
             )?;
+            self.write_owners(&name).await?;
         }
         self.save().await;
         Ok(text)
