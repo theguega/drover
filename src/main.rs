@@ -1560,8 +1560,9 @@ impl EventHandler for Handler {
     }
 
     async fn ready(&self, ctx: Context, ready: Ready) {
-        let app = self.0.clone();
-        if app.started.swap(true, Ordering::SeqCst) {
+        let app = Arc::clone(&self.0);
+        // only this flag is shared, so no ordering with other memory is needed
+        if app.started.swap(true, Ordering::Relaxed) {
             return; // a reconnect, the poller already runs
         }
         if let Err(e) = app.guild.set_commands(&ctx.http, app.commands()).await {
@@ -1573,16 +1574,16 @@ impl EventHandler for Handler {
             ready.user.tag(),
             names.join(", ")
         );
-        let http = ctx.http.clone();
+        let http = Arc::clone(&ctx.http);
         let machines: Vec<Machine> = app.machines().cloned().collect();
         for m in machines {
-            let app = app.clone();
-            let http = http.clone();
+            let app = Arc::clone(&app);
+            let http = Arc::clone(&http);
             tokio::spawn(async move {
                 watch_machine(app, http, m).await;
             });
         }
-        let (control_app, control_http) = (app.clone(), http.clone());
+        let (control_app, control_http) = (Arc::clone(&app), Arc::clone(&http));
         tokio::spawn(async move {
             if let Err(e) = control::serve(control_app, control_http).await {
                 eprintln!("control: {e}");
@@ -1696,7 +1697,7 @@ async fn serve() -> Result<()> {
     let intents =
         GatewayIntents::GUILDS | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
     let mut client = Client::builder(&app.token, intents)
-        .event_handler(Handler(app.clone()))
+        .event_handler(Handler(Arc::clone(&app)))
         .await?;
     client.start().await?;
     Ok(())

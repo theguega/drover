@@ -34,7 +34,7 @@ pub async fn serve(app: Arc<App>, http: Arc<Http>) -> Result<()> {
     tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
     loop {
         let (stream, _) = listener.accept().await?;
-        let (app, http) = (app.clone(), http.clone());
+        let (app, http) = (Arc::clone(&app), Arc::clone(&http));
         tokio::spawn(async move {
             if let Err(e) = handle(&app, &http, stream).await {
                 eprintln!("control: {e}");

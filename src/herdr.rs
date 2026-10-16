@@ -826,7 +826,7 @@ struct Msg {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum Content {
-    Text(#[allow(dead_code, reason = "only the variant matters")] String), // must stay a String: untagged tries variants in order
+    Text(#[expect(dead_code, reason = "only the variant matters")] String), // must stay a String: untagged tries variants in order
     Blocks(Vec<Block>),
     Other(IgnoredAny),
 }
