@@ -607,15 +607,49 @@ impl App {
         Ok(outcome.into())
     }
 
-    // The mate's own task (pane and optional Discord thread).
-    pub(crate) async fn mate_task(&self, name: &str) -> Option<(PaneId, Option<ChannelId>)> {
+    // The mate's own task.
+    async fn mate_cell(&self, name: &str) -> Option<Cell> {
         for (_, cell) in self.cells() {
             let t = cell.lock().await;
             if t.mate.as_deref() == Some(name) && t.repo == "mates" && t.phase != Phase::Gone {
-                return Some((t.pane.clone(), t.thread));
+                drop(t);
+                return Some(cell);
             }
         }
         None
+    }
+
+    // The mate's pane and optional Discord thread.
+    pub(crate) async fn mate_task(&self, name: &str) -> Option<(PaneId, Option<ChannelId>)> {
+        let cell = self.mate_cell(name).await?;
+        let t = cell.lock().await;
+        Some((t.pane.clone(), t.thread))
+    }
+
+    // News from a crewmate: prompted to its mate now, or queued behind the mate's turn.
+    pub(crate) async fn tell_mate(&self, name: &str, text: &str) -> Result<()> {
+        let Some(cell) = self.mate_cell(name).await else {
+            return Ok(());
+        };
+        let head = text.lines().next().unwrap_or_default();
+        log::append(&self.mates.join("state").join(name), log::Event::Crew, head)?;
+        let mut t = cell.lock().await;
+        let m = self.machine(&t.machine)?;
+        match herdr::prompt(m, &t.pane, text).await {
+            Ok(()) => {
+                if t.phase == Phase::Idle {
+                    t.phase = Phase::Waiting;
+                }
+            }
+            Err(e) if e.is_busy() || e.is(&herdr::Code::AgentBlocked) => {
+                t.queued = Some(match t.queued.take() {
+                    Some(q) => format!("{q}\n\n{text}"),
+                    None => text.into(),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
     }
 
     // A question for the desk from a mate: posted in its thread (if any) and kept in its log.

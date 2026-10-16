@@ -96,7 +96,7 @@ drover is also a terminal tool. `drover help` is the full reference, for humans 
 
 ## Events
 
-drover appends one line per event to a mate's log at `mates/state/<name>/log`: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `brief`, `escalated` and `closed`. The log is what you read to see what happened. A UI, if built, is only a view over it.
+drover appends one line per event to a mate's log at `mates/state/<name>/log`: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `brief`, `escalated`, `crew` and `closed`. A `crew` line is news from a crewmate the mate owns (a reply, a dialog, an exit), which drover also sends to the mate's pane, or queues behind its turn. The log is what you read to see what happened. A UI, if built, is only a view over it.
 
 ## Cleanup
 

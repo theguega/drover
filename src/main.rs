@@ -1250,6 +1250,11 @@ impl App {
         match self.step(http, cell, seen).await {
             Ok(Step::Keep) => {}
             Ok(Step::Drop) => self.remove(key),
+            Ok(Step::Tell { mate, text }) => {
+                if let Err(e) = self.tell_mate(&mate, &text).await {
+                    eprintln!("mate {mate}: {e}");
+                }
+            }
             Err(e) => eprintln!("task {key}: {e}"),
         }
     }
@@ -1273,12 +1278,25 @@ impl App {
                 Err(e.into())
             };
         }
+        // a crewmate's mate hears of its replies, dialogs and exit, since it has no thread to read
+        let crew = t
+            .mate
+            .clone()
+            .filter(|_| t.owner == Owner::Mate && t.repo != "mates");
+        let tell = |text: String| {
+            crew.clone()
+                .map_or(Step::Keep, |mate| Step::Tell { mate, text })
+        };
+        let who = format!(
+            "crew {} on {} ({} {})",
+            t.pane.0, t.machine, t.repo, t.branch
+        );
         let Seen::Agent(now, session) = seen else {
             t.phase = Phase::Gone;
             if let Some(th) = th {
                 th.say(http, "agent exited").await?;
             }
-            return Ok(Step::Keep);
+            return Ok(tell(format!("{who} exited")));
         };
 
         let prev = t.status.replace(now);
@@ -1287,8 +1305,9 @@ impl App {
         }
 
         let blocked = Some(Status::Blocked);
+        let dialog = now == Status::Blocked && prev != blocked;
         if let Some(th) = th {
-            if now == Status::Blocked && prev != blocked {
+            if dialog {
                 t.dialog_msg = Some(
                     th.send_message(http, screen_msg(m, &t.pane).await)
                         .await?
@@ -1303,6 +1322,12 @@ impl App {
             }
         }
 
+        if dialog {
+            return Ok(tell(format!(
+                "{who} waits on a dialog: `drover screen --pane {}`",
+                t.pane.0
+            )));
+        }
         if !now.ready() {
             return Ok(Step::Keep);
         }
@@ -1326,6 +1351,7 @@ impl App {
         }
 
         let was_working = prev == Some(Status::Working);
+        let mut said = None;
         if !(t.phase.waiting() || was_working) {
             return self.drain_queue(http, &mut t, m).await;
         }
@@ -1348,6 +1374,7 @@ impl App {
             if let Some(th) = th {
                 post(http, th, &r.text).await?;
             }
+            said = Some(r.text);
         } else if was_working {
             // other agents have no transcript to read; the screen is the reply
             if let Phase::Ending(teardown) = t.phase {
@@ -1359,13 +1386,18 @@ impl App {
             if t.phase == Phase::Waiting {
                 t.phase = Phase::Idle;
             }
+            let screen = herdr::screen(m, &t.pane, 80).await?;
             if let Some(th) = th {
                 mark(http, th, &t, "✅").await;
-                let screen = herdr::screen(m, &t.pane, 80).await?;
                 post(http, th, &format!("```\n{}\n```", tail(&screen, 5000))).await?;
             }
+            said = Some(screen);
         }
-        self.drain_queue(http, &mut t, m).await
+        self.drain_queue(http, &mut t, m).await?;
+        // the end of a turn holds its question or result
+        Ok(said.map_or(Step::Keep, |s| {
+            tell(format!("{who} replied:\n{}", tail(s.trim(), 800)))
+        }))
     }
 
     // One prompt may wait while the agent works; send it once idle.
@@ -1400,7 +1432,8 @@ impl App {
 
 enum Step {
     Keep,
-    Drop, // the task is over or its thread is gone
+    Drop,                                // the task is over or its thread is gone
+    Tell { mate: String, text: String }, // keep, and pass this crewmate's news to its mate
 }
 
 // What herdr says about a task's pane.
