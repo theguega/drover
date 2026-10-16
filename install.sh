@@ -30,7 +30,8 @@ if ((remote)); then
   repos=$default_repos
   [[ -r /dev/tty ]] && repos=$(ask "REPOS_ROOT: where repositories and worktrees live" "$default_repos")
   mkdir -p "${repos/#\~/$HOME}"
-  echo "linked drover-wt"
+  ln -sfn "$root/bin/drover-ssh" "$bin/drover"
+  echo "linked drover-wt and drover (set DROVER_HOST to the host's ssh name)"
   [[ "$repos" == "$default_repos" ]] || echo "set REPOS_ROOT=$repos in your shell environment"
   echo "this machine needs herdr, python3 and ssh from the host"
   exit 0

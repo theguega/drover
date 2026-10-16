@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Run drover on the host in DROVER_HOST, so a client's terminal drives the service there.
+#   DROVER_HOST=meerkat drover agents
+set -euo pipefail
+
+host=${DROVER_HOST:?set DROVER_HOST to the ssh name of the drover host}
+# serve starts a second Discord bot, so only the host may run it
+[[ "${1:-}" == serve ]] && { echo "serve runs on $host, not here" >&2; exit 1; }
+
+args=
+for arg in "$@"; do args+=" $(printf '%q' "$arg")"; done
+exec ssh -T "$host" "exec drover$args"

@@ -23,11 +23,13 @@ curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh |
 
 It clones drover to `~/.local/share/drover`, asks for the Discord settings (below) and where your repositories live, builds it, puts `drover` and `drover-wt` on your PATH, and starts the service (systemd on Linux, launchd on macOS). Run the same command again to update.
 
-On each remote machine, install only the worktree tool:
+On each remote machine, install only the worktree tool and the client:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh -s -- --remote
 ```
+
+The `drover` on a remote machine is a client: it runs the command on the host in `DROVER_HOST` over ssh. Set it in your shell, for example `export DROVER_HOST=meerkat`.
 
 ## Discord setup
 

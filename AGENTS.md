@@ -89,6 +89,8 @@ drover holds no conversation. It stores a map from thread to pane. Long tasks re
 
 The host in `HOST_NAME` runs drover. Each name in `REMOTES` is an ssh name whose herdr server is already running; drover never starts one. Match it to the saved herdr machine label so the desk and drover agree. One host at a time. Two would both answer every message.
 
+Every other machine is a client: `install.sh --remote` links `drover-wt` and `bin/drover-ssh` as `drover`, and `DROVER_HOST` names the host. The client has no build and no `.env`. The host's `drover` is the real binary, and `install.sh` links it.
+
 ## Rules the code follows
 
 Enforced by the lints in `Cargo.toml`:

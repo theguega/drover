@@ -87,6 +87,7 @@ A scout is a short, unrelated look. No repo, no journal.
 drover is also a terminal tool. `drover help` is the full reference, for humans and agents. Every Discord command has a terminal form, and the terminal form works the same whether or not Discord is involved.
 
 - The service holds the state, so the CLI does not write state files. `drover <cmd>` sends one JSON line to the service over a unix socket in the state directory and prints the reply.
+- Clients and the host. Only the host runs the service, and its socket is local, so another machine cannot reach it. A client's `drover` is `bin/drover-ssh`: it runs the same command on the host in `DROVER_HOST` over ssh. It refuses `serve`, which would start a second Discord bot.
 - Discord and the socket call one action layer: a `Command` enum and one `run` function that returns text. Discord handlers only translate interactions into commands and post the text.
 - A task started from the CLI stays in the terminal by default; `--discord` (or `drover attach --pane <id> --discord` later) opens a Discord thread so the phone sees it too.
 - Argument parsing is hand-written. No new dependency.
