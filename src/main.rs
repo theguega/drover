@@ -960,27 +960,25 @@ impl App {
 
     async fn teardown(&self, http: &Http, t: &Task, teardown: Teardown) -> Result<()> {
         let m = self.machine(&t.machine)?;
-        let removed = match teardown {
-            Teardown::Remove => herdr::remove(m, &t.workspace)
-                .await
-                .map_err(|e| format!("kept the checkout: {e}")),
-            Teardown::Close => Err(String::new()),
+        // drover-wt rm closes the workspace too; anything it kept is only closed
+        let (removed, mut note) = match teardown {
+            Teardown::Remove => match herdr::remove(m, &t.workspace).await {
+                Ok(said) => (true, said),
+                Err(e) => (false, format!("kept the checkout: {e}")),
+            },
+            Teardown::Close => (false, String::new()),
         };
-        let note = match removed {
-            Ok(said) => said,
-            Err(kept) => {
-                // mates and scouts share the drover workspace, so only their pane goes
-                let closed = if matches!(t.role, Role::Mate(_) | Role::Scout(_)) {
-                    herdr::close_pane(m, &t.pane).await
-                } else {
-                    herdr::close(m, &t.workspace).await
-                };
-                match closed {
-                    Ok(()) => kept,
-                    Err(e) => format!("{kept}\nclose failed: {e}"),
-                }
+        if !removed {
+            // mates and scouts share the drover workspace, so only their pane goes
+            let closed = if matches!(t.role, Role::Mate(_) | Role::Scout(_)) {
+                herdr::close_pane(m, &t.pane).await
+            } else {
+                herdr::close(m, &t.workspace).await
+            };
+            if let Err(e) = closed {
+                note = format!("{note}\nclose failed: {e}");
             }
-        };
+        }
         if let Some(th) = t.thread
             && !note.trim().is_empty()
         {
