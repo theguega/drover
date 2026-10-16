@@ -32,6 +32,10 @@ Commands (Discord command in brackets):
              [/screen] the terminal of a task's agent
   keys       --thread T --keys \"esc shift+tab enter\"
              [/keys] send keys to a task's agent
+  take       --thread T
+             [/take] give the pane back to you
+  release    --thread T
+             [/release] let the mate drive the pane
   done       --thread T [--remove] [--no-journal]
              [/done] ask for a journal entry, then close the workspace.
              --remove also deletes the checkout, only if drover opened it and it is clean and merged.
@@ -92,6 +96,12 @@ pub fn parse(args: &[String]) -> Result<Invocation> {
                 .split_whitespace()
                 .map(String::from)
                 .collect(),
+        }),
+        "take" => Action::Take(Target {
+            thread: flags.req("thread")?,
+        }),
+        "release" => Action::Release(Target {
+            thread: flags.req("thread")?,
         }),
         "done" => Action::Done(Done {
             thread: flags.req("thread")?,
@@ -182,6 +192,16 @@ mod tests {
             bail!("not a done");
         };
         assert!(d.journal && !d.remove && d.thread == "42");
+        Ok(())
+    }
+
+    #[test]
+    fn take_and_release_name_a_thread() -> Result<()> {
+        let Invocation::Run(Action::Release(t)) = parse(&args("release --thread 42"))? else {
+            bail!("not a release");
+        };
+        assert_eq!(t.thread, "42");
+        assert!(parse(&args("take")).is_err());
         Ok(())
     }
 

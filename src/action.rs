@@ -18,6 +18,8 @@ pub enum Action {
     Usage,
     Config,
     Screen(Target),
+    Take(Target),
+    Release(Target),
     Keys(Keys),
     Done(Done),
     Recall(Recall),
@@ -73,6 +75,8 @@ impl App {
             Action::Worktrees => self.cmd_worktrees().await,
             Action::Usage => self.cmd_usage().await,
             Action::Config => Ok(self.config()),
+            Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
+            Action::Release(t) => self.set_owner(&t.thread, Owner::Mate).await,
             Action::Screen(t) => {
                 let (m, pane) = self.target(id(&t.thread)?).await?;
                 Ok(screen(m, &pane, "").await)
@@ -157,6 +161,7 @@ impl App {
                 repo: repo.into(),
                 branch: wt.branch.clone(),
                 origin: Origin::Opened,
+                owner: Owner::User,
                 phase: Phase::Starting { prompt },
                 status: None,
                 session: None,
@@ -212,6 +217,7 @@ impl App {
                 repo,
                 branch: String::new(),
                 origin: Origin::Attached,
+                owner: Owner::User,
                 phase: Phase::Idle,
                 status: Some(a.agent_status),
                 session,
@@ -291,6 +297,17 @@ impl App {
             ),
         ]
         .join("\n")
+    }
+
+    async fn set_owner(&self, thread: &str, owner: Owner) -> Result<String> {
+        let cell = self.task_in(id(thread)?)?;
+        let text = {
+            let mut t = cell.lock().await;
+            t.owner = owner;
+            format!("{} is {}", t.pane.0, owner.as_str())
+        };
+        self.save().await;
+        Ok(text)
     }
 
     async fn cmd_worktrees(&self) -> Result<String> {

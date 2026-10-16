@@ -118,6 +118,24 @@ impl Phase {
     }
 }
 
+// Who may send input to a pane: the desk user, or the mate that dispatched it.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Owner {
+    User,
+    Mate,
+}
+
+impl Owner {
+    #[must_use]
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Mate => "mate",
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", from = "Stored")]
 struct Task {
@@ -128,6 +146,7 @@ struct Task {
     repo: String,
     branch: String,
     origin: Origin,
+    owner: Owner,
     phase: Phase,
     #[serde(skip_serializing_if = "Option::is_none")]
     status: Option<Status>, // none until the poller has seen the agent
@@ -154,6 +173,7 @@ struct Stored {
     repo: String,
     branch: String,
     origin: Option<Origin>,
+    owner: Option<Owner>,
     phase: Option<Phase>,
     status: Option<Status>,
     session: Option<String>,
@@ -204,6 +224,7 @@ impl From<Stored> for Task {
             repo: s.repo,
             branch: s.branch,
             origin,
+            owner: s.owner.unwrap_or(Owner::User),
             phase,
             status: s.status,
             last_reply: s.last_reply,
@@ -721,6 +742,8 @@ impl App {
             CreateCommand::new("agents").description("Agents on every machine"),
             CreateCommand::new("worktrees").description("Worktrees on every machine"),
             CreateCommand::new("usage").description("Claude and Cursor usage on every machine"),
+            CreateCommand::new("take").description("Give this pane back to you"),
+            CreateCommand::new("release").description("Let the mate drive this pane"),
             CreateCommand::new("screen").description("This thread's terminal"),
             CreateCommand::new("keys")
                 .description("Send keys to this thread's agent")
@@ -831,6 +854,8 @@ impl App {
             "agents" => Action::Agents,
             "worktrees" => Action::Worktrees,
             "usage" => Action::Usage,
+            "take" => Action::Take(Target { thread }),
+            "release" => Action::Release(Target { thread }),
             "screen" => Action::Screen(Target { thread }),
             "keys" => Action::Keys(Keys {
                 thread,
@@ -1432,6 +1457,7 @@ mod tests {
         let t = tasks.get(&ChannelId::new(123)).context("task")?;
         assert!(t.phase == Phase::Ending(Teardown::Remove));
         assert!(t.origin == Origin::Opened && t.session.is_none());
+        assert!(t.owner == Owner::User);
         assert_eq!(t.prompt_msg, Some(MessageId::new(456)));
 
         let back: BTreeMap<ChannelId, Task> =
