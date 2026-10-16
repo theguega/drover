@@ -46,7 +46,7 @@ Inside a task thread, a plain Discord message is the next prompt; it is queued w
 Reactions on the prompt: 👀 working, ⏸️ the agent asks a dialog, ✅ done.
 
 Setup:
-  The service runs `drover` with no arguments, from this checkout, as a user service.
+  The service runs `drover serve` from this checkout, as a user service.
   It reads .env: DISCORD_TOKEN, DISCORD_GUILD_ID, DISCORD_CHANNEL_ID, ALLOWED_USER_IDS,
   HOST_NAME, REMOTES (comma-separated ssh names), REPOS_ROOT (repositories and worktrees,
   default ~/.drover-workspace). Run `drover config` for the live values.
@@ -59,7 +59,7 @@ Setup:
 
 pub fn parse(args: &[String]) -> Result<Invocation> {
     let Some((cmd, rest)) = args.split_first() else {
-        return Ok(Invocation::Serve);
+        return Ok(Invocation::Help);
     };
     let flags = Flags::read(rest)?;
     let action = match cmd.as_str() {
@@ -200,7 +200,7 @@ mod tests {
         assert!(parse(&args("new --machine host")).is_err());
         assert!(parse(&args("new --machine")).is_err());
         assert!(parse(&args("frobnicate")).is_err());
-        assert!(matches!(parse(&[]), Ok(Invocation::Serve)));
+        assert!(matches!(parse(&[]), Ok(Invocation::Help)));
         assert!(matches!(parse(&args("help")), Ok(Invocation::Help)));
     }
 }

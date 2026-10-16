@@ -68,7 +68,7 @@ ln -sfn "$root/target/release/drover" "$bin/drover"
 
 zsh=$(command -v zsh || true)
 [[ -n "$zsh" ]] || { echo "the service starts through zsh: install it first" >&2; exit 1; }
-run="set -a; . ./.env; set +a; exec ./target/release/drover"
+run="set -a; . ./.env; set +a; exec ./target/release/drover serve"
 
 case "$(uname -s)" in
   Linux)
