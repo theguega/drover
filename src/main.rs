@@ -520,7 +520,7 @@ fn agent_name(s: &str) -> String {
             let d = (n % 36) as u32;
             n /= 36;
             // INVARIANT: d < 36, the radix.
-            #[allow(clippy::expect_used)]
+            #[expect(clippy::expect_used, reason = "d is below the radix")]
             char::from_digit(d, 36).expect("digit below radix")
         })
         .collect();
