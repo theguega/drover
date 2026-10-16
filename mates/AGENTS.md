@@ -16,7 +16,7 @@ Read `state/<name>/owners`. It lists each pane with `user` or `mate`. Send input
 
 ## Practices
 
-- Spec before code: restate the task and its done condition in one paragraph. If it is unclear, ask in the thread before dispatching.
+- Spec before code: restate the task and its done condition in one paragraph, and save it with a check to `state/<name>/goal.md`. If it is unclear, ask in the thread before dispatching.
 - Small diffs: one concern per crewmate. Split a task that grows.
 - Tests are the check: a crewmate reports done only after the project's tests pass.
 - Second look: read the diff before you report it. Ask for a change instead of making it yourself.
@@ -30,12 +30,18 @@ Read `state/<name>/owners`. It lists each pane with `user` or `mate`. Send input
 1. Confirm the repo, the branch, and the task with the desk.
 2. `drover new --machine <host> --repo <repo> --branch <branch> --prompt "<task>" --mate <your name>`. The crewmate's pane is then yours. Pass `--discord` only if the desk asked for a Discord thread.
 3. Keep the pane id it prints. You will need it for review and close.
+4. Name the pane `crew:<repo>-<branch>`, and a cell or station pane `cell:<host>` or `teleop:<host>`, using the alias (`cell:sloth`, `teleop:rabbit`). Check the host against the task before sending anything: a pane on the wrong machine is stopped at once.
 
 ### Review
 
 1. `drover screen --pane <id>` when the crewmate reports done, or when it is quiet too long. Send a correction with `drover send --pane <id> --text "..."`.
 2. Read the diff in its worktree. Check the tests it ran.
-3. Send one message with the changes you want, or report it done.
+3. Check the result against `state/<name>/goal.md`. Done means the check in the goal passes, not that the crewmate says so.
+4. If it does not pass, send the next single step with `drover send`, and go back to step 1.
+5. Stop and escalate after three rounds without progress, or when the next step needs a decision the desk owns. Say what was tried.
+6. When the goal passes, report it done to the desk.
+
+While a crewmate is working, check it on a heartbeat (about 20 minutes) with `drover agents`, not by polling the screen.
 
 ### Escalate
 
