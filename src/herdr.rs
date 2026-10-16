@@ -951,27 +951,28 @@ enum Scan {
     Reply(Option<Reply>),
 }
 
+// Walks back from the end, so only the latest turn is parsed.
 #[must_use]
 fn last_reply(jsonl: &str) -> Scan {
-    let lines: Vec<Line> = jsonl
-        .lines()
-        .filter_map(|l| serde_json::from_str(l).ok())
-        .collect();
-    let Some(from) = lines.iter().rposition(Line::is_prompt) else {
-        return Scan::NoPrompt;
-    };
-    Scan::Reply(
-        lines
-            .iter()
-            .skip(from)
-            .filter(|e| e.kind == "assistant")
-            .flat_map(|e| e.texts().filter(|t| !t.is_empty()).map(move |t| (e, t)))
-            .last()
-            .map(|(e, t)| Reply {
+    let mut reply = None;
+    for line in jsonl.lines().rev() {
+        let Ok(e) = serde_json::from_str::<Line>(line) else {
+            continue;
+        };
+        if e.is_prompt() {
+            return Scan::Reply(reply);
+        }
+        if reply.is_none()
+            && e.kind == "assistant"
+            && let Some(text) = e.texts().filter(|t| !t.is_empty()).last()
+        {
+            reply = Some(Reply {
                 id: e.uuid.clone(),
-                text: t.into(),
-            }),
-    )
+                text: text.into(),
+            });
+        }
+    }
+    Scan::NoPrompt
 }
 
 #[cfg(test)]
