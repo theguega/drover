@@ -58,6 +58,25 @@ drover-wt ls                 # worktrees of this repo, or of every repo under RE
 drover-wt rm                 # remove this worktree, and its branch if merged
 ```
 
+## Mates and scouts
+
+A **mate** is a dispatcher: an agent in its own pane in the `drover` workspace, with its playbook in `mates/AGENTS.md`. It starts crewmates with `drover new --mate`, watches them, and asks the desk when it needs a decision. At most three run at once.
+
+```sh
+drover mate reviewer         # start a mate; /mate in Discord does the same
+drover new --machine host --repo myrepo --branch feature-x --prompt "..." --mate reviewer
+drover take --thread ID      # the desk user takes a pane back from its mate
+```
+
+A **scout** is a short look at something that belongs to no repo. It has a folder of its own, no journal entry, and it is deleted when you close it:
+
+```sh
+drover scout "what does the cache layer do?"
+drover scout close --thread ID
+```
+
+`mates/state/` holds each mate's log and owner list, and scouts' folders. It is git-ignored.
+
 ## Skill
 
 `skills/drover` is an [Agent Skills](https://agentskills.io) folder: a `SKILL.md` with a name and a description, and nothing else. It documents this CLI for agents, and it points at `drover help` for the full reference, so it doesn't go stale.

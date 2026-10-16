@@ -22,4 +22,9 @@ Read it before the first command in a session. Use `drover config` for this serv
 - `done` asks the agent for a journal entry, then closes the workspace. Use `--no-journal` only when the user asks for it.
 - `done --remove` deletes a checkout only when drover opened it, and drover-wt keeps a dirty checkout or an unmerged branch. Never remove by hand what drover did not open.
 - `keys` sends real keystrokes to a running agent. Read `screen` first.
+- `send` sends a prompt to a task's agent. It is queued when the agent is busy.
+- A mate is an agent in the `drover` workspace with its own folder. `drover mate NAME` starts one, and `drover new --mate NAME` dispatches a crewmate to it. Mates have at most three at a time.
+- A scout is a short look with no repo. `drover scout PROMPT` starts one, and `drover scout close --thread T` ends it and deletes its folder. Do not use `done` on a scout.
+- `take` gives a pane back to the desk user. `release` lets its mate drive it again. A mate checks its owner list before every send.
+- `link` attaches a running agent to a mate. `brief` adds a note to a mate's log. `escalate` posts a question for the desk in the mate's thread.
 - drover must be running. If a command says it is not running here, say so and stop.

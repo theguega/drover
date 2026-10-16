@@ -20,7 +20,7 @@ drover: the same herdr desk from the terminal, Discord, or an agent.
 Usage: drover <command> [--flag value ...]
 
 Commands (Discord command in brackets):
-  new        --machine M --repo R --branch B --prompt P [--agent NAME] [--model X] [--scout]
+  new        --machine M --repo R --branch B --prompt P [--agent NAME] [--model X] [--scout] [--mate NAME]
              [/new] worktree and agent in a new Discord thread. --branch is a new name,
              an existing branch, or #pr. --scout asks for a report and no changes.
   attach     --machine M --pane P

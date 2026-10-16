@@ -2,7 +2,7 @@
 
 drover is an agent runtime for herdr. It starts agents in worktrees, follows them, relays Discord and terminal input to their panes, tracks which thread owns which pane, and keeps the journal. It ships its own worktree tool (`drover-wt`) and its own skill, and it installs with one curl command. drover is model-free: the agents are the CLIs, and they are the only thing that thinks.
 
-Status: **built** is what is in the code today. **designed** is agreed but not yet built.
+Status: everything here is **built** on the `mates` branch. The known gaps at the end are not.
 
 ## Layers
 
@@ -10,8 +10,8 @@ Status: **built** is what is in the code today. **designed** is agreed but not y
 |---|---|---|
 | herdr | workspaces, tabs, panes, agent status, named agents | built |
 | drover-wt | worktrees: new branch, existing branch, `#pr`, remove | built |
-| drover | Discord threads, thread → pane map, journal, usage, event log | built (log designed) |
-| `mates/` | mate instructions and playbooks (`AGENTS.md`, short playbooks), `state/` | designed |
+| drover | Discord threads, thread → pane map, journal, usage, mate event log | built |
+| `mates/` | mate instructions and playbook (`AGENTS.md`), `state/` (logs, owner lists, scouts) | built |
 | skills | `skills/drover` in the repo, an Agent Skills folder that people copy into their own skills directory | built |
 
 ## Lanes
@@ -24,9 +24,9 @@ Two lanes share the same herdr panes and never interfere.
 Every agent pane has one owner, `user` or `mate`. Owner changes only by an explicit command.
 
 - A mate sends input only to panes it owns. It may read any pane.
-- Takeover: `herdr agent attach` plus an owner flip. The mate checks the owner before every `prompt` or `send-keys`.
+- Takeover: `herdr agent attach` plus `drover take`. The mate checks its owner list before every `prompt` or `send-keys`.
 - herdr has no owner lock, so the check is drover's and the mate's job.
-- Two agents may share a worktree. drover warns at dispatch and does not block.
+- Two agents may share a worktree. drover does not block it.
 
 ## Harnesses
 
@@ -44,13 +44,13 @@ Skills are not drover's business. drover ships the `skills/drover` folder, and e
 
 ## Pane awareness
 
-drover already receives `pane.agent_detected` and `agent.list`. A new pane is related to a task by metadata first, with no model call:
+drover sees every agent on the host. A pane it did not start is checked by its folder's repo and branch:
 
-- same repo and branch as a task the mate knows: linked automatically
-- otherwise: unrelated, ignored
-- ambiguous: the mate asks in its own thread
+- same repo and branch as a task linked to a mate: linked to that mate, owner `user`, with its own thread
+- same repo, another branch: the mate is asked in its thread, with the `drover link` line to run
+- anything else: ignored
 
-Manual context: `/link <pane>` attaches a pane to a task, `/brief` adds a note. drover sends nothing to a pane unless asked.
+Nothing is sent to a pane unless asked. `drover link` attaches a running agent to a mate by hand. `drover brief` adds a note to a mate's log.
 
 ## Names
 
@@ -64,22 +64,23 @@ Names must match `[a-z][a-z0-9_-]{0,31}`.
 
 ## Mates
 
-- Started from Discord (`/mate <name>`) or the terminal. Both call one code path.
-- The pane goes into the `drover` workspace, tab `mates`, with cwd `drover/mates/`, the directory that holds its `AGENTS.md`.
+- Started from Discord (`/mate <name>`) or the terminal (`drover mate <name>`). Both call one code path.
+- The pane goes into the `drover` workspace, tab `mates`, with cwd `mates/` in the drover checkout: the folder that holds its `AGENTS.md`.
 - Up to three mates. drover refuses a fourth.
-- A mate creates crewmate worktrees with `drover-wt`. Repos resolve under `REPOS_ROOT`, so `mates/` needs no worktree of its own.
-- A mate's SOP is a few short playbooks in `mates/`: dispatch, review, handoff, close. They cover spec before code, small diffs, tests as the check, a second look before merge, bounded context, and asking when ambiguous. Public references: [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and the open [Agent Skills spec](https://agentskills.io). Borrow checkpoints, do not copy whole packs.
-- A mate's crewmates report only bounded output: the same five-line entry `/done` writes, plus status changes.
+- A mate dispatches crewmates with `drover new --mate <name>`. The crewmate's pane is owned by that mate, and it is listed in the mate's owner list.
+- A mate's playbook (`mates/AGENTS.md`) covers dispatch, review, handoff and close, with the practices it works by: spec before code, small diffs, tests as the check, a second look before merge, bounded context, and asking when ambiguous. Public references: [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) and the open [Agent Skills spec](https://agentskills.io). Borrow checkpoints, do not copy whole packs.
+- A mate's reports are bounded: what changed, what was checked, what is left.
+- `drover escalate --mate <name> --text ...` posts a question in the mate's thread and logs it.
 
 ## Scouts
 
-A scout is a short, unrelated look. No task, no repo, no journal.
+A scout is a short, unrelated look. No repo, no journal.
 
-- `/scout <prompt>` creates `mates/state/scouts/<id>/`, a plain directory with no git.
-- It gets its own pane in a `scouts` tab, owned by the scout.
-- It ends on `/scout close` only. drover closes the pane and deletes that one directory.
-- The delete is restricted to the scouts root, and that path check is tested first.
-- If a scout turns into real work, promote it to a task and use the normal `drover-wt` path.
+- `drover scout <prompt>` and `/scout <prompt>` create `mates/state/scouts/scout-<id>/`, a plain folder with no git.
+- The scout gets its own pane in a `scouts` tab of the drover workspace. The desk user owns it.
+- It ends only on `drover scout close --thread <id>` or `/scout-close`. drover closes that pane and deletes that one folder.
+- The delete only takes a direct child of the scouts folder named `scout-*`, and that guard is tested.
+- `done` refuses a scout. If a scout becomes real work, start a task with `drover-wt` and `drover new`.
 
 ## CLI (built)
 
@@ -94,7 +95,7 @@ drover is also a terminal tool. `drover help` is the full reference, for humans 
 
 ## Events
 
-drover writes an append-only log per mate under `mates/state/<name>/log`. Lines are dispatched, linked, reported, escalated, closed. The log is what you read to understand what happened. A UI, if built, is only a view over it.
+drover appends one line per event to a mate's log at `mates/state/<name>/log`: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `brief`, `escalated` and `closed`. The log is what you read to see what happened. A UI, if built, is only a view over it.
 
 ## Cleanup
 
@@ -125,12 +126,12 @@ drover writes an append-only log per mate under `mates/state/<name>/log`. Lines 
 ## Decided
 
 - **Escalation** goes to the mate's own Discord thread. There is no separate channel.
-- **Mate log** is plain text, one line per event: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `escalated`, `closed`. It is grep-friendly, and it needs no parser.
+- **Mate log** is plain text, one line per event: `<unix-time> <event> <detail>`. It is grep-friendly, and it needs no parser.
 - **Scout id** is `scout-` plus 6 random hex characters. It fits the agent name rule.
 
 ## Build order
 
-Each step is built, tested, and checked against this doc before the next one starts.
+All eleven steps are built, one commit each on the `mates` branch. Nothing is pushed yet.
 
 1. Event log: append lines to `mates/state/<name>/log`.
 2. Owner per pane: `user` or `mate`, default `user`. `take` and `release` switch it, and the owner list is written for the mate to read.
@@ -143,3 +144,11 @@ Each step is built, tested, and checked against this doc before the next one sta
 9. Escalation: `escalated` lines are posted to the mate's thread.
 10. Docs: README, help text, the `drover` skill, and the status markers in this file match what is built.
 11. Publish: each step is pushed to `theguega/drover` as it lands.
+
+## Known gaps
+
+- herdr has no owner lock. The check is the mate's, against its owner list, so a pane driven by hand can still be sent to by a mate that has not looked.
+- A crewmate a mate starts with plain `drover-wt` and `herdr` is not linked. Only `drover new --mate` and `drover link` link.
+- A scout is owned by the desk user, not by a scout. Scouts have no owner of their own.
+- Mates run on the host only. Remote machines have no mates.
+- The mate log is plain text. There is no view of it yet.

@@ -6,7 +6,7 @@ Your name is in your first message. Your files are in `state/<name>/`.
 
 ## Tools
 
-- `drover new`, `agents`, `screen`, `keys`, `send`, `done`, `recall`, `usage`: the drover CLI. `drover help` is the full reference.
+- `drover new`, `agents`, `screen`, `keys`, `send`, `take`, `release`, `link`, `escalate`, `brief`, `done`, `recall`, `usage`: the drover CLI. `drover help` is the full reference.
 - `drover-wt`: worktrees, from a branch, a new name, or `#123`.
 - herdr: panes and layout. `herdr --skill` prints its skill when you need it.
 
@@ -28,14 +28,19 @@ Read `state/<name>/owners`. It lists each pane with `user` or `mate`. Send input
 ### Dispatch
 
 1. Confirm the repo, the branch, and the task with the desk.
-2. `drover new --machine <host> --repo <repo> --branch <branch> --prompt "<task>"`.
+2. `drover new --machine <host> --repo <repo> --branch <branch> --prompt "<task>" --mate <your name>`. The crewmate's pane is then yours.
 3. Keep the thread id it prints. You will need it for review and close.
 
 ### Review
 
-1. `drover screen --thread <id>` when the crewmate reports done, or when it is quiet too long.
+1. `drover screen --thread <id>` when the crewmate reports done, or when it is quiet too long. Send a correction with `drover send --thread <id> --text "..."`.
 2. Read the diff in its worktree. Check the tests it ran.
 3. Send one message with the changes you want, or report it done.
+
+### Escalate
+
+1. When a decision is the desk's, or the task is unclear, run `drover escalate --mate <your name> --text "..."`.
+2. Keep working on what is not blocked. Do not guess.
 
 ### Handoff
 
