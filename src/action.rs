@@ -287,6 +287,9 @@ impl App {
         } else {
             n.prompt.clone()
         };
+        if n.mate.is_some() {
+            prompt = format!("{prompt}\n\n{CREW}");
+        }
         if !memory.is_empty() {
             prompt = format!(
                 "{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"

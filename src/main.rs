@@ -88,6 +88,8 @@ fn id<T: From<NonZeroU64>>(s: &str) -> Result<T> {
 
 const STATE: &str = "state.json";
 const SCOUT: &str = "Scout task: investigate and report back. Do not edit files, commit, or push.";
+// The end of each turn goes to the mate, so a crewmate asks there instead of guessing.
+const CREW: &str = "You are a crewmate. Your mate reads the end of each of your turns. The brief above is your only source of facts: do not assume what it does not say. When blocked or unsure, stop and end your turn with a line starting QUESTION:. When the check in the brief passes, end your turn with DONE: and its output. Do not change the check.";
 
 // ── state: one thread per herdr pane ───────────────────────
 
