@@ -70,6 +70,8 @@ impl<T> WithContext<T> for Option<T> {
 mod action;
 mod cli;
 mod control;
+mod snapshot;
+mod web;
 
 // ── config ─────────────────────────────────────────────────
 
@@ -340,6 +342,8 @@ struct App {
     started: AtomicBool,
     /// Watchers resubscribe when the set of panes for a machine changes.
     wake: Notify,
+    /// Every save notifies this, so the dashboard streams a new snapshot.
+    changed: Notify,
     /// Saves share one temp file, so they take turns.
     saving: Mutex<()>,
 }
@@ -384,6 +388,7 @@ impl App {
             mates: std::env::current_dir()?.join("mates"),
             started: AtomicBool::new(false),
             wake: Notify::new(),
+            changed: Notify::new(),
             saving: Mutex::new(()),
         })
     }
@@ -498,6 +503,7 @@ impl App {
         if let Err(e) = written {
             eprintln!("save {STATE}: {e}");
         }
+        self.changed.notify_waiters();
     }
 
     async fn live_cell(&self, machine: &str, pane: &PaneId) -> Option<(String, Cell)> {
@@ -1587,6 +1593,23 @@ impl EventHandler for Handler {
                 eprintln!("control: {e}");
             }
         });
+        // the dashboard is off unless a port is set; it is served on the network, so it needs a token
+        if let Ok(port) = std::env::var("DASHBOARD_PORT") {
+            match (port.parse::<u16>(), std::env::var("DASHBOARD_TOKEN")) {
+                (Ok(port), Ok(token)) if web::valid_token(&token) => {
+                    let (web_app, web_http) = (Arc::clone(&app), Arc::clone(&http));
+                    tokio::spawn(async move {
+                        if let Err(e) = web::serve(web_app, web_http, port, token).await {
+                            eprintln!("dashboard: {e}");
+                        }
+                    });
+                }
+                (Err(e), _) => eprintln!("DASHBOARD_PORT is not a port: {e}"),
+                _ => eprintln!(
+                    "DASHBOARD_PORT needs DASHBOARD_TOKEN: letters and digits only. The dashboard is not served"
+                ),
+            }
+        }
     }
 }
 

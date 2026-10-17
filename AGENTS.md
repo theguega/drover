@@ -13,6 +13,9 @@ src/journal.rs  journal store, search, context for new tasks
 src/action.rs   every command as one `Action`, run once for Discord and the terminal
 src/control.rs  unix socket the service listens on, and the client `drover <cmd>` uses
 src/cli.rs      argv to `Action`, and `drover help`
+src/snapshot.rs the desk as JSON, read only: what the dashboard and `drover snapshot` show
+src/web.rs      dashboard over the network (`DASHBOARD_PORT` + `DASHBOARD_TOKEN`): the page and its event stream
+web/            dashboard.html, embedded by web.rs with include_str!, no build
 completions/    bash and zsh completion, opt-in (README, Completion); values come from `drover complete`
 bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not from dotfiles)
 skills/drover/  the drover skill, copied by hand into ~/.agents/skills

@@ -128,6 +128,17 @@ The installer asks where repositories and worktrees live. The default is `~/.dro
 
 If your repositories already live somewhere else, such as `~/Developer`, answer that at the prompt, or set `REPOS_ROOT` in your shell environment for the desk and remotes.
 
+### Dashboard
+
+A read-only view of the desk in a browser: the flow, the escalations, each mate with its crew, and how each mate evolved. It is off by default. To turn it on, set both in `.env` and restart the service:
+
+```
+DASHBOARD_PORT=7007
+DASHBOARD_TOKEN=<letters and digits; a long random one is safer, e.g. `openssl rand -hex 16`>
+```
+
+Open `http://<host>:7007/?token=<DASHBOARD_TOKEN>` from any machine that can reach the host. On a Tailscale tailnet that is the host's tailnet name. Anyone with the token can read the desk's goals, logs and pane names, so keep the token private, and use it on a network you trust. Outside a tailnet the traffic is plain HTTP.
+
 ## Develop
 
 ```sh

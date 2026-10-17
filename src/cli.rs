@@ -42,6 +42,7 @@ Commands (Discord command in brackets):
   agents     [/agents] agents on every machine, with the Discord thread if bound
   worktrees  [/worktrees] worktrees on every machine
   usage      [/usage] usage of each agent on every machine
+  snapshot   the desk as JSON: machines, tasks, mates, escalations (what the dashboard reads)
   screen     --pane P
              [/screen] the terminal of a task's agent (--thread T also works)
   keys       --pane P --keys \"esc shift+tab enter\"
@@ -175,6 +176,7 @@ fn action(cmd: &str, rest: &[String]) -> Result<Action> {
         "worktrees" => Action::Worktrees,
         "usage" => Action::Usage,
         "config" => Action::Config,
+        "snapshot" => Action::Snapshot,
         "complete" => Action::Complete(match flags.words.first().map(String::as_str) {
             Some("threads") => Candidates::Threads,
             Some("machines") => Candidates::Machines,
