@@ -7,7 +7,8 @@
 #   drover-wt [ls]            list worktrees of this repo, or of every repo under REPOS_ROOT
 #   drover-wt rm [-f] [path]  remove a worktree (default: this one), its workspace, and its branch if merged
 # Extra args are passed to herdr (default --focus). Prints herdr's JSON.
-# A new checkout gets the main clone's untracked files that match .worktreeinclude.
+# A new checkout gets the main clone's untracked files that match .worktreeinclude,
+# then runs its own .worktree-setup if executable, with the main clone as $1.
 #
 # REPOS_ROOT defaults to ~/.drover-workspace; set it in your shell to keep repos elsewhere.
 # HERDR_WORKTREE_PREFIX puts new names under a prefix (dev/cache).
@@ -131,9 +132,22 @@ else
   base=$(git -C "$root" symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)
   git -C "$root" worktree add -q --no-track -b "$branch" "$path" "$base"
 fi
-# untracked files of the main clone matching .worktreeinclude (gitignore syntax), e.g. .env
+# untracked files of the main clone matching .worktreeinclude (gitignore syntax), e.g. .env or target/,
+# a matched directory as one copy-on-write clone where the filesystem has it (APFS, Btrfs, XFS)
 if [[ -f "$root/.worktreeinclude" ]]; then
-  git -C "$root" ls-files -z --others --ignored --exclude-from="$root/.worktreeinclude" \
-    | tar -C "$root" --null -T - -cf - | tar -C "$path" -xf -
+  if cp --version >/dev/null 2>&1; then clone=(cp -a --reflink=auto); else clone=(cp -Rpc); fi
+  copied=
+  while IFS= read -r -d '' entry; do
+    # git lists a fully ignored directory and then its files again
+    [[ -n "$copied" && "$entry" == "$copied"* ]] && continue
+    [[ "$entry" == */ ]] && copied=$entry
+    dir=$(dirname "$entry")
+    mkdir -p "$path/$dir"
+    "${clone[@]}" "$root/${entry%/}" "$path/$dir/"
+  done < <(git -C "$root" ls-files -z --others --ignored --directory --exclude-from="$root/.worktreeinclude")
+fi
+# stdout goes to stderr: drover parses herdr's JSON from stdout
+if [[ -x "$path/.worktree-setup" ]]; then
+  (cd "$path" && ./.worktree-setup "$root" </dev/null) >&2 || echo ".worktree-setup failed, opening anyway" >&2
 fi
 exec herdr worktree open --cwd "$root" --path "$path" --label "$label" "${flags[@]}"

@@ -63,6 +63,8 @@ drover-wt rm                 # remove this worktree, and its branch if merged
 drover-wt --help             # full usage
 ```
 
+A new checkout is ready to work in. Untracked files of the main clone that match `.worktreeinclude` (gitignore syntax, e.g. `.env`, `target/`, `node_modules/`) are copied over, whole directories as copy-on-write clones where the filesystem supports it (APFS, Btrfs, XFS). Then an executable `.worktree-setup` in the repo runs in the new checkout, with the main clone's path as `$1`, for steps like `uv sync` or `direnv allow`.
+
 ## Mates and scouts
 
 A **mate** is a dispatcher: an agent in its own pane in the `drover` workspace, with its playbook in `mates/AGENTS.md`. It plans the goal as a small graph of crewmates, starts them with `drover new --mate`, hears each crewmate's turn as it ends, and loops until every check passes. It writes to you only when it needs a decision or the goal is done. At most three run at once.
