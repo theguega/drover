@@ -106,6 +106,7 @@ drover appends one line per event to a mate's log at `mates/state/<name>/log`: `
 The desk as read-only JSON, for tools outside drover. It is a client of the action layer, like Discord and the terminal, and it holds no state of its own.
 
 - `Action::Snapshot` builds the desk from the tasks in memory and from each mate's `goal.md` and log. `drover snapshot` prints it. It writes nothing and runs no shell.
+- `drover watch` prints the snapshot as one JSON line, then one line per change, until the client exits. The service builds each line when `App.changed` fires, which every save notifies; changes that land during a build coalesce into the next line. `bin/drover-ssh` execs over `ssh -T`, so it streams the same way.
 - A harness is shown by name. A field a harness cannot supply, such as model, context fill or tokens, is absent, not guessed. Usage is not in the snapshot yet.
 - The mate log has no node, round or check, so those would become `key=value` fields on the same line, for example `1781600000 crew node=docs round=2 check=fail pane=crew:drover-docs`. Still one line per event, still grep-friendly.
 

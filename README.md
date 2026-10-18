@@ -45,6 +45,7 @@ The installer asks for the token, the guild id, the channel id, the allowed user
 drover help                  # every command, with its Discord equivalent
 drover new --machine host --repo myrepo --branch feature-x --prompt "add retries to the client"
 drover agents                # agents on every machine, and the thread if bound to Discord
+drover snapshot              # the desk as JSON, for other tools; `drover watch` streams it, one line per change
 drover screen --pane ID      # an agent's terminal
 drover keys --pane ID --keys "esc enter"
 drover attach --pane ID --discord  # open a Discord thread for a running task to continue there

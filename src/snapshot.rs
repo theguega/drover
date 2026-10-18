@@ -6,11 +6,11 @@ use serde_json::{Value, json};
 
 use super::*;
 
-// Log lines per mate that the page shows.
+// Log lines kept per mate.
 const LOG_TAIL: usize = 200;
 // Escalations across all mates, newest last.
 const ESCALATIONS: usize = 20;
-// Characters of a goal file that the page shows.
+// Characters of a goal file kept.
 const GOAL_CAP: usize = 4000;
 
 impl App {
