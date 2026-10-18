@@ -10,9 +10,10 @@ src/socket.rs   herdr socket: requests and `events.subscribe` (direct locally, o
 src/herdr.rs    herdr calls per machine, drover-wt and transcripts over sh / ssh
 src/format.rs   agent markdown to discord: tables, rules, fences cut across messages
 src/journal.rs  journal store, search, context for new tasks
-src/action.rs   every command as one `Action`, run once for Discord and the terminal
+src/action.rs   every command as one `Action`, run once for Discord and the terminal; answers a `Reply`
+src/toon.rs     JSON to TOON, what the terminal prints
 src/control.rs  unix socket the service listens on, and the client `drover <cmd>` uses; `watch` holds it open
-src/cli.rs      argv to `Action`, and `drover help`
+src/cli.rs      argv to `Action` through one `Spec` per command; `--help`, errors, the home view
 src/snapshot.rs the desk as JSON, read only: what `drover snapshot` and `drover watch` show
 completions/    bash and zsh completion, opt-in (README, Completion); values come from `drover complete`
 bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not from dotfiles)

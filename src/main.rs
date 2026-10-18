@@ -4,6 +4,7 @@ mod herdr;
 mod journal;
 mod log;
 mod socket;
+mod toon;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -328,7 +329,8 @@ type Cell = Arc<Mutex<Task>>;
 type Tasks = HashMap<String, Cell>;
 
 /// Whether a machine's event watcher could subscribe, as the snapshot shows it.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 enum Reachability {
     Reachable,
     Unreachable,
@@ -418,9 +420,9 @@ impl App {
     }
 
     fn machine(&self, name: &str) -> Result<&Machine> {
-        self.machines()
-            .find(|m| m.name == name)
-            .context(format!("unknown machine {name}"))
+        self.machines().find(|m| m.name == name).ok_or_else(|| {
+            cli::Failure::new(format!("unknown machine {name}"), "drover config").into()
+        })
     }
 
     // A mate's log, owner list and goal.
@@ -488,7 +490,7 @@ impl App {
                 found = Some((k, cell));
             }
         }
-        found.context(format!("no task {raw}"))
+        found.ok_or_else(|| cli::Failure::new(format!("no task {raw}"), "drover agents").into())
     }
 
     async fn panes_on(&self, machine: &str) -> Vec<PaneId> {
@@ -1091,7 +1093,7 @@ impl App {
         };
         let terminal = matches!(action, Action::Screen(_) | Action::Keys(_));
         i.defer(http).await?;
-        let text = self.act(http, action).await?;
+        let text = self.act(http, action).await?.discord();
         let mut reply = edit(tail(&text, 1990));
         if terminal {
             reply = reply.components(key_rows());
@@ -1193,7 +1195,7 @@ impl App {
             }),
         };
         i.defer(http).await?;
-        let text = self.act(http, action).await?;
+        let text = self.act(http, action).await?.discord();
         i.edit_response(http, edit(tail(&text, 1990)).components(key_rows()))
             .await?;
         Ok(())
@@ -1712,18 +1714,10 @@ fn require_runtime() -> Result<()> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let out = match cli::parse(&args) {
-        Ok(cli::Invocation::Serve) => return fail(serve().await),
-        Ok(cli::Invocation::Help) => Ok(cli::HELP.into()),
-        Ok(cli::Invocation::Usage(text)) => Ok(text),
-        Ok(cli::Invocation::Run(Action::Watch)) => return fail(control::watch_client().await),
-        Ok(cli::Invocation::Run(action)) => control::send(&action).await,
-        Err(e) => Err(e),
-    };
-    match out {
-        Ok(text) => println!("{text}"),
-        Err(e) => fail(Err(e)),
+    if args.first().is_some_and(|a| a == "serve") {
+        return fail(serve().await);
     }
+    std::process::exit(cli::run(cli::parse(&args)).await);
 }
 
 fn fail(r: Result<()>) {

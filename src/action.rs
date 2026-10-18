@@ -1,4 +1,5 @@
-// What drover does, once. Discord and the terminal both build an Action and print the text run returns.
+// What drover does, once. Discord and the terminal both build an Action; Discord posts the
+// Reply as text, and the terminal prints it as TOON.
 
 use std::{
     hash::{BuildHasher, Hasher, RandomState},
@@ -160,6 +161,113 @@ fn remove_scout_dir(root: &Path, id: &str) -> Result<()> {
     }
 }
 
+// What an action answers. `Text` is a command not converted yet: both sides print it as it is.
+// The rest are data: the terminal prints them as TOON and Discord as `discord` renders them.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum Reply {
+    Text(String),
+    Agents(Agents),
+    Config(Config),
+}
+
+impl Reply {
+    #[must_use]
+    pub fn discord(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Agents(a) => a.discord(),
+            Self::Config(c) => c.discord(),
+        }
+    }
+}
+
+const AGENTS_HELP: [&str; 3] = [
+    "drover screen --pane <pane>",
+    "drover send --pane <pane> --text <text>",
+    "drover attach --machine <machine> --pane <pane>",
+];
+
+#[derive(Serialize)]
+pub struct Agents {
+    pub machines: Vec<MachineReach>,
+    pub agents: Vec<AgentRow>,
+    pub help: [&'static str; 3],
+}
+
+#[derive(Serialize)]
+pub struct MachineReach {
+    pub name: String,
+    pub reach: Reachability,
+    // herdr's own words stay on Discord, where a person reads them
+    #[serde(skip)]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct AgentRow {
+    pub machine: String,
+    pub pane: String,
+    pub harness: String,
+    pub status: Status,
+    pub cwd: String,
+    #[serde(skip)]
+    pub thread: Option<ChannelId>,
+}
+
+impl Agents {
+    fn discord(&self) -> String {
+        let mut lines = vec![];
+        for m in &self.machines {
+            lines.push(format!("**{}**", m.name));
+            if let Some(e) = &m.error {
+                lines.push(format!("unreachable: {e}"));
+            }
+            for a in self.agents.iter().filter(|a| a.machine == m.name) {
+                let bound = a.thread.map(|b| format!(" <#{b}>")).unwrap_or_default();
+                lines.push(format!(
+                    "`{} {}` {} {}{bound}",
+                    a.status.icon(),
+                    a.pane,
+                    a.harness,
+                    a.cwd
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+}
+
+#[derive(Serialize)]
+pub struct Config {
+    pub host: String,
+    pub remotes: Vec<String>,
+    pub channel: String,
+    pub repos: String,
+    pub state: &'static str,
+    pub journal: &'static str,
+    pub socket: String,
+}
+
+impl Config {
+    fn discord(&self) -> String {
+        let remotes = match self.remotes.is_empty() {
+            true => "none".into(),
+            false => self.remotes.join(", "),
+        };
+        [
+            format!("host: {}", self.host),
+            format!("remotes: {remotes}"),
+            format!("channel: <#{}>", self.channel),
+            format!("repos: {}", self.repos),
+            format!("state: {}", self.state),
+            format!("journal: {}", self.journal),
+            format!("socket: {}", self.socket),
+        ]
+        .join("\n")
+    }
+}
+
 // What became of a prompt.
 pub enum Sent {
     Now,
@@ -224,14 +332,14 @@ impl std::fmt::Display for MateName {
 }
 
 impl App {
-    pub async fn act(&self, http: &Http, action: Action) -> Result<String> {
-        match action {
+    pub async fn act(&self, http: &Http, action: Action) -> Result<Reply> {
+        let text = match action {
+            Action::Agents => return Ok(Reply::Agents(self.cmd_agents().await)),
+            Action::Config => return Ok(Reply::Config(self.config())),
             Action::New(n) => self.cmd_new(http, &n).await,
             Action::Attach(a) => self.cmd_attach(http, &a).await,
-            Action::Agents => self.cmd_agents().await,
             Action::Worktrees => self.cmd_worktrees().await,
             Action::Usage => self.cmd_usage().await,
-            Action::Config => Ok(self.config()),
             Action::Snapshot => self.snapshot().await,
             Action::Watch => bail!("watch streams over the control socket"),
             Action::Complete(c) => self.cmd_complete(c).await,
@@ -271,7 +379,8 @@ impl App {
                 true => format!("removed #{}", r.id),
                 false => format!("no journal entry #{}", r.id),
             }),
-        }
+        };
+        text.map(Reply::Text)
     }
 
     async fn cmd_new(&self, http: &Http, n: &New) -> Result<String> {
@@ -483,33 +592,42 @@ impl App {
         }
     }
 
-    async fn cmd_agents(&self) -> Result<String> {
-        let mut lines = vec![];
+    async fn cmd_agents(&self) -> Agents {
+        let mut machines = vec![];
+        let mut agents = vec![];
         for m in self.machines() {
-            lines.push(format!("**{}**", m.name));
             let list = match herdr::agents(m).await {
                 Ok(list) => list,
                 Err(e) => {
-                    lines.push(format!("unreachable: {e}"));
+                    machines.push(MachineReach {
+                        name: m.name.clone(),
+                        reach: Reachability::Unreachable,
+                        error: Some(e.to_string()),
+                    });
                     continue;
                 }
             };
+            machines.push(MachineReach {
+                name: m.name.clone(),
+                reach: Reachability::Reachable,
+                error: None,
+            });
             for a in list {
-                let bound = self
-                    .thread_on(&m.name, &a.pane_id)
-                    .await
-                    .map(|b| format!(" <#{b}>"))
-                    .unwrap_or_default();
-                let icon = a.agent_status.icon();
-                lines.push(format!(
-                    "`{icon} {}` {} {}{bound}",
-                    a.pane_id.0,
-                    a.agent,
-                    home(&a.cwd)
-                ));
+                agents.push(AgentRow {
+                    machine: m.name.clone(),
+                    thread: self.thread_on(&m.name, &a.pane_id).await,
+                    pane: a.pane_id.0,
+                    harness: a.agent,
+                    status: a.agent_status,
+                    cwd: home(&a.cwd),
+                });
             }
         }
-        Ok(lines.join("\n"))
+        Agents {
+            machines,
+            agents,
+            help: AGENTS_HELP,
+        }
     }
 
     async fn cmd_complete(&self, what: Candidates) -> Result<String> {
@@ -594,28 +712,16 @@ impl App {
     }
 
     // What this service runs with, so a terminal or an agent can see the setup without the .env.
-    fn config(&self) -> String {
-        let remotes: Vec<&str> = self.remotes.iter().map(|m| m.name.as_str()).collect();
-        let remotes = match remotes.is_empty() {
-            true => "none".into(),
-            false => remotes.join(", "),
-        };
-        [
-            format!("host: {}", self.host.name),
-            format!("remotes: {remotes}"),
-            format!("channel: <#{}>", self.channel),
-            format!(
-                "repos: {}",
-                std::env::var("REPOS_ROOT").unwrap_or_else(|_| "~/.drover-workspace".into())
-            ),
-            format!("state: {STATE}"),
-            "journal: journal.db".into(),
-            format!(
-                "socket: {}",
-                control::path().map_or_else(|e| e.to_string(), |p| p.display().to_string())
-            ),
-        ]
-        .join("\n")
+    fn config(&self) -> Config {
+        Config {
+            host: self.host.name.clone(),
+            remotes: self.remotes.iter().map(|m| m.name.clone()).collect(),
+            channel: self.channel.to_string(),
+            repos: std::env::var("REPOS_ROOT").unwrap_or_else(|_| "~/.drover-workspace".into()),
+            state: STATE,
+            journal: "journal.db",
+            socket: control::path().map_or_else(|e| e.to_string(), |p| p.display().to_string()),
+        }
     }
 
     // A prompt from the terminal: the same path as a Discord message in the thread.
@@ -1033,6 +1139,82 @@ mod tests {
         remove_scout_dir(&root, "scout-abc123")?;
         std::fs::remove_dir_all(&root)?;
         Ok(())
+    }
+
+    // The text the old String replies posted, for the same desk.
+    #[test]
+    fn agents_and_config_post_the_same_discord_text() {
+        let row = |machine: &str, pane: &str, status, thread| AgentRow {
+            machine: machine.into(),
+            pane: pane.into(),
+            harness: "claude".into(),
+            status,
+            cwd: "~/Developer/drover".into(),
+            thread,
+        };
+        let agents = Agents {
+            machines: vec![
+                MachineReach {
+                    name: "host".into(),
+                    reach: Reachability::Reachable,
+                    error: None,
+                },
+                MachineReach {
+                    name: "m2".into(),
+                    reach: Reachability::Unreachable,
+                    error: Some("ssh: connect timed out".into()),
+                },
+                MachineReach {
+                    name: "m3".into(),
+                    reach: Reachability::Reachable,
+                    error: None,
+                },
+            ],
+            agents: vec![
+                row("host", "w1:p1", Status::Idle, Some(ChannelId::new(42))),
+                row("host", "w2:p1", Status::Blocked, None),
+            ],
+            help: AGENTS_HELP,
+        };
+        let agents = Reply::Agents(agents);
+        // the terminal sees no thread and no herdr error text
+        assert_eq!(
+            serde_json::to_value(&agents).map(|v| toon::encode(&v)).ok(),
+            Some(
+                "agents[2]{cwd,harness,machine,pane,status}:\n  ~/Developer/drover,claude,host,\"w1:p1\",idle\n  \
+                 ~/Developer/drover,claude,host,\"w2:p1\",blocked\nmachines[3]{name,reach}:\n  host,reachable\n  \
+                 m2,unreachable\n  m3,reachable\nhelp[3]:\n  - drover screen --pane <pane>\n  - \
+                 drover send --pane <pane> --text <text>\n  - drover attach --machine <machine> --pane <pane>\n"
+                    .into()
+            )
+        );
+        assert_eq!(
+            agents.discord(),
+            "**host**\n`○ w1:p1` claude ~/Developer/drover <#42>\n`◆ w2:p1` claude ~/Developer/drover\n\
+             **m2**\nunreachable: ssh: connect timed out\n**m3**"
+        );
+
+        let config = |remotes: Vec<String>| Config {
+            host: "host".into(),
+            remotes,
+            channel: "7".into(),
+            repos: "~/.drover-workspace".into(),
+            state: STATE,
+            journal: "journal.db",
+            socket: "/home/u/.local/state/drover/drover.sock".into(),
+        };
+        let text = |remotes: &str| {
+            format!(
+                "host: host\nremotes: {remotes}\nchannel: <#7>\nrepos: ~/.drover-workspace\n\
+                 state: state.json\njournal: journal.db\nsocket: /home/u/.local/state/drover/drover.sock"
+            )
+        };
+        assert_eq!(Reply::Config(config(vec![])).discord(), text("none"));
+        assert_eq!(
+            Reply::Config(config(vec!["m2".into(), "m3".into()])).discord(),
+            text("m2, m3")
+        );
+        assert_eq!(Reply::Text("sent".into()).discord(), "sent");
     }
 
     #[test]
