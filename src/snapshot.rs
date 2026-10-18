@@ -1,4 +1,4 @@
-// The desk as one JSON document, for the dashboard and `drover snapshot`. Read only: it holds no state of its own.
+// The desk as one JSON document, for `drover snapshot`. Read only: it holds no state of its own.
 
 use std::{collections::BTreeSet, path::Path};
 

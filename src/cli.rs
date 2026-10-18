@@ -42,7 +42,7 @@ Commands (Discord command in brackets):
   agents     [/agents] agents on every machine, with the Discord thread if bound
   worktrees  [/worktrees] worktrees on every machine
   usage      [/usage] usage of each agent on every machine
-  snapshot   the desk as JSON: machines, tasks, mates, escalations (what the dashboard reads)
+  snapshot   the desk as JSON: machines, tasks, mates, escalations
   screen     --pane P
              [/screen] the terminal of a task's agent (--thread T also works)
   keys       --pane P --keys \"esc shift+tab enter\"

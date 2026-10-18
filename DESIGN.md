@@ -99,22 +99,15 @@ drover is also a terminal tool. `drover help` is the full reference, for humans 
 
 ## Events
 
-drover appends one line per event to a mate's log at `mates/state/<name>/log`: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `brief`, `escalated`, `crew` and `closed`. A `crew` line is news from a crewmate the mate owns (a reply, a dialog, an exit), which drover also sends to the mate's pane, or queues behind its turn. The log is what you read to see what happened. The dashboard is a view over it.
+drover appends one line per event to a mate's log at `mates/state/<name>/log`: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `brief`, `escalated`, `crew` and `closed`. A `crew` line is news from a crewmate the mate owns (a reply, a dialog, an exit), which drover also sends to the mate's pane, or queues behind its turn. The log is what you read to see what happened. `drover snapshot` is a view over it.
 
-## Dashboard
+## Snapshot
 
-A read-only view of the desk in a browser, served over the network. It is a client of the action layer, like Discord and the terminal, and it holds no state of its own.
+The desk as read-only JSON, for tools outside drover. It is a client of the action layer, like Discord and the terminal, and it holds no state of its own.
 
-- Off unless `DASHBOARD_PORT` is set. It also needs `DASHBOARD_TOKEN`, letters and digits only, or it is not served. It listens on every interface, so the LAN and the tailnet reach it. Every page and stream request needs `?token=<DASHBOARD_TOKEN>`, checked in constant time. The page takes the token out of the address bar once read. Tailscale encrypts the traffic on a tailnet. On a LAN it is plain HTTP, and the token and the desk's text cross the wire in clear.
-- Limits: at most 32 open connections, 8 KiB for a request head, 10 s to send it. Headers are dropped after the request line. A refused connection gets 503.
-- Every response carries `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and a CSP that allows scripts and connections only from the page's own origin. The script is `/app.js`, a separate file, which holds no secret and loads without the token.
-- `Action::Snapshot` builds the desk as JSON from the tasks in memory and from each mate's `goal.md` and log. `drover snapshot` prints the same document. It writes nothing and runs no shell.
-- One task computes the snapshot once per save, with changes within 100 ms going out as one. Every stream shares that result. A stream gets the current snapshot on connect, then each change, and a comment line every 15 s when nothing changed, so a dead client fails on write.
-- `web/dashboard.html` and `web/dashboard.js` are embedded with `include_str!`. No build step, no npm, no remote fonts, no framework.
-- The desk view shows the flow, the escalations, the mates and the direct tasks. A mate view shows its goal, its crew, its log, and how it evolved: one lane per crewmate, placed on a shared time axis from the log's `started`, `linked`, `crew` and `closed` lines, which name their pane first. The mate's own lane holds its notes, escalations and owner changes.
-- A harness is shown by name. A field a harness cannot supply, such as model, context fill or tokens, is absent, not guessed. Usage is not in the snapshot yet. When it comes, each harness's own script reads it, and the result is cached.
-- Read only. Answering a dialog, taking a pane and closing a task come later, through the same actions Discord and the terminal use.
-- The lanes show what happened, not each node's round or check. The mate log has no node, round or check, so those become `key=value` fields on the same line, for example `1781600000 crew node=docs round=2 check=fail pane=crew:drover-docs`. Still one line per event, still grep-friendly.
+- `Action::Snapshot` builds the desk from the tasks in memory and from each mate's `goal.md` and log. `drover snapshot` prints it. It writes nothing and runs no shell.
+- A harness is shown by name. A field a harness cannot supply, such as model, context fill or tokens, is absent, not guessed. Usage is not in the snapshot yet.
+- The mate log has no node, round or check, so those would become `key=value` fields on the same line, for example `1781600000 crew node=docs round=2 check=fail pane=crew:drover-docs`. Still one line per event, still grep-friendly.
 
 ## Cleanup
 
@@ -169,5 +162,3 @@ All eleven steps are built, one commit each on the `mates` branch. Nothing is pu
 - A crewmate a mate starts with plain `drover-wt` and `herdr` is not linked. Only `drover new --mate` and `drover link` link.
 - A scout is owned by the desk user, not by a scout. Scouts have no owner of their own.
 - Mates run on the host only. Remote machines have no mates.
-- The mate log has no node, round or check fields yet, so the dashboard cannot draw a goal's evolution (see Dashboard).
-- The dashboard cannot act yet. It shows the desk and nothing more.
