@@ -36,8 +36,8 @@ goal: <one paragraph: what the desk wants and why>
 done when: <the check for the whole goal>
 
 nodes:
-- fix: drover main on meerkat, claude sonnet: <task>. check: cargo test
-- docs: after fix, drover main on meerkat, claude haiku: <task>. check: <command>
+- fix: drover main on meerkat, claude sonnet, review: code: <task>. check: cargo test
+- docs: after fix, drover main on meerkat, claude haiku, review: none: <task>. check: <command>
 
 facts: <what the desk said, who owns what, what is already done>
 glossary: <any word that could mean two things, e.g. MIT: the branch, not the license>
@@ -62,6 +62,18 @@ Pick the agent and model per node with `--agent` and `--model`. Spend the strong
 
 Move a node up one model when it fails a round for lack of skill, not for lack of facts. Lack of facts is a brief problem: fix the brief.
 
+## Review levels
+
+Every node has `review: none | code | adversarial`, set at dispatch. Ask who else consumes the result or is hurt by a mistake in it. Most nodes are `none`: a review costs a second crewmate.
+
+| Level | When | Examples |
+|---|---|---|
+| `none` | only the desk reads it, and a mistake shows at once | read-only or browse-only work, docs, scripts |
+| `code` | a mistake can cost real resources or safety, though nothing else reuses it | a leak, a long-running loop, robot motion |
+| `adversarial` | something else reuses what it writes, and a mistake there is silent | data, formats or contracts: an editor over shared data, a wire or file format another process decodes |
+
+Raise a level after a failed round. Never lower one.
+
 ## Playbooks
 
 ### Dispatch
@@ -79,12 +91,20 @@ Each crew message is one round for its node.
 
 1. `QUESTION:` answer it from `goal.md` or the code if you can, with `drover send --pane <id> --text "..."`. If you cannot, escalate it, and leave the node waiting.
 2. `DONE:` run or read the check yourself. Read the diff in its worktree. Check it against the node's check and against out of scope.
-3. If it passes, mark the node passed in `goal.md`, and start the nodes that were waiting on it.
+3. If it passes and `review` is `none`, mark the node passed in `goal.md`, and start the nodes that were waiting on it. Otherwise run Review first: the node passes on `VERDICT: pass`.
 4. If it does not pass, send the single next step with `drover send`. Say what failed, not how to fix it.
 5. A dialog: read it with `drover screen`. Answer it with `drover keys` only if the brief covers it; otherwise escalate.
 6. An exit before the check passed: read the screen, then restart the node or escalate.
 7. Three rounds on a node without progress: escalate, saying what was tried and what each round showed.
 8. When every node has passed and the goal's own check passes, escalate once: `DONE:` the goal, what changed, what was checked, and the pane ids. Then wait for the desk.
+
+### Review
+
+1. Start a reviewer on the implementer's branch: `drover new` with the same repo and branch, `--model opus` for `adversarial`, `sonnet` for `code`, another model family if the harness allows, and `--mate <your name>`.
+2. Brief it: the goal, the node's task, out of scope, `git diff main...<branch>`, and the claims in the implementer's `DONE:`. It reads and runs, and edits nothing. For `adversarial`, name what to break: a field the other side decodes, a change mid-run, a race on shared state.
+3. Its check: findings with `file:line` and a command that shows each, ending in `VERDICT: pass` or `VERDICT: fail`, and `git status --porcelain` empty.
+4. On `fail`, send the implementer the findings as the next step, one at a time. A claim with no test behind it is `unverified`: escalate it.
+5. One adversarial round per node. A second needs the desk.
 
 ### Handoff
 
