@@ -1,0 +1,38 @@
+#!/bin/sh
+# Bump the version in Cargo.toml and Cargo.lock from a commit message, commit and tag it.
+# usage: drover-bump [--dry-run] [subject [body]]   (default: the message of HEAD)
+set -eu
+
+dry=0
+if [ "${1:-}" = --dry-run ]; then dry=1; shift; fi
+if [ $# -ge 1 ]; then
+  subject=$1 body=${2:-}
+else
+  subject=$(git log -1 --format=%s) body=$(git log -1 --format=%b)
+fi
+
+current=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
+IFS=. read -r major minor patch <<EOV
+$current
+EOV
+
+if printf '%s\n' "$subject" | grep -Eq '^[a-z]+(\([^)]*\))?!:' ||
+  printf '%s\n' "$body" | grep -q 'BREAKING CHANGE'; then
+  next="$((major + 1)).0.0"
+elif printf '%s\n' "$subject" | grep -Eq '^feat(\([^)]*\))?:'; then
+  next="$major.$((minor + 1)).0"
+else
+  next="$major.$minor.$((patch + 1))"
+fi
+
+if [ "$dry" = 1 ]; then
+  echo "$next"
+  exit 0
+fi
+
+sed -i "0,/^version = .*/s//version = \"$next\"/" Cargo.toml
+sed -i "/^name = \"drover\"\$/{n;s/.*/version = \"$next\"/}" Cargo.lock
+git add Cargo.toml Cargo.lock
+git commit -m "chore: release v$next [skip ci]"
+git tag "v$next"
+echo "$next"

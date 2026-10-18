@@ -20,3 +20,20 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  bump:
+    needs: check
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: bump, commit and tag
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          # the bump commit is skipped by [skip ci], this guards a manual rerun
+          case "$(git log -1 --format=%s)" in "chore: release v"*) exit 0 ;; esac
+          bin/drover-bump
+          git push origin HEAD:main --follow-tags

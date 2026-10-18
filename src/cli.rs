@@ -697,7 +697,10 @@ pub async fn run(parsed: Result<Invocation, Failure>) -> i32 {
     let (spec, action) = match parsed {
         Err(f) => return fail(&f, 2),
         Ok(Invocation::Version) => {
-            println!("{}", env!("CARGO_PKG_VERSION"));
+            match env!("DROVER_GIT_SHA") {
+                "" => println!("{}", env!("CARGO_PKG_VERSION")),
+                sha => println!("{} ({sha})", env!("CARGO_PKG_VERSION")),
+            }
             return 0;
         }
         Ok(Invocation::Help) => {
