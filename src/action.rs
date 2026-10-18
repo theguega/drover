@@ -1061,7 +1061,7 @@ impl App {
         })
     }
 
-    async fn cmd_usage(&self) -> Result<Usage> {
+    pub async fn cmd_usage(&self) -> Result<Usage> {
         let jobs: Vec<_> = self
             .machines()
             .cloned()
