@@ -64,15 +64,13 @@ Move a node up one model when it fails a round for lack of skill, not for lack o
 
 ## Review levels
 
-Every node has `review: none | code | adversarial`, set at dispatch. A review costs a second crewmate, so the default is `none`. Size, file count and effort are never a reason: a rename across fifty files is `none` when the compiler and tests are its check.
+Every node has `review: none | code | adversarial`, set at dispatch. Ask who else consumes the result or is hurt by a mistake in it. Most nodes are `none`: a review costs a second crewmate.
 
-Ask in order:
-
-1. Would the check catch a wrong result? A test, compiler, diff or log line that fails when the work is wrong: `none`. If the check is weak, strengthen the check before you add a review.
-2. If not, what does a miss cost, and who pays?
-   - Others reuse it, and a miss is silent and durable (data, formats or contracts that something else reads or decodes): `adversarial`.
-   - It harms the world and the check cannot see it (resource leaks, safety, real hardware): `code`.
-   - Only the desk reads it, and a miss shows on first use: `none`.
+| Level | When | Examples |
+|---|---|---|
+| `none` | only the desk reads it, and a mistake shows at once | read-only or browse-only work, docs, scripts |
+| `code` | a mistake can cost real resources or safety, though nothing else reuses it | a leak, a long-running loop, robot motion |
+| `adversarial` | something else reuses what it writes, and a mistake there is silent | data, formats or contracts: an editor over shared data, a wire or file format another process decodes |
 
 Raise a level after a failed round. Never lower one.
 
@@ -102,7 +100,7 @@ Each crew message is one round for its node.
 
 ### Review
 
-1. Review only what the level is about: the files that carry the contract or the risk, not the whole diff. Start a reviewer on the implementer's branch: `drover new` with the same repo and branch, `--model opus` for `adversarial`, `sonnet` for `code`, another model family if the harness allows, and `--mate <your name>`.
+1. Review only what the level is about: the files that carry the contract or the risk, not the whole diff. Start a reviewer on the implementer's branch: `drover new` with the same repo and branch and `--mate <your name>`.
 2. Brief it: the goal, the node's task, out of scope, `git diff main...<branch> -- <those files>`, and the claims in the implementer's `DONE:`. It reads and runs, and edits nothing. For `adversarial`, name what to break: a field the other side decodes, a change mid-run, a race on shared state.
 3. Its check: findings with `file:line` and a command that shows each, ending in `VERDICT: pass` or `VERDICT: fail`, and `git status --porcelain` empty.
 4. On `fail`, send the implementer the findings as the next step, one at a time. A claim with no test behind it is `unverified`: escalate it.
