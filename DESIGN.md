@@ -99,7 +99,16 @@ drover is also a terminal tool. `drover help` is the full reference, for humans 
 
 ## Events
 
-drover appends one line per event to a mate's log at `mates/state/<name>/log`: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `brief`, `escalated`, `crew` and `closed`. A `crew` line is news from a crewmate the mate owns (a reply, a dialog, an exit), which drover also sends to the mate's pane, or queues behind its turn. The log is what you read to see what happened. A UI, if built, is only a view over it.
+drover appends one line per event to a mate's log at `mates/state/<name>/log`: `<unix-time> <event> <detail>`. Events are `started`, `linked`, `owner`, `brief`, `escalated`, `crew` and `closed`. A `crew` line is news from a crewmate the mate owns (a reply, a dialog, an exit), which drover also sends to the mate's pane, or queues behind its turn. The log is what you read to see what happened. `drover snapshot` is a view over it.
+
+## Snapshot
+
+The desk as read-only JSON, for tools outside drover. It is a client of the action layer, like Discord and the terminal, and it holds no state of its own.
+
+- `Action::Snapshot` builds the desk from the tasks in memory and from each mate's `goal.md` and log. `drover snapshot` prints it. It writes nothing and runs no shell.
+- `drover watch` prints the snapshot as one JSON line, then one line per change, until the client exits. The service builds each line when `App.changed` fires, which every save notifies; changes that land during a build coalesce into the next line. `bin/drover-ssh` execs over `ssh -T`, so it streams the same way.
+- A harness is shown by name. A field a harness cannot supply, such as model, context fill or tokens, is absent, not guessed. Usage is not in the snapshot yet.
+- The mate log has no node, round or check, so those would become `key=value` fields on the same line, for example `1781600000 crew node=docs round=2 check=fail pane=crew:drover-docs`. Still one line per event, still grep-friendly.
 
 ## Cleanup
 
@@ -124,7 +133,6 @@ drover appends one line per event to a mate's log at `mates/state/<name>/log`: `
 - drover calls no model.
 - No sandbox or container. Panes run as your account, and agents run with your permissions.
 - No plugin system until a second real use exists.
-- No dashboard until the log proves insufficient.
 - No orchestration across two hosts at once. One host runs drover.
 
 ## Decided
@@ -155,4 +163,3 @@ All eleven steps are built, one commit each on the `mates` branch. Nothing is pu
 - A crewmate a mate starts with plain `drover-wt` and `herdr` is not linked. Only `drover new --mate` and `drover link` link.
 - A scout is owned by the desk user, not by a scout. Scouts have no owner of their own.
 - Mates run on the host only. Remote machines have no mates.
-- The mate log is plain text. There is no view of it yet.

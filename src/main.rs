@@ -70,6 +70,7 @@ impl<T> WithContext<T> for Option<T> {
 mod action;
 mod cli;
 mod control;
+mod snapshot;
 
 // ── config ─────────────────────────────────────────────────
 
@@ -326,6 +327,13 @@ fn parse_state(s: &str) -> Result<BTreeMap<String, Task>> {
 type Cell = Arc<Mutex<Task>>;
 type Tasks = HashMap<String, Cell>;
 
+/// Whether a machine's event watcher could subscribe, as the snapshot shows it.
+#[derive(Clone, Copy, PartialEq)]
+enum Reachability {
+    Reachable,
+    Unreachable,
+}
+
 struct App {
     token: String,
     guild: GuildId,
@@ -340,6 +348,10 @@ struct App {
     started: AtomicBool,
     /// Watchers resubscribe when the set of panes for a machine changes.
     wake: Notify,
+    /// Every save notifies this, so `drover watch` streams a new snapshot.
+    changed: Notify,
+    /// Per machine, from its watcher. A machine never tried is absent.
+    reachability: StdMutex<HashMap<String, Reachability>>,
     /// Saves share one temp file, so they take turns.
     saving: Mutex<()>,
 }
@@ -384,8 +396,21 @@ impl App {
             mates: std::env::current_dir()?.join("mates"),
             started: AtomicBool::new(false),
             wake: Notify::new(),
+            changed: Notify::new(),
+            reachability: StdMutex::new(HashMap::new()),
             saving: Mutex::new(()),
         })
+    }
+
+    fn set_reachability(&self, machine: &str, now: Reachability) {
+        let before = self
+            .reachability
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(machine.into(), now);
+        if before != Some(now) {
+            self.changed.notify_waiters();
+        }
     }
 
     fn machines(&self) -> impl Iterator<Item = &Machine> {
@@ -498,6 +523,7 @@ impl App {
         if let Err(e) = written {
             eprintln!("save {STATE}: {e}");
         }
+        self.changed.notify_waiters();
     }
 
     async fn live_cell(&self, machine: &str, pane: &PaneId) -> Option<(String, Cell)> {
@@ -1612,6 +1638,7 @@ async fn watch_machine(app: Arc<App>, http: Arc<Http>, m: Machine) {
             Ok(()) => backoff = Duration::from_secs(1),
             Err(e) => {
                 eprintln!("events {}: {e}", m.name);
+                app.set_reachability(&m.name, Reachability::Unreachable);
                 sleep(backoff).await;
                 backoff = (backoff.saturating_mul(2)).min(Duration::from_secs(30));
             }
@@ -1642,6 +1669,7 @@ async fn watch_session(app: &App, http: &Http, m: &Machine) -> Result<()> {
         Err(_) => watched.clone(),
     };
     let mut conn = socket::Events::subscribe(m.ssh(), &sub).await?;
+    app.set_reachability(&m.name, Reachability::Reachable);
     // subscribe first, then read, so nothing between the two is missed
     app.reconcile(http, &m.name).await;
 
@@ -1688,6 +1716,7 @@ async fn main() {
         Ok(cli::Invocation::Serve) => return fail(serve().await),
         Ok(cli::Invocation::Help) => Ok(cli::HELP.into()),
         Ok(cli::Invocation::Usage(text)) => Ok(text),
+        Ok(cli::Invocation::Run(Action::Watch)) => return fail(control::watch_client().await),
         Ok(cli::Invocation::Run(action)) => control::send(&action).await,
         Err(e) => Err(e),
     };

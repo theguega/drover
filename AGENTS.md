@@ -11,8 +11,9 @@ src/herdr.rs    herdr calls per machine, drover-wt and transcripts over sh / ssh
 src/format.rs   agent markdown to discord: tables, rules, fences cut across messages
 src/journal.rs  journal store, search, context for new tasks
 src/action.rs   every command as one `Action`, run once for Discord and the terminal
-src/control.rs  unix socket the service listens on, and the client `drover <cmd>` uses
+src/control.rs  unix socket the service listens on, and the client `drover <cmd>` uses; `watch` holds it open
 src/cli.rs      argv to `Action`, and `drover help`
+src/snapshot.rs the desk as JSON, read only: what `drover snapshot` and `drover watch` show
 completions/    bash and zsh completion, opt-in (README, Completion); values come from `drover complete`
 bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not from dotfiles)
 skills/drover/  the drover skill, copied by hand into ~/.agents/skills
