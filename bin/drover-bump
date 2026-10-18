@@ -34,5 +34,5 @@ sed -i "0,/^version = .*/s//version = \"$next\"/" Cargo.toml
 sed -i "/^name = \"drover\"\$/{n;s/.*/version = \"$next\"/}" Cargo.lock
 git add Cargo.toml Cargo.lock
 git commit -m "chore: release v$next [skip ci]"
-git tag "v$next"
+git tag -a "v$next" -m "v$next"
 echo "$next"
