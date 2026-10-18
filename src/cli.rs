@@ -576,6 +576,7 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
         "screen" => Action::Screen(Look {
             thread: flags.target()?,
             full: flags.on("full"),
+            discord: false,
         }),
         "keys" => Action::Keys(Keys {
             thread: flags.target()?,

@@ -199,6 +199,8 @@ struct Task {
     session: Option<SessionId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_reply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reply: Option<Excerpt>, // the end of the last turn, for the snapshot
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_msg: Option<MessageId>, // message that carries the state reaction
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -207,6 +209,26 @@ struct Task {
     queued: Option<String>, // one Discord prompt waiting while the agent works
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     inbox: Vec<String>, // crewmates' news waiting for their mate's turn to end
+}
+
+// The start of a reply and how long it was, in characters.
+#[derive(Clone, Serialize, Deserialize)]
+struct Excerpt {
+    text: String,
+    chars: usize,
+}
+
+// Characters of a reply the snapshot keeps.
+const REPLY_EXCERPT: usize = 300;
+
+impl Excerpt {
+    fn of(reply: &str) -> Self {
+        let reply = reply.trim();
+        Self {
+            text: head(reply, REPLY_EXCERPT),
+            chars: reply.chars().count(),
+        }
+    }
 }
 
 // What state.json may hold: this format, or the flags of the TypeScript drover.
@@ -230,6 +252,8 @@ struct Stored {
     status: Option<Status>,
     session: Option<String>,
     last_reply: Option<String>,
+    #[serde(default)]
+    reply: Option<Excerpt>,
     prompt_msg: Option<MessageId>,
     dialog_msg: Option<MessageId>,
     queued: Option<String>,
@@ -293,6 +317,7 @@ impl From<Stored> for Task {
             phase,
             status: s.status,
             last_reply: s.last_reply,
+            reply: s.reply,
             prompt_msg: s.prompt_msg,
             dialog_msg: s.dialog_msg,
             queued: s.queued,
@@ -1110,7 +1135,11 @@ impl App {
             }),
             "take" => Action::Take(Target { thread }),
             "release" => Action::Release(Target { thread }),
-            "screen" => Action::Screen(Look { thread, full: true }),
+            "screen" => Action::Screen(Look {
+                thread,
+                full: true,
+                discord: true,
+            }),
             "keys" => Action::Keys(Keys {
                 thread,
                 keys: req(i, "keys")?
@@ -1237,7 +1266,11 @@ impl App {
         };
         let thread = i.channel_id.to_string();
         let action = match k {
-            "refresh" => Action::Screen(Look { thread, full: true }),
+            "refresh" => Action::Screen(Look {
+                thread,
+                full: true,
+                discord: true,
+            }),
             key => Action::Keys(Keys {
                 thread,
                 keys: vec![key.into()],
@@ -1512,6 +1545,9 @@ impl App {
                 post(http, th, &format!("```\n{}\n```", tail(&screen, 5000))).await?;
             }
             said = Some(screen);
+        }
+        if let Some(s) = &said {
+            t.reply = Some(Excerpt::of(s));
         }
         self.drain_queue(http, &mut t, m).await?;
         // the end of a turn holds its question or result
@@ -1804,8 +1840,10 @@ mod tests {
         assert!(t.origin == Origin::Opened && t.session.is_none());
         assert!(t.role == Role::Task);
         assert_eq!(t.prompt_msg, Some(MessageId::new(456)));
+        assert!(t.reply.is_none());
 
         let mut term = t.clone();
+        term.reply = Some(Excerpt::of(&format!(" {} ", "é".repeat(400))));
         term.pane = PaneId("p2".into());
         term.thread = None;
         tasks.insert("host:p2".into(), term);
@@ -1816,7 +1854,12 @@ mod tests {
                 .is_some_and(|t| t.thread == Some(ChannelId::new(123))
                     && t.phase == Phase::Ending(Teardown::Remove))
         );
-        assert!(back.get("host:p2").is_some_and(|t| t.thread.is_none()));
+        assert!(back.get("host:p2").is_some_and(|t| {
+            t.thread.is_none()
+                && t.reply
+                    .as_ref()
+                    .is_some_and(|r| r.chars == 400 && r.text.chars().count() == 300)
+        }));
         Ok(())
     }
 

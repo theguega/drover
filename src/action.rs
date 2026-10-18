@@ -108,6 +108,9 @@ pub struct Look {
     pub thread: String,
     #[serde(default)]
     pub full: bool,
+    // a read that fails is text in the message, not an error
+    #[serde(default)]
+    pub discord: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -677,6 +680,7 @@ impl App {
             status: None,
             session: None,
             last_reply: None,
+            reply: None,
             prompt_msg,
             dialog_msg: None,
             queued: None,
@@ -788,6 +792,7 @@ impl App {
             status: Some(a.agent_status),
             session,
             last_reply,
+            reply: None,
             prompt_msg: None,
             dialog_msg: None,
             queued: None,
@@ -932,7 +937,12 @@ impl App {
             (t.machine.clone(), t.pane.clone(), t.status)
         };
         let m = self.machine(&machine)?;
-        let text = last_lines(&herdr::screen(m, &pane, 60).await?);
+        let raw = match herdr::screen(m, &pane, 60).await {
+            Ok(raw) => raw,
+            Err(e) if l.discord => format!("read failed: {e}"),
+            Err(e) => return Err(e.into()),
+        };
+        let text = last_lines(&raw);
         let chars = text.chars().count();
         let status = status.unwrap_or(Status::Unknown);
         let mut help = vec![];
@@ -1132,6 +1142,7 @@ impl App {
             status: None,
             session: None,
             last_reply: None,
+            reply: None,
             prompt_msg,
             dialog_msg: None,
             queued: None,
@@ -1203,6 +1214,7 @@ impl App {
             status: None,
             session: None,
             last_reply: None,
+            reply: None,
             prompt_msg,
             dialog_msg: None,
             queued: None,

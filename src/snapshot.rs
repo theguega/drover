@@ -98,6 +98,7 @@ fn task_json(key: &str, t: &Task) -> Value {
         },
         "phase": phase(&t.phase),
         "status": t.status.map(Status::as_str),
+        "reply": t.reply,
         "queued": t.queued.is_some(),
         "inbox": t.inbox.len(),
         "thread": t.thread.is_some(),

@@ -153,7 +153,7 @@ The desk as read-only JSON, for tools outside drover. It is a client of the acti
 
 - `Action::Snapshot` builds the desk from the tasks in memory and from each mate's `goal.md` and log. `drover snapshot` prints it. It writes nothing and runs no shell.
 - `drover watch` prints the snapshot as one JSON line, then one line per change, until the client exits. The service builds each line when `App.changed` fires, which every save notifies; changes that land during a build coalesce into the next line. `bin/drover-ssh` execs over `ssh -T`, so it streams the same way.
-- A task's last reply is not in the snapshot. drover stores only its id; the text is in the agent's transcript, which costs a shell per remote task, and `watch` builds a snapshot on every change. Keeping a 300-character excerpt when the turn ends would be the cheap way.
+- A task's `reply` is the first 300 characters of its last turn and the whole length in `chars`, kept on the task when the turn ends, so a snapshot reads no transcript. It is null until a turn ends under drover.
 - A harness is shown by name. A field a harness cannot supply, such as model, context fill or tokens, is absent, not guessed. Usage is not in the snapshot yet.
 - The mate log has no node, round or check, so those would become `key=value` fields on the same line, for example `1781600000 crew node=docs round=2 check=fail pane=crew:drover-docs`. Still one line per event, still grep-friendly.
 
