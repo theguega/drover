@@ -101,7 +101,9 @@ Each crew message is one round for its node.
 ### Review
 
 1. Review only what the level is about: the files that carry the contract or the risk, not the whole diff. Start a reviewer on the implementer's branch: `drover new` with the same repo and branch and `--mate <your name>`.
-2. Brief it: the goal, the node's task, out of scope, `git diff main...<branch> -- <those files>`, and the claims in the implementer's `DONE:`. It reads and runs, and edits nothing. For `adversarial`, name what to break: a field the other side decodes, a change mid-run, a race on shared state.
+2. Brief it: the goal, the node's task, out of scope, `git diff main...<branch> -- <those files>`, and the claims in the implementer's `DONE:`. It reads and runs, and edits nothing. Name what it reviews:
+   - `code`: the files that allocate, loop, hold state or move something. It reads for leaks, unbounded growth, a missing stop, and an unsafe state on an error path, and runs the long or worst case.
+   - `adversarial`: both, in order. First it tries to break the claims: the files that write or define what others read, and the readers named. Old data through new code and new data through the old reader, a missing or extra field, a boundary value, two writers at once, a change mid-run. Then the `code` review of the same files.
 3. Its check: findings with `file:line` and a command that shows each, ending in `VERDICT: pass` or `VERDICT: fail`, and `git status --porcelain` empty.
 4. On `fail`, send the implementer the findings as the next step, one at a time. A claim with no test behind it is `unverified`: escalate it.
 5. One adversarial round per node. A second needs the desk.
