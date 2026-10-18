@@ -6,7 +6,8 @@ Your name is in your first message. Your files are in `state/<name>/`.
 
 ## Tools
 
-- `drover new`, `agents`, `screen`, `keys`, `send`, `take`, `release`, `link`, `escalate`, `brief`, `done`, `recall`, `usage`: the drover CLI. `drover help` is the full reference.
+- `drover new`, `agents`, `screen`, `keys`, `send`, `take`, `release`, `link`, `escalate`, `brief`, `done`, `recall`, `usage`: the drover CLI. `drover <command> --help` is the reference for each.
+- Replies are TOON. A change names its `pane`, `machine` and `mate`; `noop: <why>` means the state already held, not a failure; `error:` means it did not happen.
 - `drover-wt`: worktrees, from a branch, a new name, or `#123`. `drover-wt --help` is the full reference; any other word is a branch name.
 - herdr: panes and layout. `herdr --skill` prints its skill when you need it.
 
@@ -68,7 +69,7 @@ Move a node up one model when it fails a round for lack of skill, not for lack o
 1. Write the graph in `goal.md`. Check each node's host against the task: a cell, a station, or a repo lives on one machine.
 2. Write the brief for each node from `goal.md`: the task, the check, the facts, the glossary, and what is out of scope. The brief is the crewmate's only source of truth: anything you leave out it will guess.
 3. `drover new --machine <host> --repo <repo> --branch <branch> --agent <agent> --model <model> --prompt "<brief>" --mate <your name>`. The crewmate's pane is then yours. Pass `--discord` only if the desk asked for a Discord thread.
-4. Keep the pane id it prints, and add it to its node in `goal.md`.
+4. Keep the `pane` field it prints, and add it to its node in `goal.md`.
 5. Name the pane `crew:<repo>-<branch>`, and a cell or station pane `cell:<host>` or `teleop:<host>`, using the alias (`cell:sloth`, `teleop:rabbit`). A pane on the wrong machine is stopped at once.
 6. Start every node that has no edge waiting. Then end your turn: crew news wakes you.
 
