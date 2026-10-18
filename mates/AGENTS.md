@@ -66,11 +66,13 @@ Move a node up one model when it fails a round for lack of skill, not for lack o
 
 Every node has `review: none | code | adversarial`, set at dispatch. Ask who else consumes the result or is hurt by a mistake in it. Most nodes are `none`: a review costs a second crewmate.
 
-| Level | When | Examples |
+| Level | Situation | Examples |
 |---|---|---|
-| `none` | only the desk reads it, and a mistake shows at once | read-only or browse-only work, docs, scripts |
-| `code` | a mistake can cost real resources or safety, though nothing else reuses it | a leak, a long-running loop, robot motion |
+| `none` | only the desk reads it, and a mistake shows at once, or the check fails when the work is wrong | read-only or browse-only work, docs, scripts |
+| `code` | a mistake can cost real resources or safety, and nothing else reuses it | a leak, a long-running loop, robot motion |
 | `adversarial` | something else reuses what it writes, and a mistake there is silent | data, formats or contracts: an editor over shared data, a wire or file format another process decodes |
+
+Both: a node that something else reuses and that can also harm resources or safety is `adversarial`, which includes the `code` review.
 
 Raise a level after a failed round. Never lower one.
 
