@@ -438,6 +438,15 @@ pub struct Usage {
     pub unavailable: Vec<Unavailable>,
     #[serde(skip)]
     pub lines: Vec<String>,
+    #[serde(skip)]
+    pub logins: Vec<Login>,
+}
+
+// A machine's claude account, and whether its token could be read there.
+pub struct Login {
+    pub machine: String,
+    pub account: String,
+    pub read: bool,
 }
 
 // A usage limit that resets: how much of it is used.
@@ -1072,6 +1081,7 @@ impl App {
             spend: vec![],
             unavailable: vec![],
             lines: vec![],
+            logins: vec![],
         };
         for job in jobs {
             let u = job.await?;
@@ -1079,6 +1089,27 @@ impl App {
             all.spend.extend(u.spend);
             all.unavailable.extend(u.unavailable);
             all.lines.extend(u.lines);
+            all.logins.extend(u.logins);
+        }
+        let read: Vec<_> = all
+            .logins
+            .iter()
+            .filter(|l| l.read)
+            .map(|l| &l.account)
+            .collect();
+        for l in all
+            .logins
+            .iter()
+            .filter(|l| !l.read && !read.contains(&&l.account))
+        {
+            all.lines.push(format!(
+                "**{}** *claude* unavailable: token not readable there",
+                l.machine
+            ));
+            all.unavailable.push(Unavailable {
+                machine: l.machine.clone(),
+                harness: "claude",
+            });
         }
         Ok(all)
     }
@@ -1796,6 +1827,7 @@ mod tests {
                 "*claude* plan limits".into(),
                 "*cursor* unavailable: x".into(),
             ],
+            logins: vec![],
         });
         assert_eq!(
             toon_of(&u),

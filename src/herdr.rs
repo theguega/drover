@@ -694,10 +694,22 @@ pub struct Extra {
     pub monthly_limit: f64,
 }
 
-// Plan limits, as Claude Code's /usage reads them. The token stays on the machine and goes to curl on stdin.
-const USAGE: &str = r#"c=$(cat ~/.claude/.credentials.json 2>/dev/null || security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null) || exit 3
-printf 'Authorization: Bearer %s' "$(printf %s "$c" | jq -r .claudeAiOauth.accessToken)" |
+// Plan limits, as Claude Code's /usage reads them, after a line with the login's account. The token stays on the machine and goes to curl on stdin.
+// macOS keeps the token in the keychain, locked over ssh; the file there is a leftover that only counts while it hasn't expired.
+const USAGE: &str = r#"jq -er .oauthAccount.accountUuid ~/.claude.json 2>/dev/null || exit 3
+c=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || cat ~/.claude/.credentials.json 2>/dev/null) || exit 4
+t=$(printf %s "$c" | jq -er '.claudeAiOauth | select(.expiresAt > now * 1000) | .accessToken') || exit 4
+printf 'Authorization: Bearer %s' "$t" |
 curl -sSf -m 10 -H @- -H 'anthropic-beta: oauth-2025-04-20' https://api.anthropic.com/api/oauth/usage"#;
+
+// Exit code of the claude script when the login is there but its token can't be read or has expired.
+const UNREAD: i32 = 4;
+
+// A claude login. Plan limits are per account, so one machine's read covers every machine on that account.
+pub struct Claude {
+    pub account: String,
+    pub usage: Option<Usage>,
+}
 
 /// Cursor's current billing period, as the editor's own usage view reads it.
 #[derive(Deserialize)]
@@ -769,8 +781,19 @@ async fn usage_of<T: serde::de::DeserializeOwned>(m: &Machine, script: &str) -> 
     }
 }
 
-pub async fn usage(m: &Machine) -> Result<Option<Usage>> {
-    usage_of(m, USAGE).await
+pub async fn usage(m: &Machine) -> Result<Option<Claude>> {
+    let o = sh(m, USAGE, SHORT).await?;
+    let (account, body) = o.out.split_once('\n').unwrap_or((&o.out, ""));
+    let usage = match o.code {
+        Some(0) => Some(serde_json::from_str(body)?),
+        Some(UNREAD) => None,
+        Some(ABSENT) => return Ok(None),
+        _ => return Err(failure(&o)),
+    };
+    Ok(Some(Claude {
+        account: account.trim().into(),
+        usage,
+    }))
 }
 
 pub async fn cursor_usage(m: &Machine) -> Result<Option<Cursor>> {

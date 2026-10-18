@@ -33,8 +33,8 @@ use tokio::{
 };
 
 use action::{
-    Action, Attach, Done, JournalList, JournalRemove, Keys, Look, Mate, MateName, New, Recall,
-    Scout, Sent, Spend, Target, Unavailable, Usage, Window,
+    Action, Attach, Done, JournalList, JournalRemove, Keys, Login, Look, Mate, MateName, New,
+    Recall, Scout, Sent, Spend, Target, Unavailable, Usage, Window,
 };
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
@@ -817,6 +817,7 @@ async fn machine_usage(m: &Machine) -> Usage {
         spend: vec![],
         unavailable: vec![],
         lines: vec![format!("**{}**", m.name)],
+        logins: vec![],
     };
     let machine = &m.name;
     let window = |out: &mut Usage, harness, name, pct: f64, reset: Option<i64>| {
@@ -849,7 +850,14 @@ async fn machine_usage(m: &Machine) -> Usage {
         });
     };
     let (claude, cursor) = tokio::join!(herdr::usage(m), herdr::cursor_usage(m));
-    match claude {
+    if let Ok(Some(c)) = &claude {
+        out.logins.push(Login {
+            machine: machine.clone(),
+            account: c.account.clone(),
+            read: c.usage.is_some(),
+        });
+    }
+    match claude.map(|c| c.and_then(|c| c.usage)) {
         Ok(None) => {}
         Ok(Some(u)) => {
             out.lines.push("*claude* plan limits".into());
