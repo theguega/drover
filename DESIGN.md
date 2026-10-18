@@ -91,11 +91,67 @@ drover is also a terminal tool. `drover help` is the full reference, for humans 
 
 - The service holds the state, so the CLI does not write state files. `drover <cmd>` sends one JSON line to the service over a unix socket in the state directory and prints the reply.
 - Clients and the host. Only the host runs the service, and its socket is local, so another machine cannot reach it. A client's `drover` is `bin/drover-ssh`: it runs the same command on the host in `DROVER_HOST` over ssh. It refuses `serve`, which would start a second Discord bot.
-- Discord and the socket call one action layer: a `Command` enum and one `run` function that returns text. Discord handlers only translate interactions into commands and post the text.
+- Discord and the socket call one action layer: an `Action` enum and one `act` function that returns a `Reply`. Discord handlers only translate interactions into actions and post `Reply::discord()`. The socket sends the reply as JSON, and the terminal prints it as TOON (`src/toon.rs`). `Reply::Text` carries a command not converted yet, printed as it is on both sides.
 - A task started from the CLI stays in the terminal by default; `--discord` (or `drover attach --pane <id> --discord` later) opens a Discord thread so the phone sees it too.
 - Argument parsing is hand-written. No new dependency.
 - `drover serve` runs the service. Any other first word is a CLI command, so `drover new …` and `drover mate …` need no flags.
 - The `drover` skill documents every command for agents, and lives in the single skills folder described under Layers.
+
+## Terminal output (AXI)
+
+The terminal is an [AXI](https://github.com/kunchenguid/axi): agents and other tools read it and turn it into the next command.
+
+- stdout is [TOON](https://toonformat.dev). `snapshot` and `watch` stay JSON, for programs. Fields come out in the order the reply builds them (serde_json's `preserve_order`), so the order is part of each record's design.
+- Errors are TOON on stdout too: `error: <what>` and `help: <command that fixes it>`. Exit 0 ok (a no-op too), 1 error, 2 usage error. A service error raised as `cli::Failure` carries its own `help`; any other falls back to `drover <cmd> --help`.
+- One `Spec` per command in `cli.rs` is the only list of its flags: parsing, the unknown-flag error, `--help`, and `drover help` read it. An unknown flag fails before anything else, naming the flag and the valid ones.
+- `drover` alone is the home view, built from the snapshot: `bin`, `description`, `desk` counts, `needs` (blocked agents, escalations), `help`. The counts are the live desk: a gone task is history and is not counted.
+- `-v`, `-V` and `--version` print the bare version.
+- Long text is cut to 1000 characters, with its whole length in `chars` and a `help` line for `--full`: a screen keeps its end, a journal entry its start. `--full` is declared only on commands that cut (`screen`, `journal`, `recall`). Discord asks for everything, so its text does not change.
+- A list capped at its limit says `count: 5 of 42`. An empty one says so in a line, such as `journal: 0 entries for drover`.
+- A command that changes the desk answers with the fields that feed the next command (`pane`, `machine`, `thread`, ...), then `help`. When the desired state already held it exits 0 with `noop: <why>` (`already open`, `already taken`, `already released`, `already ending`, `already gone`, `already closed`, `already running`) and changes nothing. Only a real failure exits 1. `keys` answers with the pane's screen, as `screen` does.
+- Converted: every command but `snapshot`, `watch` and `complete`, which stay JSON or bare names.
+
+### Field names
+
+One name per thing, the same in TOON, the snapshot JSON and help placeholders (`<pane>` is the value of a `pane` field). A list is one record per row.
+
+Field order, in every record: the id that feeds the next command first, then its status, then the rest, then long text last. A document ends with `help`. For example `agents{pane,machine,status,harness,cwd}`, `machines{name,reach}`, `flags{flag,default,about}`, `blocked{pane,machine,repo,branch}`, `escalations{mate,pane,at,text}`. Count maps keep a fixed key order with zeros shown.
+
+| Field | Is | Feeds |
+|---|---|---|
+| `machine` | a machine name, as `drover config` lists it | `--machine <machine>` |
+| `pane` | a herdr pane id, like `wAX:p1` | `--pane <pane>` |
+| `thread` | a Discord thread id, present when one is bound (in the snapshot, only whether) | `--thread <thread>` |
+| `mate` | a mate name | `--mate <mate>`, `drover mate <name>` |
+| `id` | a journal entry id | `drover journal rm <id>` |
+| `repo`, `branch` | the task's repo and branch | `--repo <repo>`, `--branch <branch>` |
+| `harness` | the agent CLI: `claude` or `cursor` | `--agent <agent>` |
+| `status` | the agent: `idle`, `working`, `blocked`, `done`, `unknown`. A worktree's: `working`, `blocked`, `done`, `open` (a workspace whose agent is idle or unknown), `closed` | |
+| `phase` | the task: `starting`, `idle`, `waiting`, `ending`, `gone` | |
+| `role` | `task`, `crew`, `mate`, `scout` | |
+| `owner` | who drives a crew pane: `user`, `mate` | `drover take`, `drover release` |
+| `reach` | a machine: `reachable`, `unreachable`, `unknown` | |
+| `name` | the record's own name, in a list of machines or mates | |
+| `at`, `resets_at` | unix seconds | |
+| `changes` | a worktree's changed files, 0 when clean, null when the checkout is gone | |
+| `window`, `percent` | a usage limit and how much of it is used | |
+| `pool`, `used_usd`, `limit_usd` | a spend limit (`extra`, `plan`, `on-demand`, `on-demand-team`) and its dollars | |
+| `day`, `text` | a journal entry's date and its text | |
+| `workspace` | a herdr workspace id | |
+| `scout` | a scout's id, like `scout-1a2b3c` | `drover scout close --pane <scout>` |
+| `noop` | why nothing changed: the state already held | |
+| `delivery` | a prompt sent: `sent` or `queued` | |
+| `entry` | `done`'s journal entry: `asked` (the agent is writing it) or `none` | |
+| `closed` | whether `done` has closed the task yet | |
+| `teardown` | what `done` was asked to end with: `close` or `remove` | |
+| `checkout` | after `done --remove`: `removed` or `kept` | |
+| `event` | the mate log event a command wrote: `brief`, `escalated` | |
+| `chars` | the whole length of a field that was cut | `--full` |
+| `count` | `5 of 42`, on a capped list | |
+| `cwd`, `bin` | a path, with the home directory as `~` | |
+| `help` | next commands, complete, with `<placeholders>` | |
+
+Status words are enums, never prose. Text meant for a person, such as herdr's own error, stays on Discord and out of TOON.
 
 ## Events
 
@@ -107,6 +163,7 @@ The desk as read-only JSON, for tools outside drover. It is a client of the acti
 
 - `Action::Snapshot` builds the desk from the tasks in memory and from each mate's `goal.md` and log. `drover snapshot` prints it. It writes nothing and runs no shell.
 - `drover watch` prints the snapshot as one JSON line, then one line per change, until the client exits. The service builds each line when `App.changed` fires, which every save notifies; changes that land during a build coalesce into the next line. `bin/drover-ssh` execs over `ssh -T`, so it streams the same way.
+- A task's `reply` is the first 300 characters of its last turn and the whole length in `chars`, kept on the task when the turn ends, so a snapshot reads no transcript. It is null until a turn ends under drover.
 - A harness is shown by name. A field a harness cannot supply, such as model, context fill or tokens, is absent, not guessed. Usage is not in the snapshot yet.
 - The mate log has no node, round or check, so those would become `key=value` fields on the same line, for example `1781600000 crew node=docs round=2 check=fail pane=crew:drover-docs`. Still one line per event, still grep-friendly.
 

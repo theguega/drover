@@ -1,4 +1,5 @@
-// What drover does, once. Discord and the terminal both build an Action and print the text run returns.
+// What drover does, once. Discord and the terminal both build an Action; Discord posts the
+// Reply as text, and the terminal prints it as TOON.
 
 use std::{
     hash::{BuildHasher, Hasher, RandomState},
@@ -7,6 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use serenity::all::{ChannelId, Http};
 use tokio::time::sleep;
 
@@ -23,7 +25,7 @@ pub enum Action {
     Config,
     Snapshot,
     Watch,
-    Screen(Target),
+    Screen(Look),
     Mate(Mate),
     Scout(Scout),
     Brief(Note),
@@ -101,6 +103,17 @@ pub struct Target {
     pub thread: String,
 }
 
+// A task's screen. Without `full` the terminal gets the end of it, a screenful of text.
+#[derive(Serialize, Deserialize)]
+pub struct Look {
+    pub thread: String,
+    #[serde(default)]
+    pub full: bool,
+    // a read that fails is text in the message, not an error
+    #[serde(default)]
+    pub discord: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Send {
     pub thread: String,
@@ -111,6 +124,9 @@ pub struct Send {
 pub struct Keys {
     pub thread: String,
     pub keys: Vec<String>,
+    // a read that fails is text in the message, not an error
+    #[serde(default)]
+    pub discord: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -123,12 +139,16 @@ pub struct Done {
 #[derive(Serialize, Deserialize)]
 pub struct Recall {
     pub query: String,
+    #[serde(default)]
+    pub full: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct JournalList {
     // a task, by pane or thread id: list its repo's entries instead of all
     pub task: Option<String>,
+    #[serde(default)]
+    pub full: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -160,6 +180,395 @@ fn remove_scout_dir(root: &Path, id: &str) -> Result<()> {
     }
 }
 
+// What an action answers. `Text` is a command not converted yet: both sides print it as it is.
+// The rest are data: the terminal prints them as TOON and Discord as `discord` renders them.
+#[derive(Serialize)]
+#[serde(untagged)]
+pub enum Reply {
+    Text(String),
+    Agents(Agents),
+    Config(Config),
+    Worktrees(Worktrees),
+    Usage(Usage),
+    Screen(ScreenView),
+    Journal(Entries),
+    Recall(Entries),
+    Change(Change),
+}
+
+impl Reply {
+    #[must_use]
+    pub fn discord(&self) -> String {
+        match self {
+            Self::Text(s) => s.clone(),
+            Self::Agents(a) => a.discord(),
+            Self::Config(c) => c.discord(),
+            Self::Worktrees(w) => w.discord.clone(),
+            Self::Usage(u) => u.lines.join("\n"),
+            Self::Screen(s) => fenced(&s.text, ""),
+            Self::Journal(e) => e.discord("no entries", true),
+            Self::Recall(e) => e.discord("nothing", false),
+            Self::Change(c) => c.discord.clone(),
+        }
+    }
+}
+
+// What a command that changes the desk did, as the fields that feed the next command. Fields come out in
+// the order they are set: the id, then `noop` when the desired state already held, then the rest.
+#[derive(Serialize)]
+pub struct Change {
+    #[serde(flatten)]
+    fields: Map<String, Value>,
+    #[serde(skip)]
+    discord: String,
+}
+
+impl Change {
+    fn new(discord: impl Into<String>) -> Self {
+        Self {
+            fields: Map::new(),
+            discord: discord.into(),
+        }
+    }
+
+    // The task's pane and machine.
+    fn at(t: &Task, noop: Option<&str>, discord: impl Into<String>) -> Self {
+        Self::new(discord)
+            .with("pane", &t.pane.0)
+            .with("machine", &t.machine)
+            .maybe("noop", noop)
+    }
+
+    // A task as the next command needs it.
+    fn task(t: &Task, noop: Option<&str>, discord: impl Into<String>) -> Self {
+        Self::at(t, noop, discord)
+            .with("workspace", &t.workspace.0)
+            .with("repo", &t.repo)
+            .maybe("branch", t.branch.as_ref())
+            .with("harness", &t.kind)
+            .maybe("mate", t.role.mate())
+            .maybe("thread", t.thread)
+    }
+
+    fn with(self, key: &str, v: impl Serialize) -> Self {
+        self.maybe(key, Some(v))
+    }
+
+    fn maybe(mut self, key: &str, v: Option<impl Serialize>) -> Self {
+        if let Some(v) = v {
+            self.fields
+                .insert(key.into(), serde_json::to_value(v).unwrap_or_default());
+        }
+        self
+    }
+
+    fn help(self, commands: Vec<String>) -> Self {
+        match commands.is_empty() {
+            true => self,
+            false => self.with("help", commands),
+        }
+    }
+
+    // What to do with a pane that was just opened or found.
+    fn watch(self, pane: &PaneId) -> Self {
+        self.help(vec![
+            format!("drover screen --pane {}", pane.0),
+            format!("drover send --pane {} --text <text>", pane.0),
+        ])
+    }
+}
+
+const AGENTS_HELP: [&str; 3] = [
+    "drover screen --pane <pane>",
+    "drover send --pane <pane> --text <text>",
+    "drover attach --machine <machine> --pane <pane>",
+];
+
+#[derive(Serialize)]
+pub struct Agents {
+    pub agents: Vec<AgentRow>,
+    pub machines: Vec<MachineReach>,
+    pub help: [&'static str; 3],
+}
+
+#[derive(Serialize)]
+pub struct MachineReach {
+    pub name: String,
+    pub reach: Reachability,
+    // herdr's own words stay on Discord, where a person reads them
+    #[serde(skip)]
+    pub error: Option<String>,
+}
+
+#[derive(Serialize)]
+// Fields in the order the terminal shows them: the id first, then the status.
+pub struct AgentRow {
+    pub pane: String,
+    pub machine: String,
+    pub status: Status,
+    pub harness: String,
+    pub cwd: String,
+    #[serde(skip)]
+    pub thread: Option<ChannelId>,
+}
+
+impl Agents {
+    fn discord(&self) -> String {
+        let mut lines = vec![];
+        for m in &self.machines {
+            lines.push(format!("**{}**", m.name));
+            if let Some(e) = &m.error {
+                lines.push(format!("unreachable: {e}"));
+            }
+            for a in self.agents.iter().filter(|a| a.machine == m.name) {
+                let bound = a.thread.map(|b| format!(" <#{b}>")).unwrap_or_default();
+                lines.push(format!(
+                    "`{} {}` {} {}{bound}",
+                    a.status.icon(),
+                    a.pane,
+                    a.harness,
+                    a.cwd
+                ));
+            }
+        }
+        lines.join("\n")
+    }
+}
+
+#[derive(Serialize)]
+pub struct Config {
+    pub host: String,
+    pub remotes: Vec<String>,
+    pub channel: String,
+    pub repos: String,
+    pub state: &'static str,
+    pub journal: &'static str,
+    pub socket: String,
+}
+
+impl Config {
+    fn discord(&self) -> String {
+        let remotes = match self.remotes.is_empty() {
+            true => "none".into(),
+            false => self.remotes.join(", "),
+        };
+        [
+            format!("host: {}", self.host),
+            format!("remotes: {remotes}"),
+            format!("channel: <#{}>", self.channel),
+            format!("repos: {}", self.repos),
+            format!("state: {}", self.state),
+            format!("journal: {}", self.journal),
+            format!("socket: {}", self.socket),
+        ]
+        .join("\n")
+    }
+}
+
+#[derive(Serialize)]
+pub struct Worktrees {
+    pub worktrees: Vec<WorktreeRow>,
+    pub machines: Vec<MachineReach>,
+    pub help: [&'static str; 1],
+    #[serde(skip)]
+    discord: String,
+}
+
+// A worktree's status is its agent's, or `open` for a workspace without a known agent state, or `closed`.
+#[derive(Serialize, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Checkout {
+    Working,
+    Blocked,
+    Done,
+    Open,
+    Closed,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct WorktreeRow {
+    pub machine: String,
+    pub repo: String,
+    pub branch: String,
+    pub status: Checkout,
+    // changed files; none when the checkout is gone
+    pub changes: Option<u32>,
+}
+
+// The rows of `drover-wt ls`: a repo name, then one line per worktree: mark, branch, changes, upstream.
+fn worktree_rows(machine: &str, text: &str) -> Vec<WorktreeRow> {
+    let mut repo = "";
+    let mut rows = vec![];
+    for line in text.lines() {
+        if !line.starts_with(' ') {
+            repo = line.trim();
+            continue;
+        }
+        let mut f = line.split_whitespace();
+        let (Some(mark), Some(branch), Some(changes)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        rows.push(WorktreeRow {
+            machine: machine.into(),
+            repo: repo.into(),
+            branch: branch.into(),
+            status: match mark {
+                "●" => Checkout::Working,
+                "◆" => Checkout::Blocked,
+                "✓" => Checkout::Done,
+                "○" => Checkout::Open,
+                _ => Checkout::Closed,
+            },
+            changes: match changes {
+                "clean" => Some(0),
+                n => n.parse().ok(),
+            },
+        });
+    }
+    rows
+}
+
+#[derive(Serialize)]
+pub struct Usage {
+    pub windows: Vec<Window>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spend: Vec<Spend>,
+    // herdr's own error text stays on Discord
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<Unavailable>,
+    #[serde(skip)]
+    pub lines: Vec<String>,
+}
+
+// A usage limit that resets: how much of it is used.
+#[derive(Serialize)]
+pub struct Window {
+    pub machine: String,
+    pub harness: &'static str,
+    pub window: &'static str,
+    pub percent: f64,
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct Spend {
+    pub machine: String,
+    pub harness: &'static str,
+    pub pool: &'static str,
+    pub used_usd: f64,
+    pub limit_usd: f64,
+}
+
+#[derive(Serialize)]
+pub struct Unavailable {
+    pub machine: String,
+    pub harness: &'static str,
+}
+
+// A task's terminal. `text` is cut to its last EXCERPT characters unless the action asked for `full`.
+#[derive(Serialize)]
+pub struct ScreenView {
+    pub pane: String,
+    pub machine: String,
+    pub status: Status,
+    pub chars: usize,
+    pub text: String,
+    pub help: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct Entries {
+    // the empty state, as a line
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal: Option<String>,
+    // `5 of 42`, when the list is capped
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<EntryRow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub help: Vec<String>,
+}
+
+// An entry's text is cut to its first EXCERPT characters unless the action asked for `full`.
+#[derive(Serialize)]
+pub struct EntryRow {
+    pub id: i64,
+    pub repo: String,
+    pub branch: String,
+    pub day: String,
+    pub chars: usize,
+    pub text: String,
+}
+
+// Characters of long text the terminal shows without --full.
+const EXCERPT: usize = 1000;
+// Entries a journal list or a recall shows.
+const ENTRIES: u32 = 5;
+
+impl Entries {
+    // `none` is the line for no entries; `full_cmd` is the command that shows them whole.
+    fn new(
+        rows: Vec<(i64, journal::Entry)>,
+        total: u32,
+        full: bool,
+        none: String,
+        full_cmd: String,
+    ) -> Self {
+        let cut = !full && rows.iter().any(|(_, e)| e.text.chars().count() > EXCERPT);
+        let entries: Vec<EntryRow> = rows
+            .into_iter()
+            .map(|(id, e)| {
+                let chars = e.text.chars().count();
+                let text = match full || chars <= EXCERPT {
+                    true => e.text,
+                    false => format!("{}…", head(&e.text, EXCERPT)),
+                };
+                EntryRow {
+                    id,
+                    repo: e.repo,
+                    branch: e.branch,
+                    day: e.day,
+                    chars,
+                    text,
+                }
+            })
+            .collect();
+        let mut help = vec![];
+        if cut {
+            help.push(full_cmd);
+        }
+        if !entries.is_empty() {
+            help.push("drover journal rm <id>".into());
+        }
+        Self {
+            journal: entries.is_empty().then_some(none),
+            count: (entries.len() < total as usize)
+                .then(|| format!("{} of {total}", entries.len())),
+            entries,
+            help,
+        }
+    }
+
+    fn discord(&self, none: &str, numbered: bool) -> String {
+        if self.entries.is_empty() {
+            return none.into();
+        }
+        self.entries
+            .iter()
+            .map(|e| {
+                let id = if numbered {
+                    format!("#{} ", e.id)
+                } else {
+                    String::new()
+                };
+                format!("{id}{} {} {}\n{}", e.day, e.repo, e.branch, e.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
 // What became of a prompt.
 pub enum Sent {
     Now,
@@ -175,6 +584,16 @@ fn mate_role(name: &MateName) -> String {
     format!(
         "You are mate {name}. Your instructions are in AGENTS.md in this folder. Wait for the desk's first message."
     )
+}
+
+// What to do with a mate that runs.
+fn mate_help(name: &MateName, machine: &str) -> Vec<String> {
+    vec![
+        format!("drover brief --mate {name} --text <text>"),
+        format!(
+            "drover new --machine {machine} --repo <repo> --branch <branch> --prompt <prompt> --mate {name}"
+        ),
+    ]
 }
 
 // A mate's name, checked once: it becomes an agent name and a folder under mates/state.
@@ -224,57 +643,44 @@ impl std::fmt::Display for MateName {
 }
 
 impl App {
-    pub async fn act(&self, http: &Http, action: Action) -> Result<String> {
-        match action {
-            Action::New(n) => self.cmd_new(http, &n).await,
-            Action::Attach(a) => self.cmd_attach(http, &a).await,
-            Action::Agents => self.cmd_agents().await,
-            Action::Worktrees => self.cmd_worktrees().await,
-            Action::Usage => self.cmd_usage().await,
-            Action::Config => Ok(self.config()),
+    pub async fn act(&self, http: &Http, action: Action) -> Result<Reply> {
+        let text = match action {
+            Action::New(n) => return Ok(Reply::Change(self.cmd_new(http, &n).await?)),
+            Action::Attach(a) => return Ok(Reply::Change(self.cmd_attach(http, &a).await?)),
+            Action::Mate(m) => return Ok(Reply::Change(self.cmd_mate(http, &m).await?)),
+            Action::Scout(s) => return Ok(Reply::Change(self.cmd_scout(http, &s).await?)),
+            Action::Brief(b) => return Ok(Reply::Change(self.cmd_brief(&b)?)),
+            Action::Escalate(n) => return Ok(Reply::Change(self.cmd_escalate(http, &n).await?)),
+            Action::ScoutClose(t) => {
+                return Ok(Reply::Change(self.cmd_scout_close(http, &t.thread).await?));
+            }
+            Action::Send(s) => return Ok(Reply::Change(self.cmd_send(&s).await?)),
+            Action::Take(t) => {
+                return Ok(Reply::Change(self.set_owner(&t.thread, Owner::User).await?));
+            }
+            Action::Release(t) => {
+                return Ok(Reply::Change(self.set_owner(&t.thread, Owner::Mate).await?));
+            }
+            Action::Keys(k) => return Ok(Reply::Screen(self.cmd_keys(&k).await?)),
+            Action::Done(d) => return Ok(Reply::Change(self.cmd_done(http, &d).await?)),
+            Action::JournalRemove(r) => {
+                return Ok(Reply::Change(self.cmd_journal_remove(r.id).await?));
+            }
+            Action::Agents => return Ok(Reply::Agents(self.cmd_agents().await)),
+            Action::Config => return Ok(Reply::Config(self.config())),
+            Action::Worktrees => return Ok(Reply::Worktrees(self.cmd_worktrees().await?)),
+            Action::Usage => return Ok(Reply::Usage(self.cmd_usage().await?)),
+            Action::Screen(l) => return Ok(Reply::Screen(self.cmd_screen(&l).await?)),
+            Action::Recall(r) => return Ok(Reply::Recall(self.cmd_recall(&r).await?)),
+            Action::JournalList(l) => return Ok(Reply::Journal(self.cmd_journal_list(&l).await?)),
             Action::Snapshot => self.snapshot().await,
             Action::Watch => bail!("watch streams over the control socket"),
             Action::Complete(c) => self.cmd_complete(c).await,
-            Action::Mate(m) => self.cmd_mate(http, &m).await,
-            Action::Scout(s) => self.cmd_scout(http, &s).await,
-            Action::Brief(b) => self.cmd_brief(&b),
-            Action::Escalate(n) => self.cmd_escalate(http, &n).await,
-            Action::ScoutClose(t) => self.cmd_scout_close(http, &t.thread).await,
-            Action::Send(s) => self.cmd_send(&s).await,
-            Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
-            Action::Release(t) => self.set_owner(&t.thread, Owner::Mate).await,
-            Action::Screen(t) => {
-                let (m, pane) = self.target(&t.thread).await?;
-                Ok(screen(m, &pane, "").await)
-            }
-            Action::Keys(k) => {
-                let (m, pane) = self.target(&k.thread).await?;
-                let keys: Vec<&str> = k.keys.iter().map(String::as_str).collect();
-                herdr::keys(m, &pane, &keys).await?;
-                sleep(Duration::from_millis(700)).await;
-                Ok(screen(m, &pane, "").await)
-            }
-            Action::Done(d) => self.cmd_done(http, &d).await,
-            Action::Recall(r) => {
-                let hits = self.journal.search(&r.query, 5).await?;
-                Ok(match hits.is_empty() {
-                    true => "nothing".into(),
-                    false => hits
-                        .iter()
-                        .map(journal::format)
-                        .collect::<Vec<_>>()
-                        .join("\n\n"),
-                })
-            }
-            Action::JournalList(l) => self.cmd_journal_list(&l).await,
-            Action::JournalRemove(r) => Ok(match self.journal.remove(r.id).await? {
-                true => format!("removed #{}", r.id),
-                false => format!("no journal entry #{}", r.id),
-            }),
-        }
+        };
+        text.map(Reply::Text)
     }
 
-    async fn cmd_new(&self, http: &Http, n: &New) -> Result<String> {
+    async fn cmd_new(&self, http: &Http, n: &New) -> Result<Change> {
         let m = self.machine(&n.machine)?;
         let repo = Name::parse(&n.repo)?;
         let r#ref = Name::parse(&n.branch)?;
@@ -285,21 +691,28 @@ impl App {
 
         let wt = herdr::worktree(m, &repo, &r#ref).await?;
         if let Some((_, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
-            let where_at = match cell.lock().await.thread {
-                Some(th) => format!("<#{th}>"),
-                None => wt.pane_id.0,
-            };
-            return Ok(format!("already open in {where_at}"));
+            let t = cell.lock().await;
+            let at = t
+                .thread
+                .map_or_else(|| t.pane.0.clone(), |th| format!("<#{th}>"));
+            return Ok(
+                Change::task(&t, Some("already open"), format!("already open in {at}"))
+                    .watch(&t.pane),
+            );
         }
         if herdr::agents(m)
             .await?
             .iter()
             .any(|a| a.pane_id == wt.pane_id)
         {
-            return Ok(format!(
-                "an agent already runs in {}, attach to it instead",
-                wt.pane_id.0
-            ));
+            return Err(cli::Failure::new(
+                format!(
+                    "an agent already runs in {} that drover does not follow",
+                    wt.pane_id.0
+                ),
+                format!("drover attach --machine {} --pane {}", m.name, wt.pane_id.0),
+            )
+            .into());
         }
 
         let repo = repo.as_str();
@@ -337,7 +750,7 @@ impl App {
                 "{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"
             );
         }
-        self.insert(Task {
+        let task = Task {
             thread,
             machine: m.name.clone(),
             pane: wt.pane_id.clone(),
@@ -354,11 +767,15 @@ impl App {
             status: None,
             session: None,
             last_reply: None,
+            reply: None,
             prompt_msg,
             dialog_msg: None,
             queued: None,
             inbox: Vec::new(),
-        });
+        };
+        let shown = thread.map_or_else(|| wt.pane_id.0.clone(), |th| format!("<#{th}>"));
+        let out = Change::task(&task, None, shown).watch(&wt.pane_id);
+        self.insert(task);
         self.save().await;
         if let Some(name) = &n.mate {
             log::append(&self.mate_dir(name), log::Event::Linked, &wt.pane_id.0)?;
@@ -374,13 +791,10 @@ impl App {
             model.as_ref(),
         )
         .await?;
-        Ok(match thread {
-            Some(th) => format!("<#{th}>"),
-            None => wt.pane_id.0,
-        })
+        Ok(out)
     }
 
-    async fn cmd_attach(&self, http: &Http, at: &Attach) -> Result<String> {
+    async fn cmd_attach(&self, http: &Http, at: &Attach) -> Result<Change> {
         let m = match at.machine.as_deref() {
             Some(name) => self.machine(name)?,
             None => self.machine_of_pane(&at.pane).await.unwrap_or(&self.host),
@@ -403,7 +817,12 @@ impl App {
             }
             if let Some(th) = t.thread {
                 if at.mate.is_none() {
-                    return Ok(format!("already open in <#{th}>"));
+                    return Ok(Change::task(
+                        &t,
+                        Some("already open"),
+                        format!("already open in <#{th}>"),
+                    )
+                    .watch(&pane));
                 }
             } else if at.discord {
                 let middle = t.branch.as_ref().unwrap_or(&t.kind);
@@ -413,12 +832,17 @@ impl App {
                 t.thread = Some(th);
                 th.send_message(http, screen_msg(m, &pane).await).await?;
             } else if at.mate.is_none() {
-                return Ok(format!("already open in {}", pane.0));
+                return Ok(Change::task(
+                    &t,
+                    Some("already open"),
+                    format!("already open in {}", pane.0),
+                )
+                .watch(&pane));
             }
-            let out = match t.thread {
-                Some(th) => format!("<#{th}>"),
-                None => pane.0.clone(),
-            };
+            let shown = t
+                .thread
+                .map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
+            let out = Change::task(&t, None, shown).watch(&pane);
             drop(t);
             self.save().await;
             if let Some(name) = &at.mate {
@@ -448,7 +872,7 @@ impl App {
             Some(s) => herdr::reply(m, s).await?.map(|r| r.id),
             None => None,
         };
-        self.insert(Task {
+        let task = Task {
             thread,
             machine: m.name.clone(),
             pane: pane.clone(),
@@ -465,11 +889,15 @@ impl App {
             status: Some(a.agent_status),
             session,
             last_reply,
+            reply: None,
             prompt_msg: None,
             dialog_msg: None,
             queued: None,
             inbox: Vec::new(),
-        });
+        };
+        let shown = thread.map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
+        let out = Change::task(&task, None, shown).watch(&pane);
+        self.insert(task);
         self.save().await;
         if let Some(name) = &at.mate {
             log::append(&self.mate_dir(name), log::Event::Linked, &pane.0)?;
@@ -477,39 +905,46 @@ impl App {
         }
         if let Some(th) = thread {
             th.send_message(http, screen_msg(m, &pane).await).await?;
-            Ok(format!("<#{th}>"))
-        } else {
-            Ok(pane.0)
         }
+        Ok(out)
     }
 
-    async fn cmd_agents(&self) -> Result<String> {
-        let mut lines = vec![];
+    async fn cmd_agents(&self) -> Agents {
+        let mut machines = vec![];
+        let mut agents = vec![];
         for m in self.machines() {
-            lines.push(format!("**{}**", m.name));
             let list = match herdr::agents(m).await {
                 Ok(list) => list,
                 Err(e) => {
-                    lines.push(format!("unreachable: {e}"));
+                    machines.push(MachineReach {
+                        name: m.name.clone(),
+                        reach: Reachability::Unreachable,
+                        error: Some(e.to_string()),
+                    });
                     continue;
                 }
             };
+            machines.push(MachineReach {
+                name: m.name.clone(),
+                reach: Reachability::Reachable,
+                error: None,
+            });
             for a in list {
-                let bound = self
-                    .thread_on(&m.name, &a.pane_id)
-                    .await
-                    .map(|b| format!(" <#{b}>"))
-                    .unwrap_or_default();
-                let icon = a.agent_status.icon();
-                lines.push(format!(
-                    "`{icon} {}` {} {}{bound}",
-                    a.pane_id.0,
-                    a.agent,
-                    home(&a.cwd)
-                ));
+                agents.push(AgentRow {
+                    machine: m.name.clone(),
+                    thread: self.thread_on(&m.name, &a.pane_id).await,
+                    pane: a.pane_id.0,
+                    harness: a.agent,
+                    status: a.agent_status,
+                    cwd: home(&a.cwd),
+                });
             }
         }
-        Ok(lines.join("\n"))
+        Agents {
+            machines,
+            agents,
+            help: AGENTS_HELP,
+        }
     }
 
     async fn cmd_complete(&self, what: Candidates) -> Result<String> {
@@ -564,69 +999,140 @@ impl App {
         Ok(repo)
     }
 
-    async fn cmd_journal_list(&self, l: &JournalList) -> Result<String> {
+    async fn cmd_journal_list(&self, l: &JournalList) -> Result<Entries> {
         let repo = match &l.task {
             Some(task) => Some(self.repo_of(task).await?),
             None => None,
         };
-        let rows = self.journal.list(repo, 5).await?;
-        Ok(match rows.is_empty() {
-            true => "no entries".into(),
-            false => rows
-                .iter()
-                .map(|(id, e)| format!("#{id} {}", journal::format(e)))
-                .collect::<Vec<_>>()
-                .join("\n\n"),
+        let total = self.journal.count(repo.clone()).await?;
+        let rows = self.journal.list(repo.clone(), ENTRIES).await?;
+        let (none, full_cmd) = match (&repo, &l.task) {
+            (Some(repo), Some(task)) => (
+                format!("0 entries for {repo}"),
+                format!("drover journal --pane {task} --full"),
+            ),
+            _ => ("0 entries".into(), "drover journal --full".into()),
+        };
+        Ok(Entries::new(rows, total, l.full, none, full_cmd))
+    }
+
+    async fn cmd_recall(&self, r: &Recall) -> Result<Entries> {
+        let rows = self.journal.search(&r.query, ENTRIES).await?;
+        let total = self.journal.matches(&r.query).await?;
+        Ok(Entries::new(
+            rows,
+            total,
+            r.full,
+            format!("0 entries matching {}", r.query),
+            format!("drover recall {} --full", r.query),
+        ))
+    }
+
+    async fn cmd_screen(&self, l: &Look) -> Result<ScreenView> {
+        let (_, cell) = self.find_task(&l.thread).await?;
+        let (machine, pane, status) = {
+            let t = cell.lock().await;
+            (t.machine.clone(), t.pane.clone(), t.status)
+        };
+        let m = self.machine(&machine)?;
+        let raw = match herdr::screen(m, &pane, 60).await {
+            Ok(raw) => raw,
+            Err(e) if l.discord => format!("read failed: {e}"),
+            Err(e) => return Err(e.into()),
+        };
+        let text = last_lines(&raw);
+        let chars = text.chars().count();
+        let status = status.unwrap_or(Status::Unknown);
+        let mut help = vec![];
+        if !l.full && chars > EXCERPT {
+            help.push(format!("drover screen --pane {} --full", pane.0));
+        }
+        help.push(format!("drover keys --pane {} --keys <keys>", pane.0));
+        Ok(ScreenView {
+            pane: pane.0,
+            machine,
+            status,
+            chars,
+            text: match l.full {
+                true => text,
+                false => tail(&text, EXCERPT),
+            },
+            help,
         })
     }
 
-    async fn cmd_usage(&self) -> Result<String> {
+    async fn cmd_usage(&self) -> Result<Usage> {
         let jobs: Vec<_> = self
             .machines()
             .cloned()
-            .map(|m| tokio::spawn(async move { usage_lines(&m).await }))
+            .map(|m| tokio::spawn(async move { machine_usage(&m).await }))
             .collect();
-        let mut lines = vec![];
+        let mut all = Usage {
+            windows: vec![],
+            spend: vec![],
+            unavailable: vec![],
+            lines: vec![],
+        };
         for job in jobs {
-            lines.extend(job.await?);
+            let u = job.await?;
+            all.windows.extend(u.windows);
+            all.spend.extend(u.spend);
+            all.unavailable.extend(u.unavailable);
+            all.lines.extend(u.lines);
         }
-        Ok(lines.join("\n"))
+        Ok(all)
     }
 
     // What this service runs with, so a terminal or an agent can see the setup without the .env.
-    fn config(&self) -> String {
-        let remotes: Vec<&str> = self.remotes.iter().map(|m| m.name.as_str()).collect();
-        let remotes = match remotes.is_empty() {
-            true => "none".into(),
-            false => remotes.join(", "),
-        };
-        [
-            format!("host: {}", self.host.name),
-            format!("remotes: {remotes}"),
-            format!("channel: <#{}>", self.channel),
-            format!(
-                "repos: {}",
-                std::env::var("REPOS_ROOT").unwrap_or_else(|_| "~/.drover-workspace".into())
-            ),
-            format!("state: {STATE}"),
-            "journal: journal.db".into(),
-            format!(
-                "socket: {}",
-                control::path().map_or_else(|e| e.to_string(), |p| p.display().to_string())
-            ),
-        ]
-        .join("\n")
+    fn config(&self) -> Config {
+        Config {
+            host: self.host.name.clone(),
+            remotes: self.remotes.iter().map(|m| m.name.clone()).collect(),
+            channel: self.channel.to_string(),
+            repos: std::env::var("REPOS_ROOT").unwrap_or_else(|_| "~/.drover-workspace".into()),
+            state: STATE,
+            journal: "journal.db",
+            socket: control::path().map_or_else(|e| e.to_string(), |p| p.display().to_string()),
+        }
     }
 
     // A prompt from the terminal: the same path as a Discord message in the thread.
-    async fn cmd_send(&self, s: &Send) -> Result<String> {
+    async fn cmd_send(&self, s: &Send) -> Result<Change> {
         let (_, cell) = self.find_task(&s.thread).await?;
-        Ok(match self.send_prompt(&cell, &s.text, None).await? {
-            Sent::Now => "sent",
-            Sent::Queued => "queued, sent when the agent is idle",
-            Sent::Blocked => "the agent waits on a dialog: answer it with keys, then send again",
-        }
-        .into())
+        let (pane, machine) = {
+            let t = cell.lock().await;
+            (t.pane.clone(), t.machine.clone())
+        };
+        let (delivery, said) = match self.send_prompt(&cell, &s.text, None).await? {
+            Sent::Now => ("sent", "sent"),
+            Sent::Queued => ("queued", "queued, sent when the agent is idle"),
+            Sent::Blocked => {
+                return Err(cli::Failure::new(
+                    "the agent waits on a dialog",
+                    format!("drover screen --pane {}", pane.0),
+                )
+                .into());
+            }
+        };
+        Ok(Change::new(said)
+            .with("pane", &pane.0)
+            .with("machine", machine)
+            .with("delivery", delivery)
+            .help(vec![format!("drover screen --pane {}", pane.0)]))
+    }
+
+    // Keys to the pane, then what its terminal shows.
+    async fn cmd_keys(&self, k: &Keys) -> Result<ScreenView> {
+        let (m, pane) = self.target(&k.thread).await?;
+        let keys: Vec<&str> = k.keys.iter().map(String::as_str).collect();
+        herdr::keys(m, &pane, &keys).await?;
+        sleep(Duration::from_millis(700)).await;
+        self.cmd_screen(&Look {
+            thread: k.thread.clone(),
+            full: k.discord,
+            discord: k.discord,
+        })
+        .await
     }
 
     // A prompt from Discord or the terminal. `msg` is the Discord message that carries its reaction.
@@ -708,30 +1214,39 @@ impl App {
     }
 
     // A question for the desk from a mate: posted in its thread (if any) and kept in its log.
-    async fn cmd_escalate(&self, http: &Http, n: &Note) -> Result<String> {
+    async fn cmd_escalate(&self, http: &Http, n: &Note) -> Result<Change> {
         let name = &n.mate;
         let (pane, th) = self
             .mate_task(name)
             .await
             .context(format!("no running mate {name}"))?;
         log::append(&self.mate_dir(name), log::Event::Escalated, &n.text)?;
-        if let Some(th) = th {
-            th.say(http, &n.text).await?;
-            Ok(format!("escalated to <#{th}>"))
-        } else {
-            Ok(format!("escalated for mate {name} ({})", pane.0))
-        }
+        let said = match th {
+            Some(th) => {
+                th.say(http, &n.text).await?;
+                format!("escalated to <#{th}>")
+            }
+            None => format!("escalated for mate {name} ({})", pane.0),
+        };
+        Ok(Change::new(said)
+            .with("mate", name)
+            .with("pane", &pane.0)
+            .with("machine", &self.host.name)
+            .maybe("thread", th)
+            .with("event", log::Event::Escalated.as_str()))
     }
 
     // A note for the mate, in its log, for it to read when it next looks.
-    fn cmd_brief(&self, b: &Note) -> Result<String> {
+    fn cmd_brief(&self, b: &Note) -> Result<Change> {
         let name = &b.mate;
         log::append(&self.mate_dir(name), log::Event::Brief, &b.text)?;
-        Ok(format!("noted for mate {name}"))
+        Ok(Change::new(format!("noted for mate {name}"))
+            .with("mate", name)
+            .with("event", log::Event::Brief.as_str()))
     }
 
     // A scout: a short look with no repo, in its own folder and pane, with nothing to journal.
-    async fn cmd_scout(&self, http: &Http, s: &Scout) -> Result<String> {
+    async fn cmd_scout(&self, http: &Http, s: &Scout) -> Result<Change> {
         let id = scout_id();
         let dir = self.mates.join("state").join("scouts").join(&id);
         std::fs::create_dir_all(&dir)?;
@@ -746,7 +1261,7 @@ impl App {
         } else {
             (None, None)
         };
-        self.insert(Task {
+        let task = Task {
             thread,
             machine: self.host.name.clone(),
             pane: pane.clone(),
@@ -762,21 +1277,36 @@ impl App {
             status: None,
             session: None,
             last_reply: None,
+            reply: None,
             prompt_msg,
             dialog_msg: None,
             queued: None,
             inbox: Vec::new(),
-        });
+        };
+        let shown = thread.map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
+        let out = Change::task(&task, None, shown)
+            .with("scout", &id)
+            .help(vec![
+                format!("drover screen --pane {}", pane.0),
+                format!("drover scout close --pane {id}"),
+            ]);
+        self.insert(task);
         self.save().await;
         herdr::start(&self.host, &id, harness::DEFAULT, &pane, &cwd, None).await?;
-        Ok(match thread {
-            Some(th) => format!("<#{th}>"),
-            None => pane.0,
-        })
+        Ok(out)
     }
 
-    async fn cmd_scout_close(&self, http: &Http, target: &str) -> Result<String> {
-        let (key, cell) = self.find_task(target).await?;
+    async fn cmd_scout_close(&self, http: &Http, target: &str) -> Result<Change> {
+        let (key, cell) = match self.find_task(target).await {
+            Ok(found) => found,
+            // a closed scout's task is gone, and its id is all that is left
+            Err(_) if target.starts_with("scout-") => {
+                return Ok(Change::new(format!("closed {target}"))
+                    .with("scout", target)
+                    .with("noop", "already closed"));
+            }
+            Err(e) => return Err(e),
+        };
         let t = cell.lock().await.clone();
         let Role::Scout(scout) = t.role.clone() else {
             bail!("this task is not a scout");
@@ -785,10 +1315,10 @@ impl App {
         self.save().await;
         self.teardown(http, &t, Teardown::Close).await?;
         remove_scout_dir(&self.mates.join("state").join("scouts"), &scout)?;
-        Ok(format!("closed {scout}"))
+        Ok(Change::at(&t, None, format!("closed {scout}")).with("scout", &scout))
     }
 
-    async fn cmd_mate(&self, http: &Http, m: &Mate) -> Result<String> {
+    async fn cmd_mate(&self, http: &Http, m: &Mate) -> Result<Change> {
         let name = m.name.clone();
         let mut live = 0;
         for (_, cell) in self.cells() {
@@ -797,7 +1327,13 @@ impl App {
                 continue;
             }
             match &t.role {
-                Role::Mate(n) if *n == name => bail!("mate {name} is already running"),
+                Role::Mate(n) if *n == name => {
+                    let shown = t
+                        .thread
+                        .map_or_else(|| t.pane.0.clone(), |th| format!("<#{th}>"));
+                    return Ok(Change::task(&t, Some("already running"), shown)
+                        .help(mate_help(&name, &self.host.name)));
+                }
                 Role::Mate(_) => live += 1,
                 _ => {}
             }
@@ -817,7 +1353,7 @@ impl App {
         } else {
             (None, None)
         };
-        self.insert(Task {
+        let task = Task {
             thread,
             machine: self.host.name.clone(),
             pane: pane.clone(),
@@ -833,11 +1369,15 @@ impl App {
             status: None,
             session: None,
             last_reply: None,
+            reply: None,
             prompt_msg,
             dialog_msg: None,
             queued: None,
             inbox: Vec::new(),
-        });
+        };
+        let shown = thread.map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
+        let out = Change::task(&task, None, shown).help(mate_help(&name, &self.host.name));
+        self.insert(task);
         self.save().await;
         log::append(&self.mate_dir(&name), log::Event::Started, &pane.0)?;
         self.write_owners(&name, None).await?;
@@ -850,10 +1390,7 @@ impl App {
             None,
         )
         .await?;
-        Ok(match thread {
-            Some(th) => format!("<#{th}>"),
-            None => pane.0,
-        })
+        Ok(out)
     }
 
     // A new agent nobody started through drover: link it to a mate that works on the same repo and branch.
@@ -936,56 +1473,103 @@ impl App {
         Ok(())
     }
 
-    async fn set_owner(&self, target: &str, owner: Owner) -> Result<String> {
+    async fn set_owner(&self, target: &str, owner: Owner) -> Result<Change> {
         let (_, cell) = self.find_task(target).await?;
-        let (pane, name) = {
+        let (out, name, same) = {
             let mut t = cell.lock().await;
             let pane = t.pane.0.clone();
             let Role::Crew { mate, owner: o } = &mut t.role else {
                 bail!("{pane} is not linked to a mate");
             };
+            let same = *o == owner;
             *o = owner;
-            (pane, mate.clone())
+            let mate = mate.clone();
+            let noop = match (same, owner) {
+                (false, _) => None,
+                (true, Owner::User) => Some("already taken"),
+                (true, Owner::Mate) => Some("already released"),
+            };
+            let out = Change::at(&t, noop, format!("{pane} is {}", owner.as_str()))
+                .with("mate", &mate)
+                .with("owner", owner.as_str());
+            (out, mate, same)
         };
+        if same {
+            return Ok(out);
+        }
         log::append(&self.mate_dir(&name), log::Event::Owner, owner.as_str())?;
         self.write_owners(&name, None).await?;
         self.save().await;
-        Ok(format!("{pane} is {}", owner.as_str()))
+        Ok(match owner {
+            Owner::User => out.help(vec![format!(
+                "drover send --pane {} --text <text>",
+                cell.lock().await.pane.0
+            )]),
+            Owner::Mate => out,
+        })
     }
 
-    async fn cmd_worktrees(&self) -> Result<String> {
+    async fn cmd_worktrees(&self) -> Result<Worktrees> {
         let jobs: Vec<_> = self
             .machines()
             .cloned()
             .map(|m| {
                 tokio::spawn(async move {
-                    let s = match herdr::worktrees(&m).await {
-                        Ok(s) if s.is_empty() => "none".into(),
-                        Ok(s) => s,
-                        Err(e) => format!("unreachable: {e}"),
-                    };
-                    format!("**{}**\n```\n{s}\n```", m.name)
+                    let listed = herdr::worktrees(&m).await;
+                    (m.name, listed)
                 })
             })
             .collect();
+        let mut out = Worktrees {
+            worktrees: vec![],
+            machines: vec![],
+            help: [
+                "drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>",
+            ],
+            discord: String::new(),
+        };
         let mut parts = Vec::new();
         for job in jobs {
-            parts.push(job.await?);
+            let (name, listed) = job.await?;
+            let (s, reach, error) = match listed {
+                Ok(s) if s.is_empty() => ("none".into(), Reachability::Reachable, None),
+                Ok(s) => (s, Reachability::Reachable, None),
+                Err(e) => (
+                    format!("unreachable: {e}"),
+                    Reachability::Unreachable,
+                    Some(e.to_string()),
+                ),
+            };
+            if error.is_none() {
+                out.worktrees.extend(worktree_rows(&name, &s));
+            }
+            parts.push(format!("**{name}**\n```\n{s}\n```"));
+            out.machines.push(MachineReach { name, reach, error });
         }
-        Ok(parts.join("\n"))
+        out.discord = parts.join("\n");
+        Ok(out)
     }
 
-    async fn cmd_done(&self, http: &Http, d: &Done) -> Result<String> {
+    async fn cmd_done(&self, http: &Http, d: &Done) -> Result<Change> {
         let (key, cell) = self.find_task(&d.thread).await?;
         let teardown = if d.remove {
             Teardown::Remove
         } else {
             Teardown::Close
         };
-        let th = {
+        let (th, base) = {
             let mut t = cell.lock().await;
             if matches!(t.role, Role::Scout(_)) {
                 bail!("a scout ends with scout-close");
+            }
+            // asking again would send a second journal prompt; --no-journal still ends the wait
+            let noop = match (&t.phase, d.journal) {
+                (Phase::Gone, _) => Some("already gone"),
+                (Phase::Ending(_), true) => Some("already ending"),
+                _ => None,
+            };
+            if let Some(why) = noop {
+                return Ok(Change::at(&t, noop, why));
             }
             if teardown == Teardown::Remove && t.origin == Origin::Attached {
                 bail!("drover didn't open this worktree, remove it by hand");
@@ -994,14 +1578,21 @@ impl App {
                 herdr::prompt(self.machine(&t.machine)?, &t.pane, journal::ENTRY_PROMPT).await?;
                 t.phase = Phase::Ending(teardown);
             }
-            t.thread
+            (t.thread, Change::at(&t, None, ""))
         };
         if !d.journal {
             let t = cell.lock().await.clone();
             self.remove(&key);
             self.save().await;
-            self.teardown(http, &t, teardown).await?;
-            return Ok("closed without a journal entry".into());
+            let removed = self.teardown(http, &t, teardown).await?;
+            let mut out = Change::at(&t, None, "closed without a journal entry")
+                .with("entry", "none")
+                .with("closed", true)
+                .with("teardown", teardown);
+            if teardown == Teardown::Remove {
+                out = out.with("checkout", if removed { "removed" } else { "kept" });
+            }
+            return Ok(out);
         }
         if let Some(th) = th {
             let msg = th.say(http, "writing the journal entry").await?;
@@ -1011,7 +1602,23 @@ impl App {
         } else {
             self.save().await;
         }
-        Ok("asked the agent for the journal entry".into())
+        let mut out = base;
+        out.discord = "asked the agent for the journal entry".into();
+        Ok(out
+            .with("entry", "asked")
+            .with("closed", false)
+            .with("teardown", teardown)
+            .help(vec!["drover journal".into()]))
+    }
+
+    async fn cmd_journal_remove(&self, id: i64) -> Result<Change> {
+        let removed = self.journal.remove(id).await?;
+        Ok(match removed {
+            true => Change::new(format!("removed #{id}")).with("id", id),
+            false => Change::new(format!("no journal entry #{id}"))
+                .with("id", id)
+                .with("noop", "already gone"),
+        })
     }
 }
 
@@ -1032,6 +1639,320 @@ mod tests {
         assert!(!root.join("scout-abc123").exists());
         remove_scout_dir(&root, "scout-abc123")?;
         std::fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    // The text the old String replies posted, for the same desk.
+    #[test]
+    fn agents_and_config_post_the_same_discord_text() {
+        let row = |machine: &str, pane: &str, status, thread| AgentRow {
+            machine: machine.into(),
+            pane: pane.into(),
+            harness: "claude".into(),
+            status,
+            cwd: "~/Developer/drover".into(),
+            thread,
+        };
+        let agents = Agents {
+            machines: vec![
+                MachineReach {
+                    name: "host".into(),
+                    reach: Reachability::Reachable,
+                    error: None,
+                },
+                MachineReach {
+                    name: "m2".into(),
+                    reach: Reachability::Unreachable,
+                    error: Some("ssh: connect timed out".into()),
+                },
+                MachineReach {
+                    name: "m3".into(),
+                    reach: Reachability::Reachable,
+                    error: None,
+                },
+            ],
+            agents: vec![
+                row("host", "w1:p1", Status::Idle, Some(ChannelId::new(42))),
+                row("host", "w2:p1", Status::Blocked, None),
+            ],
+            help: AGENTS_HELP,
+        };
+        let agents = Reply::Agents(agents);
+        // the terminal sees no thread and no herdr error text
+        assert_eq!(
+            serde_json::to_value(&agents).map(|v| toon::encode(&v)).ok(),
+            Some(
+                "agents[2]{pane,machine,status,harness,cwd}:\n  \"w1:p1\",host,idle,claude,~/Developer/drover\n  \
+                 \"w2:p1\",host,blocked,claude,~/Developer/drover\nmachines[3]{name,reach}:\n  host,reachable\n  \
+                 m2,unreachable\n  m3,reachable\nhelp[3]:\n  - drover screen --pane <pane>\n  - \
+                 drover send --pane <pane> --text <text>\n  - drover attach --machine <machine> --pane <pane>\n"
+                    .into()
+            )
+        );
+        assert_eq!(
+            agents.discord(),
+            "**host**\n`○ w1:p1` claude ~/Developer/drover <#42>\n`◆ w2:p1` claude ~/Developer/drover\n\
+             **m2**\nunreachable: ssh: connect timed out\n**m3**"
+        );
+
+        let config = |remotes: Vec<String>| Config {
+            host: "host".into(),
+            remotes,
+            channel: "7".into(),
+            repos: "~/.drover-workspace".into(),
+            state: STATE,
+            journal: "journal.db",
+            socket: "/home/u/.local/state/drover/drover.sock".into(),
+        };
+        let text = |remotes: &str| {
+            format!(
+                "host: host\nremotes: {remotes}\nchannel: <#7>\nrepos: ~/.drover-workspace\n\
+                 state: state.json\njournal: journal.db\nsocket: /home/u/.local/state/drover/drover.sock"
+            )
+        };
+        assert_eq!(Reply::Config(config(vec![])).discord(), text("none"));
+        assert_eq!(
+            Reply::Config(config(vec!["m2".into(), "m3".into()])).discord(),
+            text("m2, m3")
+        );
+        assert_eq!(Reply::Text("sent".into()).discord(), "sent");
+    }
+
+    fn toon_of(r: &Reply) -> String {
+        serde_json::to_value(r)
+            .map(|v| toon::encode(&v))
+            .unwrap_or_default()
+    }
+
+    fn journal_entry(text: &str) -> journal::Entry {
+        journal::Entry {
+            day: "2026-10-18".into(),
+            machine: "host".into(),
+            repo: "drover".into(),
+            branch: "theo/x".into(),
+            text: text.into(),
+        }
+    }
+
+    // The text the old String replies posted, for the same data.
+    #[test]
+    fn read_commands_post_the_same_discord_text() {
+        let listing = "drover\n  ● theo/axi-read   3          ↓0 ↑2\n  · old   clean   no upstream\n  ○ gone   missing   prune\n";
+        let rows = worktree_rows("host", listing);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(
+            (rows.first(), rows.get(2)),
+            (
+                Some(WorktreeRow {
+                    status: Checkout::Working,
+                    changes: Some(3),
+                    ..
+                }),
+                Some(WorktreeRow {
+                    status: Checkout::Open,
+                    changes: None,
+                    ..
+                })
+            )
+        ));
+        let w = Reply::Worktrees(Worktrees {
+            worktrees: rows,
+            machines: vec![MachineReach {
+                name: "host".into(),
+                reach: Reachability::Reachable,
+                error: None,
+            }],
+            help: [
+                "drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>",
+            ],
+            discord: format!("**host**\n```\n{}\n```", listing.trim_end()),
+        });
+        assert_eq!(
+            toon_of(&w),
+            "worktrees[3]{machine,repo,branch,status,changes}:\n  host,drover,theo/axi-read,working,3\n  \
+             host,drover,old,closed,0\n  host,drover,gone,open,null\nmachines[1]{name,reach}:\n  host,reachable\n\
+             help[1]:\n  - drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>\n"
+        );
+        assert!(
+            w.discord()
+                .starts_with("**host**\n```\ndrover\n  ● theo/axi-read")
+        );
+
+        let u = Reply::Usage(Usage {
+            windows: vec![Window {
+                machine: "host".into(),
+                harness: "claude",
+                window: "5h session",
+                percent: 37.0,
+                resets_at: Some(1_781_600_000),
+            }],
+            spend: vec![],
+            unavailable: vec![Unavailable {
+                machine: "host".into(),
+                harness: "cursor",
+            }],
+            lines: vec![
+                "**host**".into(),
+                "*claude* plan limits".into(),
+                "*cursor* unavailable: x".into(),
+            ],
+        });
+        assert_eq!(
+            toon_of(&u),
+            "windows[1]{machine,harness,window,percent,resets_at}:\n  host,claude,5h session,37,1781600000\n\
+             unavailable[1]{machine,harness}:\n  host,cursor\n"
+        );
+        assert_eq!(
+            u.discord(),
+            "**host**\n*claude* plan limits\n*cursor* unavailable: x"
+        );
+
+        let long = "x".repeat(2500);
+        let screen = |text: &str, chars| {
+            Reply::Screen(ScreenView {
+                pane: "w1:p1".into(),
+                machine: "host".into(),
+                status: Status::Blocked,
+                chars,
+                text: text.into(),
+                help: vec!["drover keys --pane w1:p1 --keys <keys>".into()],
+            })
+        };
+        let s = screen("a\nb", 3);
+        assert_eq!(
+            toon_of(&s),
+            "pane: \"w1:p1\"\nmachine: host\nstatus: blocked\nchars: 3\ntext: \"a\\nb\"\nhelp[1]:\n  - \"drover keys --pane w1:p1 --keys <keys>\"\n"
+        );
+        assert_eq!(s.discord(), "```\na\nb\n```");
+        assert_eq!(last_lines("a\n\n  \nb\n"), "a\nb");
+
+        let rows = || vec![(7, journal_entry("what: x")), (9, journal_entry(&long))];
+        let list = Entries::new(
+            rows(),
+            42,
+            false,
+            "0 entries".into(),
+            "drover journal --full".into(),
+        );
+        let t = toon_of(&Reply::Journal(list));
+        assert!(t.starts_with("count: 2 of 42\nentries[2]{id,repo,branch,day,chars,text}:\n  7,drover,theo/x,2026-10-18,7,\"what: x\"\n"));
+        assert!(
+            t.contains(",2500,xxx")
+                && t.contains(
+                    "…\nhelp[2]:\n  - drover journal --full\n  - drover journal rm <id>\n"
+                )
+        );
+        assert!(!t.contains(&"x".repeat(1002)));
+        // Discord asks for everything and gets it
+        let full = Reply::Journal(Entries::new(
+            rows(),
+            2,
+            true,
+            "0 entries".into(),
+            String::new(),
+        ));
+        assert_eq!(
+            full.discord(),
+            format!("#7 2026-10-18 drover theo/x\nwhat: x\n\n#9 2026-10-18 drover theo/x\n{long}")
+        );
+        assert!(!toon_of(&full).contains("count:"));
+
+        let none = |text: &str| Entries::new(vec![], 0, false, text.into(), String::new());
+        assert_eq!(
+            toon_of(&Reply::Journal(none("0 entries for drover"))),
+            "journal: 0 entries for drover\n"
+        );
+        assert_eq!(Reply::Journal(none("")).discord(), "no entries");
+        assert_eq!(Reply::Recall(none("")).discord(), "nothing");
+        let hit = Reply::Recall(Entries::new(
+            vec![(7, journal_entry("what: x"))],
+            1,
+            false,
+            String::new(),
+            String::new(),
+        ));
+        assert_eq!(hit.discord(), "2026-10-18 drover theo/x\nwhat: x");
+    }
+
+    // The text the old String replies posted, and the fields the terminal gets instead.
+    #[test]
+    fn write_commands_post_the_same_discord_text() -> Result<()> {
+        let task = |role| Task {
+            thread: None,
+            machine: "host".into(),
+            pane: PaneId("w1:p1".into()),
+            workspace: WorkspaceId("w1".into()),
+            kind: "claude".into(),
+            repo: "drover".into(),
+            branch: Some("theo/x".into()),
+            origin: Origin::Opened,
+            role,
+            phase: Phase::Idle,
+            status: None,
+            session: None,
+            last_reply: None,
+            reply: None,
+            prompt_msg: None,
+            dialog_msg: None,
+            queued: None,
+            inbox: Vec::new(),
+        };
+        let crew = task(Role::Crew {
+            mate: MateName::parse("docs")?,
+            owner: Owner::Mate,
+        });
+        let opened = Reply::Change(Change::task(&crew, None, "w1:p1").watch(&crew.pane));
+        assert_eq!(opened.discord(), "w1:p1");
+        assert_eq!(
+            toon_of(&opened),
+            "pane: \"w1:p1\"\nmachine: host\nworkspace: w1\nrepo: drover\nbranch: theo/x\nharness: claude\nmate: docs\n\
+             help[2]:\n  - \"drover screen --pane w1:p1\"\n  - \"drover send --pane w1:p1 --text <text>\"\n"
+        );
+
+        let noop = Reply::Change(
+            Change::at(&crew, Some("already taken"), "w1:p1 is user").with("owner", "user"),
+        );
+        assert_eq!(noop.discord(), "w1:p1 is user");
+        assert_eq!(
+            toon_of(&noop),
+            "pane: \"w1:p1\"\nmachine: host\nnoop: already taken\nowner: user\n"
+        );
+
+        let sent = Reply::Change(
+            Change::new("queued, sent when the agent is idle")
+                .with("pane", "w1:p1")
+                .with("delivery", "queued"),
+        );
+        assert_eq!(sent.discord(), "queued, sent when the agent is idle");
+        assert_eq!(toon_of(&sent), "pane: \"w1:p1\"\ndelivery: queued\n");
+
+        let closing = Reply::Change(
+            Change::at(&crew, None, "asked the agent for the journal entry")
+                .with("entry", "asked")
+                .with("closed", false)
+                .with("teardown", Teardown::Remove),
+        );
+        assert_eq!(closing.discord(), "asked the agent for the journal entry");
+        assert_eq!(
+            toon_of(&closing),
+            "pane: \"w1:p1\"\nmachine: host\nentry: asked\nclosed: false\nteardown: remove\n"
+        );
+
+        let gone = Reply::Change(
+            Change::new("no journal entry #7")
+                .with("id", 7)
+                .with("noop", "already gone"),
+        );
+        assert_eq!(gone.discord(), "no journal entry #7");
+        assert_eq!(toon_of(&gone), "id: 7\nnoop: already gone\n");
+
+        // a thread id is text, so a program reads it back as it is
+        let mut threaded = crew.clone();
+        threaded.thread = Some(ChannelId::new(42));
+        assert!(
+            toon_of(&Reply::Change(Change::task(&threaded, None, "")))
+                .ends_with("mate: docs\nthread: \"42\"\n")
+        );
         Ok(())
     }
 

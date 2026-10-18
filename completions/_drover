@@ -56,8 +56,12 @@ _drover() {
     escalate|brief) _arguments \
       "--mate=[mate]:mate:(${(f)"$(drover complete mates 2>/dev/null)"})" \
       '--text=[text]:text:' ;;
-    screen|take|release) _arguments \
+    screen) _arguments \
+      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" \
+      '--full[the whole text]' ;;
+    take|release) _arguments \
       "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" ;;
+    recall) _arguments '--full[the whole text]' ;;
     keys) _arguments \
       "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" \
       '--keys=[keys, space separated]:keys:' ;;
@@ -76,7 +80,8 @@ _drover() {
       '1: :(rm)' \
       "2: :(${(f)"$(drover complete journal 2>/dev/null)"})" \
       "--pane=[pane]:pane:(${(f)"$(drover complete panes "$machine" 2>/dev/null)"})" \
-      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" ;;
+      "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" \
+      '--full[the whole text]' ;;
     mate) _arguments "1: :(${(f)"$(drover complete mates 2>/dev/null)"})" '--discord[open a Discord thread]' ;;
     help) _describe -t commands 'drover command' commands ;;
   esac

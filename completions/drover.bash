@@ -30,12 +30,14 @@ _drover() {
         attach) words="--machine --pane --discord" ;;
         link) words="--machine --pane --mate" ;;
         escalate|brief) words="--mate --text" ;;
-        screen|take|release) words="--thread" ;;
+        screen) words="--pane --thread --full" ;;
+        take|release) words="--thread" ;;
         keys) words="--thread --keys" ;;
         send) words="--thread --text" ;;
         scout) words="close --pane --discord" ;;
         done) words="--thread --remove --no-journal" ;;
-        journal) words="rm --pane --thread" ;;
+        journal) words="rm --pane --thread --full" ;;
+        recall) words="--full" ;;
         mate) words="$(drover complete mates 2>/dev/null) --discord" ;;
         help) words=$commands ;;
         *) words= ;;

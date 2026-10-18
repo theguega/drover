@@ -4,6 +4,7 @@ mod herdr;
 mod journal;
 mod log;
 mod socket;
+mod toon;
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -32,8 +33,8 @@ use tokio::{
 };
 
 use action::{
-    Action, Attach, Done, JournalList, JournalRemove, Keys, Mate, MateName, New, Recall, Scout,
-    Sent, Target,
+    Action, Attach, Done, JournalList, JournalRemove, Keys, Look, Mate, MateName, New, Recall,
+    Scout, Sent, Spend, Target, Unavailable, Usage, Window,
 };
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
@@ -198,6 +199,8 @@ struct Task {
     session: Option<SessionId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_reply: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reply: Option<Excerpt>, // the end of the last turn, for the snapshot
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_msg: Option<MessageId>, // message that carries the state reaction
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,6 +209,26 @@ struct Task {
     queued: Option<String>, // one Discord prompt waiting while the agent works
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     inbox: Vec<String>, // crewmates' news waiting for their mate's turn to end
+}
+
+// The start of a reply and how long it was, in characters.
+#[derive(Clone, Serialize, Deserialize)]
+struct Excerpt {
+    text: String,
+    chars: usize,
+}
+
+// Characters of a reply the snapshot keeps.
+const REPLY_EXCERPT: usize = 300;
+
+impl Excerpt {
+    fn of(reply: &str) -> Self {
+        let reply = reply.trim();
+        Self {
+            text: head(reply, REPLY_EXCERPT),
+            chars: reply.chars().count(),
+        }
+    }
 }
 
 // What state.json may hold: this format, or the flags of the TypeScript drover.
@@ -229,6 +252,8 @@ struct Stored {
     status: Option<Status>,
     session: Option<String>,
     last_reply: Option<String>,
+    #[serde(default)]
+    reply: Option<Excerpt>,
     prompt_msg: Option<MessageId>,
     dialog_msg: Option<MessageId>,
     queued: Option<String>,
@@ -292,6 +317,7 @@ impl From<Stored> for Task {
             phase,
             status: s.status,
             last_reply: s.last_reply,
+            reply: s.reply,
             prompt_msg: s.prompt_msg,
             dialog_msg: s.dialog_msg,
             queued: s.queued,
@@ -328,7 +354,8 @@ type Cell = Arc<Mutex<Task>>;
 type Tasks = HashMap<String, Cell>;
 
 /// Whether a machine's event watcher could subscribe, as the snapshot shows it.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 enum Reachability {
     Reachable,
     Unreachable,
@@ -418,9 +445,9 @@ impl App {
     }
 
     fn machine(&self, name: &str) -> Result<&Machine> {
-        self.machines()
-            .find(|m| m.name == name)
-            .context(format!("unknown machine {name}"))
+        self.machines().find(|m| m.name == name).ok_or_else(|| {
+            cli::Failure::new(format!("unknown machine {name}"), "drover config").into()
+        })
     }
 
     // A mate's log, owner list and goal.
@@ -488,7 +515,7 @@ impl App {
                 found = Some((k, cell));
             }
         }
-        found.context(format!("no task {raw}"))
+        found.ok_or_else(|| cli::Failure::new(format!("no task {raw}"), "drover agents").into())
     }
 
     async fn panes_on(&self, machine: &str) -> Vec<PaneId> {
@@ -615,21 +642,29 @@ fn key_rows() -> Vec<CreateActionRow> {
         .collect()
 }
 
-async fn screen(m: &Machine, pane: &PaneId, note: &str) -> String {
-    let raw = herdr::screen(m, pane, 60)
-        .await
-        .unwrap_or_else(|e| format!("read failed: {e}"));
+// The last 30 lines with text.
+fn last_lines(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
-    let text = lines
+    lines
         .iter()
         .skip(lines.len().saturating_sub(30))
         .copied()
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+fn fenced(text: &str, note: &str) -> String {
     format!(
         "{note}```\n{}\n```",
         tail(&text.replace("```", "ˋˋˋ"), 1800)
     )
+}
+
+async fn screen(m: &Machine, pane: &PaneId, note: &str) -> String {
+    let raw = herdr::screen(m, pane, 60)
+        .await
+        .unwrap_or_else(|e| format!("read failed: {e}"));
+    fenced(&last_lines(&raw), note)
 }
 
 async fn screen_msg(m: &Machine, pane: &PaneId) -> CreateMessage {
@@ -770,44 +805,76 @@ fn bar(name: &str, pct: f64, reset: Option<i64>) -> String {
     )
 }
 
-// One machine's plans; an agent that isn't logged in there is left out.
-async fn usage_lines(m: &Machine) -> Vec<String> {
-    fn failed(lines: &mut Vec<String>, agent: &str, e: &herdr::Error) {
-        lines.push(format!(
-            "*{agent}* unavailable: {}",
+// One machine's plans, as rows and as the lines Discord posts; an agent that isn't logged in there is left out.
+async fn machine_usage(m: &Machine) -> Usage {
+    let mut out = Usage {
+        windows: vec![],
+        spend: vec![],
+        unavailable: vec![],
+        lines: vec![format!("**{}**", m.name)],
+    };
+    let machine = &m.name;
+    let window = |out: &mut Usage, harness, name, pct: f64, reset: Option<i64>| {
+        out.lines.push(bar(name, pct, reset));
+        out.windows.push(Window {
+            machine: machine.clone(),
+            harness,
+            window: name,
+            percent: pct.round(),
+            resets_at: reset,
+        });
+    };
+    let spend = |out: &mut Usage, harness, pool, used: f64, limit: f64| {
+        out.spend.push(Spend {
+            machine: machine.clone(),
+            harness,
+            pool,
+            used_usd: used / 100.0,
+            limit_usd: limit / 100.0,
+        });
+    };
+    let failed = |out: &mut Usage, harness, e: &herdr::Error| {
+        out.lines.push(format!(
+            "*{harness}* unavailable: {}",
             head(&e.to_string(), 200)
         ));
-    }
+        out.unavailable.push(Unavailable {
+            machine: machine.clone(),
+            harness,
+        });
+    };
     let (claude, cursor) = tokio::join!(herdr::usage(m), herdr::cursor_usage(m));
-    let mut lines = vec![format!("**{}**", m.name)];
     match claude {
         Ok(None) => {}
         Ok(Some(u)) => {
-            lines.push("*claude* plan limits".into());
+            out.lines.push("*claude* plan limits".into());
             let windows = [
                 ("5h session", &u.five_hour),
                 ("7d all", &u.seven_day),
                 ("7d opus", &u.seven_day_opus),
                 ("7d sonnet", &u.seven_day_sonnet),
             ];
-            lines.extend(windows.iter().filter_map(|(n, w)| {
-                w.as_ref()
-                    .map(|w| bar(n, w.utilization, w.resets_at.as_deref().and_then(unix)))
-            }));
+            for (n, w) in windows {
+                if let Some(w) = w {
+                    let reset = w.resets_at.as_deref().and_then(unix);
+                    window(&mut out, "claude", n, w.utilization, reset);
+                }
+            }
             if let Some(x) = u.extra_usage.filter(|x| x.is_enabled) {
-                lines.push(format!(
+                out.lines.push(format!(
                     "extra usage ${:.2} of ${:.2} this month",
                     x.used_credits / 100.0,
                     x.monthly_limit / 100.0
                 ));
+                spend(&mut out, "claude", "extra", x.used_credits, x.monthly_limit);
             }
         }
-        Err(e) => failed(&mut lines, "claude", &e),
+        Err(e) => failed(&mut out, "claude", &e),
     }
     match cursor {
         Ok(None) => {}
         Ok(Some(c)) => {
-            lines.push("*cursor* billing cycle".into());
+            out.lines.push("*cursor* billing cycle".into());
             let reset = c.billing_cycle_end.map(|ms| (ms.0 / 1000.0) as i64);
             if let Some(p) = c.plan_usage {
                 let windows = [
@@ -815,42 +882,49 @@ async fn usage_lines(m: &Machine) -> Vec<String> {
                     ("plan auto", p.auto_percent_used, None),
                     ("plan api", p.api_percent_used, None),
                 ];
-                lines.extend(
-                    windows
-                        .iter()
-                        .filter_map(|(n, pct, r)| pct.map(|pct| bar(n, pct.0, *r))),
-                );
+                for (n, pct, r) in windows {
+                    if let Some(pct) = pct {
+                        window(&mut out, "cursor", n, pct.0, r);
+                    }
+                }
                 if let (Some(spent), Some(limit)) = (p.total_spend, p.limit) {
                     let bonus = p
                         .bonus_spend
                         .filter(|b| b.0 > 0.0)
                         .map(|b| format!(" + ${:.2} free bonus", b.0 / 100.0))
                         .unwrap_or_default();
-                    lines.push(format!(
+                    out.lines.push(format!(
                         "you: ${:.2} spent (${:.2} included{bonus})",
                         spent.0 / 100.0,
                         limit.0 / 100.0
                     ));
+                    spend(&mut out, "cursor", "plan", spent.0, limit.0);
                 }
             }
             if let Some(o) = c.spend_limit_usage {
                 // a team pool is everyone's on-demand spend; Cursor sends no per-member share
-                let (who, used, limit) = match o.limit_type.as_deref() {
-                    Some("team") => ("team pool, all members", o.pooled_used, o.pooled_limit),
-                    _ => ("you", o.individual_used, o.individual_limit),
+                let (who, pool, used, limit) = match o.limit_type.as_deref() {
+                    Some("team") => (
+                        "team pool, all members",
+                        "on-demand-team",
+                        o.pooled_used,
+                        o.pooled_limit,
+                    ),
+                    _ => ("you", "on-demand", o.individual_used, o.individual_limit),
                 };
                 if let (Some(used), Some(limit)) = (used, limit) {
-                    lines.push(format!(
+                    out.lines.push(format!(
                         "on-demand ({who}): ${:.2} of ${:.2}",
                         used.0 / 100.0,
                         limit.0 / 100.0
                     ));
+                    spend(&mut out, "cursor", pool, used.0, limit.0);
                 }
             }
         }
-        Err(e) => failed(&mut lines, "cursor", &e),
+        Err(e) => failed(&mut out, "cursor", &e),
     }
-    lines
+    out
 }
 
 #[must_use]
@@ -981,10 +1055,12 @@ impl App {
             th.say(http, format!("```\n{}\n```", entry.replace("```", "")))
                 .await?;
         }
-        self.teardown(http, t, teardown).await
+        self.teardown(http, t, teardown).await?;
+        Ok(())
     }
 
-    async fn teardown(&self, http: &Http, t: &Task, teardown: Teardown) -> Result<()> {
+    // Whether the checkout was removed too.
+    async fn teardown(&self, http: &Http, t: &Task, teardown: Teardown) -> Result<bool> {
         let m = self.machine(&t.machine)?;
         // drover-wt rm closes the workspace too; anything it kept is only closed
         let (removed, mut note) = match teardown {
@@ -1023,7 +1099,7 @@ impl App {
         if let Some(th) = t.thread {
             let _ = th.edit_thread(http, EditThread::new().archived(true)).await;
         }
-        Ok(())
+        Ok(removed)
     }
 
     // Discord turns an interaction into an Action; the text it gets back is what the thread sees.
@@ -1061,13 +1137,18 @@ impl App {
             }),
             "take" => Action::Take(Target { thread }),
             "release" => Action::Release(Target { thread }),
-            "screen" => Action::Screen(Target { thread }),
+            "screen" => Action::Screen(Look {
+                thread,
+                full: true,
+                discord: true,
+            }),
             "keys" => Action::Keys(Keys {
                 thread,
                 keys: req(i, "keys")?
                     .split_whitespace()
                     .map(String::from)
                     .collect(),
+                discord: true,
             }),
             "done" => Action::Done(Done {
                 thread,
@@ -1076,6 +1157,7 @@ impl App {
             }),
             "recall" => Action::Recall(Recall {
                 query: req(i, "query")?.into(),
+                full: true,
             }),
             "journal" => Action::JournalList(JournalList {
                 task: self
@@ -1083,6 +1165,7 @@ impl App {
                     .await
                     .is_ok()
                     .then(|| thread.clone()),
+                full: true,
             }),
             "journal-rm" => Action::JournalRemove(JournalRemove {
                 id: req(i, "entry")?.parse::<i64>()?,
@@ -1091,7 +1174,7 @@ impl App {
         };
         let terminal = matches!(action, Action::Screen(_) | Action::Keys(_));
         i.defer(http).await?;
-        let text = self.act(http, action).await?;
+        let text = self.act(http, action).await?.discord();
         let mut reply = edit(tail(&text, 1990));
         if terminal {
             reply = reply.components(key_rows());
@@ -1186,14 +1269,19 @@ impl App {
         };
         let thread = i.channel_id.to_string();
         let action = match k {
-            "refresh" => Action::Screen(Target { thread }),
+            "refresh" => Action::Screen(Look {
+                thread,
+                full: true,
+                discord: true,
+            }),
             key => Action::Keys(Keys {
                 thread,
                 keys: vec![key.into()],
+                discord: true,
             }),
         };
         i.defer(http).await?;
-        let text = self.act(http, action).await?;
+        let text = self.act(http, action).await?.discord();
         i.edit_response(http, edit(tail(&text, 1990)).components(key_rows()))
             .await?;
         Ok(())
@@ -1462,6 +1550,9 @@ impl App {
             }
             said = Some(screen);
         }
+        if let Some(s) = &said {
+            t.reply = Some(Excerpt::of(s));
+        }
         self.drain_queue(http, &mut t, m).await?;
         // the end of a turn holds its question or result
         Ok(said.map_or(Step::Keep, |s| {
@@ -1712,18 +1803,10 @@ fn require_runtime() -> Result<()> {
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let out = match cli::parse(&args) {
-        Ok(cli::Invocation::Serve) => return fail(serve().await),
-        Ok(cli::Invocation::Help) => Ok(cli::HELP.into()),
-        Ok(cli::Invocation::Usage(text)) => Ok(text),
-        Ok(cli::Invocation::Run(Action::Watch)) => return fail(control::watch_client().await),
-        Ok(cli::Invocation::Run(action)) => control::send(&action).await,
-        Err(e) => Err(e),
-    };
-    match out {
-        Ok(text) => println!("{text}"),
-        Err(e) => fail(Err(e)),
+    if args.first().is_some_and(|a| a == "serve") {
+        return fail(serve().await);
     }
+    std::process::exit(cli::run(cli::parse(&args)).await);
 }
 
 fn fail(r: Result<()>) {
@@ -1761,8 +1844,10 @@ mod tests {
         assert!(t.origin == Origin::Opened && t.session.is_none());
         assert!(t.role == Role::Task);
         assert_eq!(t.prompt_msg, Some(MessageId::new(456)));
+        assert!(t.reply.is_none());
 
         let mut term = t.clone();
+        term.reply = Some(Excerpt::of(&format!(" {} ", "é".repeat(400))));
         term.pane = PaneId("p2".into());
         term.thread = None;
         tasks.insert("host:p2".into(), term);
@@ -1773,7 +1858,12 @@ mod tests {
                 .is_some_and(|t| t.thread == Some(ChannelId::new(123))
                     && t.phase == Phase::Ending(Teardown::Remove))
         );
-        assert!(back.get("host:p2").is_some_and(|t| t.thread.is_none()));
+        assert!(back.get("host:p2").is_some_and(|t| {
+            t.thread.is_none()
+                && t.reply
+                    .as_ref()
+                    .is_some_and(|r| r.chars == 400 && r.text.chars().count() == 300)
+        }));
         Ok(())
     }
 

@@ -97,6 +97,22 @@ cp -r skills/drover ~/.agents/skills/
 
 Keep your copy in your own dotfiles if you want it on every machine. The installer doesn't touch the skills directory.
 
+## Session context
+
+Claude Code can run `drover` at the start of every session, so the desk's home view is in the context from the first message. It is opt-in. Add this to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "drover" }] }
+    ]
+  }
+}
+```
+
+Its output is added to every session's context, so each session pays for those tokens. The [skill](#skill) is the lighter choice: it loads only when a task mentions drover.
+
 ## Completion
 
 Completion is opt-in: the installer doesn't set it up. Values such as machines, mates, threads and panes come from `drover complete`, so the scripts work with a running service.
