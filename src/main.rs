@@ -987,7 +987,9 @@ impl App {
         if let Some(name) = t.role.mate() {
             // a mate's log records the close, and its owner list drops the pane
             let closed = log::append(&self.mate_dir(name), log::Event::Closed, &t.pane.0);
-            let owners = self.write_owners(name, Some(&t.pane)).await;
+            let owners = self
+                .write_owners(name, Some(&task_key(&t.machine, &t.pane)))
+                .await;
             if let Err(e) = closed.and(owners) {
                 eprintln!("mate {name}: {e}");
             }
@@ -1281,6 +1283,19 @@ impl App {
                 }
             }
             Err(e) => eprintln!("task {key}: {e}"),
+        }
+        // a crew pane that went gone leaves its mate's owner list; step has let go of the cell by now
+        let gone_crew = {
+            let t = cell.lock().await;
+            match &t.role {
+                Role::Crew { mate, .. } if t.phase == Phase::Gone => Some(mate.clone()),
+                _ => None,
+            }
+        };
+        if let Some(mate) = gone_crew
+            && let Err(e) = self.write_owners(&mate, None).await
+        {
+            eprintln!("mate {mate}: {e}");
         }
     }
 
@@ -1779,5 +1794,54 @@ mod tests {
             Some(1_790_981_400)
         );
         assert_eq!(unix("2024-02-29T12:00:00Z"), Some(1_709_208_000));
+    }
+
+    #[tokio::test]
+    async fn owners_skip_the_held_cell_and_gone_crew() -> Result<()> {
+        let crew = |pane: &str, phase: &str| {
+            format!(
+                r#""host:{pane}": {{"machine":"host","pane":"{pane}","workspace":"w","kind":"claude","repo":"drover","branch":"","origin":"attached","phase":"{phase}","owner":"mate","mate":"a"}}"#
+            )
+        };
+        let state = format!(
+            "{{{}, {}, {}}}",
+            crew("p1", "idle"),
+            crew("p2", "idle"),
+            crew("p3", "gone")
+        );
+        let root = std::env::temp_dir().join(format!("drover-owners-{}", std::process::id()));
+        let app = App {
+            token: String::new(),
+            guild: GuildId::new(1),
+            channel: ChannelId::new(1),
+            allowed: HashSet::new(),
+            host: Machine::new("host".into(), Reach::Local),
+            remotes: Vec::new(),
+            tasks: StdMutex::new(
+                parse_state(&state)?
+                    .into_iter()
+                    .map(|(k, t)| (k, Arc::new(Mutex::new(t))))
+                    .collect(),
+            ),
+            journal: Journal::open(":memory:")?,
+            mates: root.clone(),
+            started: AtomicBool::new(false),
+            wake: Notify::new(),
+            saving: Mutex::new(()),
+        };
+        let a = MateName::parse("a")?;
+        let cells = app.cells();
+        let (_, held) = cells.iter().find(|(k, _)| k == "host:p1").context("p1")?;
+        let _closing = held.lock().await; // step holds this while it tears the task down
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            app.write_owners(&a, Some("host:p1")),
+        )
+        .await
+        .context("write_owners waited on the held cell")??;
+        let owners = std::fs::read_to_string(root.join("state/a/owners"))?;
+        assert_eq!(owners.trim(), "p2 mate");
+        std::fs::remove_dir_all(&root)?;
+        Ok(())
     }
 }

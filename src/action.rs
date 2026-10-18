@@ -911,14 +911,17 @@ impl App {
     }
 
     // The panes linked to a mate and who may drive each one, for the mate to read before it sends input.
-    // `skip` leaves out a pane that is closing.
-    pub(crate) async fn write_owners(&self, name: &MateName, skip: Option<&PaneId>) -> Result<()> {
+    // `skip` is the key of the closing task, whose cell the caller still holds: locking it would wait forever.
+    pub(crate) async fn write_owners(&self, name: &MateName, skip: Option<&str>) -> Result<()> {
         let mut lines = Vec::new();
-        for (_, cell) in self.cells() {
+        for (key, cell) in self.cells() {
+            if skip == Some(key.as_str()) {
+                continue;
+            }
             let t = cell.lock().await;
             if let Role::Crew { mate, owner } = &t.role
                 && mate == name
-                && skip != Some(&t.pane)
+                && t.phase != Phase::Gone
             {
                 lines.push(format!("{} {}", t.pane.0, owner.as_str()));
             }
