@@ -102,8 +102,12 @@ Each crew message is one round for its node.
 
 ### Review
 
-1. Review only what the level is about: the files that carry the contract or the risk, not the whole diff. Start a reviewer on the implementer's branch: `drover new` with the same repo and branch, `--model opus` for `adversarial`, `sonnet` for `code`, another model family if the harness allows, and `--mate <your name>`.
-2. Brief it: the goal, the node's task, out of scope, `git diff main...<branch> -- <those files>`, and the claims in the implementer's `DONE:`. It reads and runs, and edits nothing. For `adversarial`, name what to break: a field the other side decodes, a change mid-run, a race on shared state.
+The reviewer is a node like any other: its model comes from Model routing, and it runs on the implementer's branch with `drover new` and `--mate <your name>`. It reads and runs, and edits nothing.
+
+1. Brief it with the goal, the node's task, out of scope, the claims in the implementer's `DONE:`, and the diff of only the files the level is about: `git diff main...<branch> -- <files>`.
+2. What it looks at:
+   - `code`: the files that allocate, loop, hold state or move something. Claims: it releases what it takes, stops when told, and fails safe. Try: run it long, stop it mid-way, feed it the worst input, and look for unbounded growth and a safe state on every error path.
+   - `adversarial`: the files that write or define what others read, and the readers it names. Claims: every field, unit and default the other side relies on is unchanged or versioned. Try: old data through the new code and new data through the old reader, a missing or extra field, a boundary value, two writers at once, and a change made mid-run.
 3. Its check: findings with `file:line` and a command that shows each, ending in `VERDICT: pass` or `VERDICT: fail`, and `git status --porcelain` empty.
 4. On `fail`, send the implementer the findings as the next step, one at a time. A claim with no test behind it is `unverified`: escalate it.
 5. One adversarial round per node. A second needs the desk.
