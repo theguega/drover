@@ -48,10 +48,22 @@ impl App {
             .map(|(_, e)| e)
             .collect();
 
+        let reachability = self
+            .reachability
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let machines: Vec<Value> = self
             .machines()
-            .map(|m| json!({ "name": m.name, "host": m.name == self.host.name }))
+            .map(|m| {
+                let reach = match reachability.get(&m.name) {
+                    Some(Reachability::Reachable) => "reachable",
+                    Some(Reachability::Unreachable) => "unreachable",
+                    None => "unknown",
+                };
+                json!({ "name": m.name, "host": m.name == self.host.name, "reach": reach })
+            })
             .collect();
+        drop(reachability);
 
         Ok(json!({
             "machines": machines,

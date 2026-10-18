@@ -327,6 +327,13 @@ fn parse_state(s: &str) -> Result<BTreeMap<String, Task>> {
 type Cell = Arc<Mutex<Task>>;
 type Tasks = HashMap<String, Cell>;
 
+/// Whether a machine's event watcher could subscribe, as the snapshot shows it.
+#[derive(Clone, Copy, PartialEq)]
+enum Reachability {
+    Reachable,
+    Unreachable,
+}
+
 struct App {
     token: String,
     guild: GuildId,
@@ -343,6 +350,8 @@ struct App {
     wake: Notify,
     /// Every save notifies this, so `drover watch` streams a new snapshot.
     changed: Notify,
+    /// Per machine, from its watcher. A machine never tried is absent.
+    reachability: StdMutex<HashMap<String, Reachability>>,
     /// Saves share one temp file, so they take turns.
     saving: Mutex<()>,
 }
@@ -388,8 +397,20 @@ impl App {
             started: AtomicBool::new(false),
             wake: Notify::new(),
             changed: Notify::new(),
+            reachability: StdMutex::new(HashMap::new()),
             saving: Mutex::new(()),
         })
+    }
+
+    fn set_reachability(&self, machine: &str, now: Reachability) {
+        let before = self
+            .reachability
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(machine.into(), now);
+        if before != Some(now) {
+            self.changed.notify_waiters();
+        }
     }
 
     fn machines(&self) -> impl Iterator<Item = &Machine> {
@@ -1602,6 +1623,7 @@ async fn watch_machine(app: Arc<App>, http: Arc<Http>, m: Machine) {
             Ok(()) => backoff = Duration::from_secs(1),
             Err(e) => {
                 eprintln!("events {}: {e}", m.name);
+                app.set_reachability(&m.name, Reachability::Unreachable);
                 sleep(backoff).await;
                 backoff = (backoff.saturating_mul(2)).min(Duration::from_secs(30));
             }
@@ -1632,6 +1654,7 @@ async fn watch_session(app: &App, http: &Http, m: &Machine) -> Result<()> {
         Err(_) => watched.clone(),
     };
     let mut conn = socket::Events::subscribe(m.ssh(), &sub).await?;
+    app.set_reachability(&m.name, Reachability::Reachable);
     // subscribe first, then read, so nothing between the two is missed
     app.reconcile(http, &m.name).await;
 
