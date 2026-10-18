@@ -52,13 +52,13 @@ out of scope: <what a crewmate must not touch>
 
 ## Model routing
 
-Pick the agent and model per node with `--agent` and `--model`. Spend the strong model where a mistake is expensive.
+Pick the agent and model per node with `--agent` and `--model`. Spend the strong model where a mistake is expensive. The cursor column is passed as `--agent cursor --model <id>`.
 
-| Node | Model |
-|---|---|
-| lookups, logs, docs, config; mechanical edits at any size (renames, moves, formatting, API migrations, tests that follow an existing pattern) whose check is a command | `haiku` |
-| a scoped change with a clear check | `sonnet` |
-| debugging, design, changes across many files that need judgment, anything that failed once on a lighter model | `opus` |
+| Node | Model | Cursor |
+|---|---|---|
+| lookups, logs, docs, config; mechanical edits at any size (renames, moves, formatting, API migrations, tests that follow an existing pattern) whose check is a command | `haiku` | `gpt-5.6-luna-medium`, a little weaker than haiku |
+| a scoped change with a clear check | `sonnet` | |
+| debugging, design, changes across many files that need judgment, anything that failed once on a lighter model | `opus` | `gemini-4-argon-high` |
 
 Move a node up one model when it fails a round for lack of skill, not for lack of facts. Lack of facts is a brief problem: fix the brief.
 
