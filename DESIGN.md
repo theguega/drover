@@ -91,11 +91,47 @@ drover is also a terminal tool. `drover help` is the full reference, for humans 
 
 - The service holds the state, so the CLI does not write state files. `drover <cmd>` sends one JSON line to the service over a unix socket in the state directory and prints the reply.
 - Clients and the host. Only the host runs the service, and its socket is local, so another machine cannot reach it. A client's `drover` is `bin/drover-ssh`: it runs the same command on the host in `DROVER_HOST` over ssh. It refuses `serve`, which would start a second Discord bot.
-- Discord and the socket call one action layer: a `Command` enum and one `run` function that returns text. Discord handlers only translate interactions into commands and post the text.
+- Discord and the socket call one action layer: an `Action` enum and one `act` function that returns a `Reply`. Discord handlers only translate interactions into actions and post `Reply::discord()`. The socket sends the reply as JSON, and the terminal prints it as TOON (`src/toon.rs`). `Reply::Text` carries a command not converted yet, printed as it is on both sides.
 - A task started from the CLI stays in the terminal by default; `--discord` (or `drover attach --pane <id> --discord` later) opens a Discord thread so the phone sees it too.
 - Argument parsing is hand-written. No new dependency.
 - `drover serve` runs the service. Any other first word is a CLI command, so `drover new …` and `drover mate …` need no flags.
 - The `drover` skill documents every command for agents, and lives in the single skills folder described under Layers.
+
+## Terminal output (AXI)
+
+The terminal is an [AXI](https://github.com/kunchenguid/axi): agents and other tools read it and turn it into the next command.
+
+- stdout is [TOON](https://toonformat.dev). `snapshot` and `watch` stay JSON, for programs. Keys come out sorted (serde_json orders them), with a root `help` last.
+- Errors are TOON on stdout too: `error: <what>` and `help: <command that fixes it>`. Exit 0 ok (a no-op too), 1 error, 2 usage error. A service error raised as `cli::Failure` carries its own `help`; any other falls back to `drover <cmd> --help`.
+- One `Spec` per command in `cli.rs` is the only list of its flags: parsing, the unknown-flag error, `--help`, and `drover help` read it. An unknown flag fails before anything else, naming the flag and the valid ones.
+- `drover` alone is the home view, built from the snapshot: `bin`, `description`, `desk` counts, `needs` (blocked agents, escalations), `help`.
+- `-v`, `-V` and `--version` print the bare version.
+- Converted so far: `agents`, `config`. The rest are `Reply::Text` until they move.
+
+### Field names
+
+One name per thing, the same in TOON, the snapshot JSON and help placeholders (`<pane>` is the value of a `pane` field). A list is one record per row.
+
+| Field | Is | Feeds |
+|---|---|---|
+| `machine` | a machine name, as `drover config` lists it | `--machine <machine>` |
+| `pane` | a herdr pane id, like `wAX:p1` | `--pane <pane>` |
+| `thread` | a Discord thread id (in the snapshot today, only whether one is bound) | `--thread <thread>` |
+| `mate` | a mate name | `--mate <mate>`, `drover mate <name>` |
+| `id` | a journal entry id | `drover journal rm <id>` |
+| `repo`, `branch` | the task's repo and branch | `--repo <repo>`, `--branch <branch>` |
+| `harness` | the agent CLI: `claude` or `cursor` | `--agent <agent>` |
+| `status` | the agent: `idle`, `working`, `blocked`, `done`, `unknown` | |
+| `phase` | the task: `starting`, `idle`, `waiting`, `ending`, `gone` | |
+| `role` | `task`, `crew`, `mate`, `scout` | |
+| `owner` | who drives a crew pane: `user`, `mate` | `drover take`, `drover release` |
+| `reach` | a machine: `reachable`, `unreachable`, `unknown` | |
+| `name` | the record's own name, in a list of machines or mates | |
+| `at` | unix seconds | |
+| `cwd`, `bin` | a path, with the home directory as `~` | |
+| `help` | next commands, complete, with `<placeholders>` | |
+
+Status words are enums, never prose. Text meant for a person, such as herdr's own error, stays on Discord and out of TOON.
 
 ## Events
 
