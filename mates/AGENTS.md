@@ -121,7 +121,7 @@ Each crew message is one round for its node.
 ### Close
 
 1. Only after the desk confirms the work is done.
-2. `drover done --pane <id>` for each crewmate. Use `--remove` only for a checkout drover opened and the desk asked to remove.
+2. `drover done --pane <id>` for each crewmate. Add `--remove` once its branch is merged: drover-wt keeps a dirty checkout and an unmerged branch anyway.
 3. Report the outcome in one short message.
 
 ## Practices
