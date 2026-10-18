@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::action::{
-    Action, Attach, Candidates, Done, JournalList, JournalRemove, Keys, Mate, MateName, New, Note,
-    Recall, Scout, Send, Target,
+    Action, Attach, Candidates, Done, JournalList, JournalRemove, Keys, Look, Mate, MateName, New,
+    Note, Recall, Scout, Send, Target,
 };
 
 pub enum Invocation {
@@ -84,6 +84,11 @@ const THREAD: Arg = Arg(
     "--thread <thread>",
     "none",
     "a Discord thread id instead of --pane",
+);
+const FULL: Arg = Arg(
+    "--full",
+    "off",
+    "the whole text, not the first 1000 characters",
 );
 const DISCORD: Arg = Arg("--discord", "off", "also open a Discord thread");
 
@@ -215,10 +220,10 @@ const SPECS: &[Spec] = &[
     Spec {
         name: "screen",
         about: "Show the terminal of a task's agent (Discord /screen)",
-        args: &[PANE, THREAD],
+        args: &[PANE, THREAD, FULL],
         examples: [
             "drover screen --pane wAX:p1",
-            "drover screen --thread 1300000000000000000",
+            "drover screen --pane wAX:p1 --full",
         ],
     },
     Spec {
@@ -313,8 +318,11 @@ const SPECS: &[Spec] = &[
     Spec {
         name: "recall",
         about: "Search the journal (Discord /recall)",
-        args: &[Arg("<words>", "required", "what to search for")],
-        examples: ["drover recall fts5 index", "drover recall owners deadlock"],
+        args: &[Arg("<words>", "required", "what to search for"), FULL],
+        examples: [
+            "drover recall fts5 index",
+            "drover recall owners deadlock --full",
+        ],
     },
     Spec {
         name: "journal",
@@ -322,8 +330,9 @@ const SPECS: &[Spec] = &[
         args: &[
             Arg("--pane <pane>", "every repo", "a task whose repo to show"),
             THREAD,
+            FULL,
         ],
-        examples: ["drover journal", "drover journal --pane wAX:p1"],
+        examples: ["drover journal", "drover journal --pane wAX:p1 --full"],
     },
     Spec {
         name: "journal rm",
@@ -564,7 +573,10 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
             Some("journal") => Candidates::Journal,
             _ => bail!("missing <kind>"),
         }),
-        "screen" => Action::Screen(target()?),
+        "screen" => Action::Screen(Look {
+            thread: flags.target()?,
+            full: flags.on("full"),
+        }),
         "keys" => Action::Keys(Keys {
             thread: flags.target()?,
             keys: flags
@@ -593,13 +605,17 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
             remove: flags.on("remove"),
             journal: !flags.on("no-journal"),
         }),
-        "recall" => Action::Recall(Recall { query: words()? }),
+        "recall" => Action::Recall(Recall {
+            query: words()?,
+            full: flags.on("full"),
+        }),
         "journal" => {
             if !flags.words.is_empty() {
                 bail!("unexpected {}", flags.words.join(" "));
             }
             Action::JournalList(JournalList {
                 task: flags.opt("pane").or_else(|| flags.opt("thread")),
+                full: flags.on("full"),
             })
         }
         "journal rm" => Action::JournalRemove(JournalRemove {

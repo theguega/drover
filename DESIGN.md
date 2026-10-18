@@ -106,7 +106,9 @@ The terminal is an [AXI](https://github.com/kunchenguid/axi): agents and other t
 - One `Spec` per command in `cli.rs` is the only list of its flags: parsing, the unknown-flag error, `--help`, and `drover help` read it. An unknown flag fails before anything else, naming the flag and the valid ones.
 - `drover` alone is the home view, built from the snapshot: `bin`, `description`, `desk` counts, `needs` (blocked agents, escalations), `help`. The counts are the live desk: a gone task is history and is not counted.
 - `-v`, `-V` and `--version` print the bare version.
-- Converted so far: `agents`, `config`. The rest are `Reply::Text` until they move.
+- Long text is cut to 1000 characters, with its whole length in `chars` and a `help` line for `--full`: a screen keeps its end, a journal entry its start. `--full` is declared only on commands that cut (`screen`, `journal`, `recall`). Discord asks for everything, so its text does not change.
+- A list capped at its limit says `count: 5 of 42`. An empty one says so in a line, such as `journal: 0 entries for drover`.
+- Converted so far: `agents`, `config`, `worktrees`, `usage`, `screen`, `journal`, `recall`. The rest are `Reply::Text` until they move.
 
 ### Field names
 
@@ -123,13 +125,19 @@ Field order, in every record: the id that feeds the next command first, then its
 | `id` | a journal entry id | `drover journal rm <id>` |
 | `repo`, `branch` | the task's repo and branch | `--repo <repo>`, `--branch <branch>` |
 | `harness` | the agent CLI: `claude` or `cursor` | `--agent <agent>` |
-| `status` | the agent: `idle`, `working`, `blocked`, `done`, `unknown` | |
+| `status` | the agent: `idle`, `working`, `blocked`, `done`, `unknown`. A worktree's: `working`, `blocked`, `done`, `open` (a workspace whose agent is idle or unknown), `closed` | |
 | `phase` | the task: `starting`, `idle`, `waiting`, `ending`, `gone` | |
 | `role` | `task`, `crew`, `mate`, `scout` | |
 | `owner` | who drives a crew pane: `user`, `mate` | `drover take`, `drover release` |
 | `reach` | a machine: `reachable`, `unreachable`, `unknown` | |
 | `name` | the record's own name, in a list of machines or mates | |
-| `at` | unix seconds | |
+| `at`, `resets_at` | unix seconds | |
+| `changes` | a worktree's changed files, 0 when clean, null when the checkout is gone | |
+| `window`, `percent` | a usage limit and how much of it is used | |
+| `pool`, `used_usd`, `limit_usd` | a spend limit (`extra`, `plan`, `on-demand`, `on-demand-team`) and its dollars | |
+| `day`, `text` | a journal entry's date and its text | |
+| `chars` | the whole length of a field that was cut | `--full` |
+| `count` | `5 of 42`, on a capped list | |
 | `cwd`, `bin` | a path, with the home directory as `~` | |
 | `help` | next commands, complete, with `<placeholders>` | |
 
@@ -145,6 +153,7 @@ The desk as read-only JSON, for tools outside drover. It is a client of the acti
 
 - `Action::Snapshot` builds the desk from the tasks in memory and from each mate's `goal.md` and log. `drover snapshot` prints it. It writes nothing and runs no shell.
 - `drover watch` prints the snapshot as one JSON line, then one line per change, until the client exits. The service builds each line when `App.changed` fires, which every save notifies; changes that land during a build coalesce into the next line. `bin/drover-ssh` execs over `ssh -T`, so it streams the same way.
+- A task's last reply is not in the snapshot. drover stores only its id; the text is in the agent's transcript, which costs a shell per remote task, and `watch` builds a snapshot on every change. Keeping a 300-character excerpt when the turn ends would be the cheap way.
 - A harness is shown by name. A field a harness cannot supply, such as model, context fill or tokens, is absent, not guessed. Usage is not in the snapshot yet.
 - The mate log has no node, round or check, so those would become `key=value` fields on the same line, for example `1781600000 crew node=docs round=2 check=fail pane=crew:drover-docs`. Still one line per event, still grep-friendly.
 

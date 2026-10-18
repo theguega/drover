@@ -84,16 +84,46 @@ impl Journal {
         .await
     }
 
-    pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<Entry>> {
+    // Best matches first, with the id `remove` takes.
+    pub async fn search(&self, q: &str, limit: u32) -> Result<Vec<(i64, Entry)>> {
         let m = terms(q);
         if m.is_empty() {
             return Ok(vec![]);
         }
         self.run(move |db| {
-            let mut st = db.prepare(&format!(
-                "{COLS} where journal match ?1 order by rank limit ?2"
-            ))?;
-            st.query_map(params![m, limit], entry)?.collect()
+            let mut st = db.prepare(
+                "select day, machine, repo, branch, text, rowid from journal where journal match ?1 order by rank limit ?2",
+            )?;
+            st.query_map(params![m, limit], |r| Ok((r.get::<_, i64>(5)?, entry(r)?)))?
+                .collect()
+        })
+        .await
+    }
+
+    // How many entries `search` could return.
+    pub async fn matches(&self, q: &str) -> Result<u32> {
+        let m = terms(q);
+        if m.is_empty() {
+            return Ok(0);
+        }
+        self.run(move |db| {
+            db.query_row(
+                "select count(*) from journal where journal match ?1",
+                params![m],
+                |r| r.get(0),
+            )
+        })
+        .await
+    }
+
+    // How many entries `list` could return.
+    pub async fn count(&self, repo: Option<String>) -> Result<u32> {
+        self.run(move |db| {
+            db.query_row(
+                "select count(*) from journal where ?1 is null or repo = ?1",
+                params![repo],
+                |r| r.get(0),
+            )
         })
         .await
     }
@@ -133,12 +163,12 @@ impl Journal {
         let mut seen = HashSet::new();
         let mut lines = vec![];
         let mut size = 0;
-        for e in self
-            .recent(repo, 3)
-            .await?
-            .into_iter()
-            .chain(self.search(&format!("{repo} {prompt}"), 5).await?)
-        {
+        for e in self.recent(repo, 3).await?.into_iter().chain(
+            self.search(&format!("{repo} {prompt}"), 5)
+                .await?
+                .into_iter()
+                .map(|(_, e)| e),
+        ) {
             let s = format(&e);
             let n = s.chars().count();
             if seen.contains(&s) || size + n > cap {
@@ -187,6 +217,7 @@ mod tests {
             r#""rust" OR "port" OR "x_y""#
         );
         assert_eq!(j.search("rust", 5).await?.len(), 1);
+        assert_eq!((j.matches("rust").await?, j.count(None).await?), (1, 2));
         assert!(j.search("a b", 5).await?.is_empty());
 
         let ctx = j.context("drover", "sqlite", 2000).await?;

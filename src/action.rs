@@ -24,7 +24,7 @@ pub enum Action {
     Config,
     Snapshot,
     Watch,
-    Screen(Target),
+    Screen(Look),
     Mate(Mate),
     Scout(Scout),
     Brief(Note),
@@ -102,6 +102,14 @@ pub struct Target {
     pub thread: String,
 }
 
+// A task's screen. Without `full` the terminal gets the end of it, a screenful of text.
+#[derive(Serialize, Deserialize)]
+pub struct Look {
+    pub thread: String,
+    #[serde(default)]
+    pub full: bool,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Send {
     pub thread: String,
@@ -124,12 +132,16 @@ pub struct Done {
 #[derive(Serialize, Deserialize)]
 pub struct Recall {
     pub query: String,
+    #[serde(default)]
+    pub full: bool,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct JournalList {
     // a task, by pane or thread id: list its repo's entries instead of all
     pub task: Option<String>,
+    #[serde(default)]
+    pub full: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -169,6 +181,11 @@ pub enum Reply {
     Text(String),
     Agents(Agents),
     Config(Config),
+    Worktrees(Worktrees),
+    Usage(Usage),
+    Screen(ScreenView),
+    Journal(Entries),
+    Recall(Entries),
 }
 
 impl Reply {
@@ -178,6 +195,11 @@ impl Reply {
             Self::Text(s) => s.clone(),
             Self::Agents(a) => a.discord(),
             Self::Config(c) => c.discord(),
+            Self::Worktrees(w) => w.discord.clone(),
+            Self::Usage(u) => u.lines.join("\n"),
+            Self::Screen(s) => fenced(&s.text, ""),
+            Self::Journal(e) => e.discord("no entries", true),
+            Self::Recall(e) => e.discord("nothing", false),
         }
     }
 }
@@ -269,6 +291,210 @@ impl Config {
     }
 }
 
+#[derive(Serialize)]
+pub struct Worktrees {
+    pub worktrees: Vec<WorktreeRow>,
+    pub machines: Vec<MachineReach>,
+    pub help: [&'static str; 1],
+    #[serde(skip)]
+    discord: String,
+}
+
+// A worktree's status is its agent's, or `open` for a workspace without a known agent state, or `closed`.
+#[derive(Serialize, PartialEq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum Checkout {
+    Working,
+    Blocked,
+    Done,
+    Open,
+    Closed,
+}
+
+#[derive(Serialize, PartialEq, Debug)]
+pub struct WorktreeRow {
+    pub machine: String,
+    pub repo: String,
+    pub branch: String,
+    pub status: Checkout,
+    // changed files; none when the checkout is gone
+    pub changes: Option<u32>,
+}
+
+// The rows of `drover-wt ls`: a repo name, then one line per worktree: mark, branch, changes, upstream.
+fn worktree_rows(machine: &str, text: &str) -> Vec<WorktreeRow> {
+    let mut repo = "";
+    let mut rows = vec![];
+    for line in text.lines() {
+        if !line.starts_with(' ') {
+            repo = line.trim();
+            continue;
+        }
+        let mut f = line.split_whitespace();
+        let (Some(mark), Some(branch), Some(changes)) = (f.next(), f.next(), f.next()) else {
+            continue;
+        };
+        rows.push(WorktreeRow {
+            machine: machine.into(),
+            repo: repo.into(),
+            branch: branch.into(),
+            status: match mark {
+                "●" => Checkout::Working,
+                "◆" => Checkout::Blocked,
+                "✓" => Checkout::Done,
+                "○" => Checkout::Open,
+                _ => Checkout::Closed,
+            },
+            changes: match changes {
+                "clean" => Some(0),
+                n => n.parse().ok(),
+            },
+        });
+    }
+    rows
+}
+
+#[derive(Serialize)]
+pub struct Usage {
+    pub windows: Vec<Window>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spend: Vec<Spend>,
+    // herdr's own error text stays on Discord
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unavailable: Vec<Unavailable>,
+    #[serde(skip)]
+    pub lines: Vec<String>,
+}
+
+// A usage limit that resets: how much of it is used.
+#[derive(Serialize)]
+pub struct Window {
+    pub machine: String,
+    pub harness: &'static str,
+    pub window: &'static str,
+    pub percent: f64,
+    pub resets_at: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub struct Spend {
+    pub machine: String,
+    pub harness: &'static str,
+    pub pool: &'static str,
+    pub used_usd: f64,
+    pub limit_usd: f64,
+}
+
+#[derive(Serialize)]
+pub struct Unavailable {
+    pub machine: String,
+    pub harness: &'static str,
+}
+
+// A task's terminal. `text` is cut to its last EXCERPT characters unless the action asked for `full`.
+#[derive(Serialize)]
+pub struct ScreenView {
+    pub pane: String,
+    pub machine: String,
+    pub status: Status,
+    pub chars: usize,
+    pub text: String,
+    pub help: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub struct Entries {
+    // the empty state, as a line
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub journal: Option<String>,
+    // `5 of 42`, when the list is capped
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<EntryRow>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub help: Vec<String>,
+}
+
+// An entry's text is cut to its first EXCERPT characters unless the action asked for `full`.
+#[derive(Serialize)]
+pub struct EntryRow {
+    pub id: i64,
+    pub repo: String,
+    pub branch: String,
+    pub day: String,
+    pub chars: usize,
+    pub text: String,
+}
+
+// Characters of long text the terminal shows without --full.
+const EXCERPT: usize = 1000;
+// Entries a journal list or a recall shows.
+const ENTRIES: u32 = 5;
+
+impl Entries {
+    // `none` is the line for no entries; `full_cmd` is the command that shows them whole.
+    fn new(
+        rows: Vec<(i64, journal::Entry)>,
+        total: u32,
+        full: bool,
+        none: String,
+        full_cmd: String,
+    ) -> Self {
+        let cut = !full && rows.iter().any(|(_, e)| e.text.chars().count() > EXCERPT);
+        let entries: Vec<EntryRow> = rows
+            .into_iter()
+            .map(|(id, e)| {
+                let chars = e.text.chars().count();
+                let text = match full || chars <= EXCERPT {
+                    true => e.text,
+                    false => format!("{}…", head(&e.text, EXCERPT)),
+                };
+                EntryRow {
+                    id,
+                    repo: e.repo,
+                    branch: e.branch,
+                    day: e.day,
+                    chars,
+                    text,
+                }
+            })
+            .collect();
+        let mut help = vec![];
+        if cut {
+            help.push(full_cmd);
+        }
+        if !entries.is_empty() {
+            help.push("drover journal rm <id>".into());
+        }
+        Self {
+            journal: entries.is_empty().then_some(none),
+            count: (entries.len() < total as usize)
+                .then(|| format!("{} of {total}", entries.len())),
+            entries,
+            help,
+        }
+    }
+
+    fn discord(&self, none: &str, numbered: bool) -> String {
+        if self.entries.is_empty() {
+            return none.into();
+        }
+        self.entries
+            .iter()
+            .map(|e| {
+                let id = if numbered {
+                    format!("#{} ", e.id)
+                } else {
+                    String::new()
+                };
+                format!("{id}{} {} {}\n{}", e.day, e.repo, e.branch, e.text)
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+}
+
 // What became of a prompt.
 pub enum Sent {
     Now,
@@ -337,10 +563,13 @@ impl App {
         let text = match action {
             Action::Agents => return Ok(Reply::Agents(self.cmd_agents().await)),
             Action::Config => return Ok(Reply::Config(self.config())),
+            Action::Worktrees => return Ok(Reply::Worktrees(self.cmd_worktrees().await?)),
+            Action::Usage => return Ok(Reply::Usage(self.cmd_usage().await?)),
+            Action::Screen(l) => return Ok(Reply::Screen(self.cmd_screen(&l).await?)),
+            Action::Recall(r) => return Ok(Reply::Recall(self.cmd_recall(&r).await?)),
+            Action::JournalList(l) => return Ok(Reply::Journal(self.cmd_journal_list(&l).await?)),
             Action::New(n) => self.cmd_new(http, &n).await,
             Action::Attach(a) => self.cmd_attach(http, &a).await,
-            Action::Worktrees => self.cmd_worktrees().await,
-            Action::Usage => self.cmd_usage().await,
             Action::Snapshot => self.snapshot().await,
             Action::Watch => bail!("watch streams over the control socket"),
             Action::Complete(c) => self.cmd_complete(c).await,
@@ -352,10 +581,6 @@ impl App {
             Action::Send(s) => self.cmd_send(&s).await,
             Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
             Action::Release(t) => self.set_owner(&t.thread, Owner::Mate).await,
-            Action::Screen(t) => {
-                let (m, pane) = self.target(&t.thread).await?;
-                Ok(screen(m, &pane, "").await)
-            }
             Action::Keys(k) => {
                 let (m, pane) = self.target(&k.thread).await?;
                 let keys: Vec<&str> = k.keys.iter().map(String::as_str).collect();
@@ -364,18 +589,6 @@ impl App {
                 Ok(screen(m, &pane, "").await)
             }
             Action::Done(d) => self.cmd_done(http, &d).await,
-            Action::Recall(r) => {
-                let hits = self.journal.search(&r.query, 5).await?;
-                Ok(match hits.is_empty() {
-                    true => "nothing".into(),
-                    false => hits
-                        .iter()
-                        .map(journal::format)
-                        .collect::<Vec<_>>()
-                        .join("\n\n"),
-                })
-            }
-            Action::JournalList(l) => self.cmd_journal_list(&l).await,
             Action::JournalRemove(r) => Ok(match self.journal.remove(r.id).await? {
                 true => format!("removed #{}", r.id),
                 false => format!("no journal entry #{}", r.id),
@@ -683,33 +896,83 @@ impl App {
         Ok(repo)
     }
 
-    async fn cmd_journal_list(&self, l: &JournalList) -> Result<String> {
+    async fn cmd_journal_list(&self, l: &JournalList) -> Result<Entries> {
         let repo = match &l.task {
             Some(task) => Some(self.repo_of(task).await?),
             None => None,
         };
-        let rows = self.journal.list(repo, 5).await?;
-        Ok(match rows.is_empty() {
-            true => "no entries".into(),
-            false => rows
-                .iter()
-                .map(|(id, e)| format!("#{id} {}", journal::format(e)))
-                .collect::<Vec<_>>()
-                .join("\n\n"),
+        let total = self.journal.count(repo.clone()).await?;
+        let rows = self.journal.list(repo.clone(), ENTRIES).await?;
+        let (none, full_cmd) = match (&repo, &l.task) {
+            (Some(repo), Some(task)) => (
+                format!("0 entries for {repo}"),
+                format!("drover journal --pane {task} --full"),
+            ),
+            _ => ("0 entries".into(), "drover journal --full".into()),
+        };
+        Ok(Entries::new(rows, total, l.full, none, full_cmd))
+    }
+
+    async fn cmd_recall(&self, r: &Recall) -> Result<Entries> {
+        let rows = self.journal.search(&r.query, ENTRIES).await?;
+        let total = self.journal.matches(&r.query).await?;
+        Ok(Entries::new(
+            rows,
+            total,
+            r.full,
+            format!("0 entries matching {}", r.query),
+            format!("drover recall {} --full", r.query),
+        ))
+    }
+
+    async fn cmd_screen(&self, l: &Look) -> Result<ScreenView> {
+        let (_, cell) = self.find_task(&l.thread).await?;
+        let (machine, pane, status) = {
+            let t = cell.lock().await;
+            (t.machine.clone(), t.pane.clone(), t.status)
+        };
+        let m = self.machine(&machine)?;
+        let text = last_lines(&herdr::screen(m, &pane, 60).await?);
+        let chars = text.chars().count();
+        let status = status.unwrap_or(Status::Unknown);
+        let mut help = vec![];
+        if !l.full && chars > EXCERPT {
+            help.push(format!("drover screen --pane {} --full", pane.0));
+        }
+        help.push(format!("drover keys --pane {} --keys <keys>", pane.0));
+        Ok(ScreenView {
+            pane: pane.0,
+            machine,
+            status,
+            chars,
+            text: match l.full {
+                true => text,
+                false => tail(&text, EXCERPT),
+            },
+            help,
         })
     }
 
-    async fn cmd_usage(&self) -> Result<String> {
+    async fn cmd_usage(&self) -> Result<Usage> {
         let jobs: Vec<_> = self
             .machines()
             .cloned()
-            .map(|m| tokio::spawn(async move { usage_lines(&m).await }))
+            .map(|m| tokio::spawn(async move { machine_usage(&m).await }))
             .collect();
-        let mut lines = vec![];
+        let mut all = Usage {
+            windows: vec![],
+            spend: vec![],
+            unavailable: vec![],
+            lines: vec![],
+        };
         for job in jobs {
-            lines.extend(job.await?);
+            let u = job.await?;
+            all.windows.extend(u.windows);
+            all.spend.extend(u.spend);
+            all.unavailable.extend(u.unavailable);
+            all.lines.extend(u.lines);
         }
-        Ok(lines.join("\n"))
+        Ok(all)
     }
 
     // What this service runs with, so a terminal or an agent can see the setup without the .env.
@@ -1060,26 +1323,45 @@ impl App {
         Ok(format!("{pane} is {}", owner.as_str()))
     }
 
-    async fn cmd_worktrees(&self) -> Result<String> {
+    async fn cmd_worktrees(&self) -> Result<Worktrees> {
         let jobs: Vec<_> = self
             .machines()
             .cloned()
             .map(|m| {
                 tokio::spawn(async move {
-                    let s = match herdr::worktrees(&m).await {
-                        Ok(s) if s.is_empty() => "none".into(),
-                        Ok(s) => s,
-                        Err(e) => format!("unreachable: {e}"),
-                    };
-                    format!("**{}**\n```\n{s}\n```", m.name)
+                    let listed = herdr::worktrees(&m).await;
+                    (m.name, listed)
                 })
             })
             .collect();
+        let mut out = Worktrees {
+            worktrees: vec![],
+            machines: vec![],
+            help: [
+                "drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>",
+            ],
+            discord: String::new(),
+        };
         let mut parts = Vec::new();
         for job in jobs {
-            parts.push(job.await?);
+            let (name, listed) = job.await?;
+            let (s, reach, error) = match listed {
+                Ok(s) if s.is_empty() => ("none".into(), Reachability::Reachable, None),
+                Ok(s) => (s, Reachability::Reachable, None),
+                Err(e) => (
+                    format!("unreachable: {e}"),
+                    Reachability::Unreachable,
+                    Some(e.to_string()),
+                ),
+            };
+            if error.is_none() {
+                out.worktrees.extend(worktree_rows(&name, &s));
+            }
+            parts.push(format!("**{name}**\n```\n{s}\n```"));
+            out.machines.push(MachineReach { name, reach, error });
         }
-        Ok(parts.join("\n"))
+        out.discord = parts.join("\n");
+        Ok(out)
     }
 
     async fn cmd_done(&self, http: &Http, d: &Done) -> Result<String> {
@@ -1216,6 +1498,162 @@ mod tests {
             text("m2, m3")
         );
         assert_eq!(Reply::Text("sent".into()).discord(), "sent");
+    }
+
+    fn toon_of(r: &Reply) -> String {
+        serde_json::to_value(r)
+            .map(|v| toon::encode(&v))
+            .unwrap_or_default()
+    }
+
+    fn journal_entry(text: &str) -> journal::Entry {
+        journal::Entry {
+            day: "2026-10-18".into(),
+            machine: "host".into(),
+            repo: "drover".into(),
+            branch: "theo/x".into(),
+            text: text.into(),
+        }
+    }
+
+    // The text the old String replies posted, for the same data.
+    #[test]
+    fn read_commands_post_the_same_discord_text() {
+        let listing = "drover\n  ● theo/axi-read   3          ↓0 ↑2\n  · old   clean   no upstream\n  ○ gone   missing   prune\n";
+        let rows = worktree_rows("host", listing);
+        assert_eq!(rows.len(), 3);
+        assert!(matches!(
+            (rows.first(), rows.get(2)),
+            (
+                Some(WorktreeRow {
+                    status: Checkout::Working,
+                    changes: Some(3),
+                    ..
+                }),
+                Some(WorktreeRow {
+                    status: Checkout::Open,
+                    changes: None,
+                    ..
+                })
+            )
+        ));
+        let w = Reply::Worktrees(Worktrees {
+            worktrees: rows,
+            machines: vec![MachineReach {
+                name: "host".into(),
+                reach: Reachability::Reachable,
+                error: None,
+            }],
+            help: [
+                "drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>",
+            ],
+            discord: format!("**host**\n```\n{}\n```", listing.trim_end()),
+        });
+        assert_eq!(
+            toon_of(&w),
+            "worktrees[3]{machine,repo,branch,status,changes}:\n  host,drover,theo/axi-read,working,3\n  \
+             host,drover,old,closed,0\n  host,drover,gone,open,null\nmachines[1]{name,reach}:\n  host,reachable\n\
+             help[1]:\n  - drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>\n"
+        );
+        assert!(
+            w.discord()
+                .starts_with("**host**\n```\ndrover\n  ● theo/axi-read")
+        );
+
+        let u = Reply::Usage(Usage {
+            windows: vec![Window {
+                machine: "host".into(),
+                harness: "claude",
+                window: "5h session",
+                percent: 37.0,
+                resets_at: Some(1_781_600_000),
+            }],
+            spend: vec![],
+            unavailable: vec![Unavailable {
+                machine: "host".into(),
+                harness: "cursor",
+            }],
+            lines: vec![
+                "**host**".into(),
+                "*claude* plan limits".into(),
+                "*cursor* unavailable: x".into(),
+            ],
+        });
+        assert_eq!(
+            toon_of(&u),
+            "windows[1]{machine,harness,window,percent,resets_at}:\n  host,claude,5h session,37,1781600000\n\
+             unavailable[1]{machine,harness}:\n  host,cursor\n"
+        );
+        assert_eq!(
+            u.discord(),
+            "**host**\n*claude* plan limits\n*cursor* unavailable: x"
+        );
+
+        let long = "x".repeat(2500);
+        let screen = |text: &str, chars| {
+            Reply::Screen(ScreenView {
+                pane: "w1:p1".into(),
+                machine: "host".into(),
+                status: Status::Blocked,
+                chars,
+                text: text.into(),
+                help: vec!["drover keys --pane w1:p1 --keys <keys>".into()],
+            })
+        };
+        let s = screen("a\nb", 3);
+        assert_eq!(
+            toon_of(&s),
+            "pane: \"w1:p1\"\nmachine: host\nstatus: blocked\nchars: 3\ntext: \"a\\nb\"\nhelp[1]:\n  - \"drover keys --pane w1:p1 --keys <keys>\"\n"
+        );
+        assert_eq!(s.discord(), "```\na\nb\n```");
+        assert_eq!(last_lines("a\n\n  \nb\n"), "a\nb");
+
+        let rows = || vec![(7, journal_entry("what: x")), (9, journal_entry(&long))];
+        let list = Entries::new(
+            rows(),
+            42,
+            false,
+            "0 entries".into(),
+            "drover journal --full".into(),
+        );
+        let t = toon_of(&Reply::Journal(list));
+        assert!(t.starts_with("count: 2 of 42\nentries[2]{id,repo,branch,day,chars,text}:\n  7,drover,theo/x,2026-10-18,7,\"what: x\"\n"));
+        assert!(
+            t.contains(",2500,xxx")
+                && t.contains(
+                    "…\nhelp[2]:\n  - drover journal --full\n  - drover journal rm <id>\n"
+                )
+        );
+        assert!(!t.contains(&"x".repeat(1002)));
+        // Discord asks for everything and gets it
+        let full = Reply::Journal(Entries::new(
+            rows(),
+            2,
+            true,
+            "0 entries".into(),
+            String::new(),
+        ));
+        assert_eq!(
+            full.discord(),
+            format!("#7 2026-10-18 drover theo/x\nwhat: x\n\n#9 2026-10-18 drover theo/x\n{long}")
+        );
+        assert!(!toon_of(&full).contains("count:"));
+
+        let none = |text: &str| Entries::new(vec![], 0, false, text.into(), String::new());
+        assert_eq!(
+            toon_of(&Reply::Journal(none("0 entries for drover"))),
+            "journal: 0 entries for drover\n"
+        );
+        assert_eq!(Reply::Journal(none("")).discord(), "no entries");
+        assert_eq!(Reply::Recall(none("")).discord(), "nothing");
+        let hit = Reply::Recall(Entries::new(
+            vec![(7, journal_entry("what: x"))],
+            1,
+            false,
+            String::new(),
+            String::new(),
+        ));
+        assert_eq!(hit.discord(), "2026-10-18 drover theo/x\nwhat: x");
     }
 
     #[test]

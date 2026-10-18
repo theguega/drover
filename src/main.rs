@@ -33,8 +33,8 @@ use tokio::{
 };
 
 use action::{
-    Action, Attach, Done, JournalList, JournalRemove, Keys, Mate, MateName, New, Recall, Scout,
-    Sent, Target,
+    Action, Attach, Done, JournalList, JournalRemove, Keys, Look, Mate, MateName, New, Recall,
+    Scout, Sent, Spend, Target, Unavailable, Usage, Window,
 };
 use herdr::{Agent, Machine, Name, PaneId, Reach, SessionId, Status, WorkspaceId};
 use journal::Journal;
@@ -617,21 +617,29 @@ fn key_rows() -> Vec<CreateActionRow> {
         .collect()
 }
 
-async fn screen(m: &Machine, pane: &PaneId, note: &str) -> String {
-    let raw = herdr::screen(m, pane, 60)
-        .await
-        .unwrap_or_else(|e| format!("read failed: {e}"));
+// The last 30 lines with text.
+fn last_lines(raw: &str) -> String {
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
-    let text = lines
+    lines
         .iter()
         .skip(lines.len().saturating_sub(30))
         .copied()
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+fn fenced(text: &str, note: &str) -> String {
     format!(
         "{note}```\n{}\n```",
         tail(&text.replace("```", "ˋˋˋ"), 1800)
     )
+}
+
+async fn screen(m: &Machine, pane: &PaneId, note: &str) -> String {
+    let raw = herdr::screen(m, pane, 60)
+        .await
+        .unwrap_or_else(|e| format!("read failed: {e}"));
+    fenced(&last_lines(&raw), note)
 }
 
 async fn screen_msg(m: &Machine, pane: &PaneId) -> CreateMessage {
@@ -772,44 +780,76 @@ fn bar(name: &str, pct: f64, reset: Option<i64>) -> String {
     )
 }
 
-// One machine's plans; an agent that isn't logged in there is left out.
-async fn usage_lines(m: &Machine) -> Vec<String> {
-    fn failed(lines: &mut Vec<String>, agent: &str, e: &herdr::Error) {
-        lines.push(format!(
-            "*{agent}* unavailable: {}",
+// One machine's plans, as rows and as the lines Discord posts; an agent that isn't logged in there is left out.
+async fn machine_usage(m: &Machine) -> Usage {
+    let mut out = Usage {
+        windows: vec![],
+        spend: vec![],
+        unavailable: vec![],
+        lines: vec![format!("**{}**", m.name)],
+    };
+    let machine = &m.name;
+    let window = |out: &mut Usage, harness, name, pct: f64, reset: Option<i64>| {
+        out.lines.push(bar(name, pct, reset));
+        out.windows.push(Window {
+            machine: machine.clone(),
+            harness,
+            window: name,
+            percent: pct.round(),
+            resets_at: reset,
+        });
+    };
+    let spend = |out: &mut Usage, harness, pool, used: f64, limit: f64| {
+        out.spend.push(Spend {
+            machine: machine.clone(),
+            harness,
+            pool,
+            used_usd: used / 100.0,
+            limit_usd: limit / 100.0,
+        });
+    };
+    let failed = |out: &mut Usage, harness, e: &herdr::Error| {
+        out.lines.push(format!(
+            "*{harness}* unavailable: {}",
             head(&e.to_string(), 200)
         ));
-    }
+        out.unavailable.push(Unavailable {
+            machine: machine.clone(),
+            harness,
+        });
+    };
     let (claude, cursor) = tokio::join!(herdr::usage(m), herdr::cursor_usage(m));
-    let mut lines = vec![format!("**{}**", m.name)];
     match claude {
         Ok(None) => {}
         Ok(Some(u)) => {
-            lines.push("*claude* plan limits".into());
+            out.lines.push("*claude* plan limits".into());
             let windows = [
                 ("5h session", &u.five_hour),
                 ("7d all", &u.seven_day),
                 ("7d opus", &u.seven_day_opus),
                 ("7d sonnet", &u.seven_day_sonnet),
             ];
-            lines.extend(windows.iter().filter_map(|(n, w)| {
-                w.as_ref()
-                    .map(|w| bar(n, w.utilization, w.resets_at.as_deref().and_then(unix)))
-            }));
+            for (n, w) in windows {
+                if let Some(w) = w {
+                    let reset = w.resets_at.as_deref().and_then(unix);
+                    window(&mut out, "claude", n, w.utilization, reset);
+                }
+            }
             if let Some(x) = u.extra_usage.filter(|x| x.is_enabled) {
-                lines.push(format!(
+                out.lines.push(format!(
                     "extra usage ${:.2} of ${:.2} this month",
                     x.used_credits / 100.0,
                     x.monthly_limit / 100.0
                 ));
+                spend(&mut out, "claude", "extra", x.used_credits, x.monthly_limit);
             }
         }
-        Err(e) => failed(&mut lines, "claude", &e),
+        Err(e) => failed(&mut out, "claude", &e),
     }
     match cursor {
         Ok(None) => {}
         Ok(Some(c)) => {
-            lines.push("*cursor* billing cycle".into());
+            out.lines.push("*cursor* billing cycle".into());
             let reset = c.billing_cycle_end.map(|ms| (ms.0 / 1000.0) as i64);
             if let Some(p) = c.plan_usage {
                 let windows = [
@@ -817,42 +857,49 @@ async fn usage_lines(m: &Machine) -> Vec<String> {
                     ("plan auto", p.auto_percent_used, None),
                     ("plan api", p.api_percent_used, None),
                 ];
-                lines.extend(
-                    windows
-                        .iter()
-                        .filter_map(|(n, pct, r)| pct.map(|pct| bar(n, pct.0, *r))),
-                );
+                for (n, pct, r) in windows {
+                    if let Some(pct) = pct {
+                        window(&mut out, "cursor", n, pct.0, r);
+                    }
+                }
                 if let (Some(spent), Some(limit)) = (p.total_spend, p.limit) {
                     let bonus = p
                         .bonus_spend
                         .filter(|b| b.0 > 0.0)
                         .map(|b| format!(" + ${:.2} free bonus", b.0 / 100.0))
                         .unwrap_or_default();
-                    lines.push(format!(
+                    out.lines.push(format!(
                         "you: ${:.2} spent (${:.2} included{bonus})",
                         spent.0 / 100.0,
                         limit.0 / 100.0
                     ));
+                    spend(&mut out, "cursor", "plan", spent.0, limit.0);
                 }
             }
             if let Some(o) = c.spend_limit_usage {
                 // a team pool is everyone's on-demand spend; Cursor sends no per-member share
-                let (who, used, limit) = match o.limit_type.as_deref() {
-                    Some("team") => ("team pool, all members", o.pooled_used, o.pooled_limit),
-                    _ => ("you", o.individual_used, o.individual_limit),
+                let (who, pool, used, limit) = match o.limit_type.as_deref() {
+                    Some("team") => (
+                        "team pool, all members",
+                        "on-demand-team",
+                        o.pooled_used,
+                        o.pooled_limit,
+                    ),
+                    _ => ("you", "on-demand", o.individual_used, o.individual_limit),
                 };
                 if let (Some(used), Some(limit)) = (used, limit) {
-                    lines.push(format!(
+                    out.lines.push(format!(
                         "on-demand ({who}): ${:.2} of ${:.2}",
                         used.0 / 100.0,
                         limit.0 / 100.0
                     ));
+                    spend(&mut out, "cursor", pool, used.0, limit.0);
                 }
             }
         }
-        Err(e) => failed(&mut lines, "cursor", &e),
+        Err(e) => failed(&mut out, "cursor", &e),
     }
-    lines
+    out
 }
 
 #[must_use]
@@ -1063,7 +1110,7 @@ impl App {
             }),
             "take" => Action::Take(Target { thread }),
             "release" => Action::Release(Target { thread }),
-            "screen" => Action::Screen(Target { thread }),
+            "screen" => Action::Screen(Look { thread, full: true }),
             "keys" => Action::Keys(Keys {
                 thread,
                 keys: req(i, "keys")?
@@ -1078,6 +1125,7 @@ impl App {
             }),
             "recall" => Action::Recall(Recall {
                 query: req(i, "query")?.into(),
+                full: true,
             }),
             "journal" => Action::JournalList(JournalList {
                 task: self
@@ -1085,6 +1133,7 @@ impl App {
                     .await
                     .is_ok()
                     .then(|| thread.clone()),
+                full: true,
             }),
             "journal-rm" => Action::JournalRemove(JournalRemove {
                 id: req(i, "entry")?.parse::<i64>()?,
@@ -1188,7 +1237,7 @@ impl App {
         };
         let thread = i.channel_id.to_string();
         let action = match k {
-            "refresh" => Action::Screen(Target { thread }),
+            "refresh" => Action::Screen(Look { thread, full: true }),
             key => Action::Keys(Keys {
                 thread,
                 keys: vec![key.into()],
