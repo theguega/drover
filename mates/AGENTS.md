@@ -54,6 +54,8 @@ out of scope: <what a crewmate must not touch>
 
 Pick the agent and model per node with `--agent` and `--model`. Spend the strong model where a mistake is expensive. The cursor column is passed as `--agent cursor --model <id>`.
 
+Favor claude. Read `drover usage` before you dispatch: when claude is at 90% or more of any window, use the cursor model of the row; when cursor is near its limit too, go back to claude. A row with no cursor model stays on claude.
+
 | Node | Model | Cursor |
 |---|---|---|
 | lookups, logs, docs, config; mechanical edits at any size (renames, moves, formatting, API migrations, tests that follow an existing pattern) whose check is a command | `haiku` | `gpt-5.6-luna-medium`, a little weaker than haiku |
