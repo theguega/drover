@@ -586,6 +586,16 @@ fn mate_role(name: &MateName) -> String {
     )
 }
 
+// What to do with a mate that runs.
+fn mate_help(name: &MateName, machine: &str) -> Vec<String> {
+    vec![
+        format!("drover brief --mate {name} --text <text>"),
+        format!(
+            "drover new --machine {machine} --repo <repo> --branch <branch> --prompt <prompt> --mate {name}"
+        ),
+    ]
+}
+
 // A mate's name, checked once: it becomes an agent name and a folder under mates/state.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
@@ -1317,7 +1327,13 @@ impl App {
                 continue;
             }
             match &t.role {
-                Role::Mate(n) if *n == name => bail!("mate {name} is already running"),
+                Role::Mate(n) if *n == name => {
+                    let shown = t
+                        .thread
+                        .map_or_else(|| t.pane.0.clone(), |th| format!("<#{th}>"));
+                    return Ok(Change::task(&t, Some("already running"), shown)
+                        .help(mate_help(&name, &self.host.name)));
+                }
                 Role::Mate(_) => live += 1,
                 _ => {}
             }
@@ -1360,10 +1376,7 @@ impl App {
             inbox: Vec::new(),
         };
         let shown = thread.map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
-        let out = Change::task(&task, None, shown).help(vec![
-            format!("drover brief --mate {name} --text <text>"),
-            format!("drover new --machine {} --repo <repo> --branch <branch> --prompt <prompt> --mate {name}", self.host.name),
-        ]);
+        let out = Change::task(&task, None, shown).help(mate_help(&name, &self.host.name));
         self.insert(task);
         self.save().await;
         log::append(&self.mate_dir(&name), log::Event::Started, &pane.0)?;
