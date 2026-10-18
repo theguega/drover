@@ -190,8 +190,8 @@ const AGENTS_HELP: [&str; 3] = [
 
 #[derive(Serialize)]
 pub struct Agents {
-    pub machines: Vec<MachineReach>,
     pub agents: Vec<AgentRow>,
+    pub machines: Vec<MachineReach>,
     pub help: [&'static str; 3],
 }
 
@@ -205,11 +205,12 @@ pub struct MachineReach {
 }
 
 #[derive(Serialize)]
+// Fields in the order the terminal shows them: the id first, then the status.
 pub struct AgentRow {
-    pub machine: String,
     pub pane: String,
-    pub harness: String,
+    pub machine: String,
     pub status: Status,
+    pub harness: String,
     pub cwd: String,
     #[serde(skip)]
     pub thread: Option<ChannelId>,
@@ -1181,8 +1182,8 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&agents).map(|v| toon::encode(&v)).ok(),
             Some(
-                "agents[2]{cwd,harness,machine,pane,status}:\n  ~/Developer/drover,claude,host,\"w1:p1\",idle\n  \
-                 ~/Developer/drover,claude,host,\"w2:p1\",blocked\nmachines[3]{name,reach}:\n  host,reachable\n  \
+                "agents[2]{pane,machine,status,harness,cwd}:\n  \"w1:p1\",host,idle,claude,~/Developer/drover\n  \
+                 \"w2:p1\",host,blocked,claude,~/Developer/drover\nmachines[3]{name,reach}:\n  host,reachable\n  \
                  m2,unreachable\n  m3,reachable\nhelp[3]:\n  - drover screen --pane <pane>\n  - \
                  drover send --pane <pane> --text <text>\n  - drover attach --machine <machine> --pane <pane>\n"
                     .into()

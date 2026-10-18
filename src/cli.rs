@@ -1,7 +1,7 @@
 // Terminal front end: argv becomes one Action, sent to the running service. The reply prints
 // as TOON on stdout, errors too, as `error:` and `help:`. Exit 0 ok, 1 error, 2 usage error.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -786,20 +786,21 @@ const HOME_ESCALATIONS: usize = 5;
 const HOME_TEXT: usize = 200;
 
 fn desk(bin: &str, s: &Snapshot) -> Value {
+    // every key shows, zero or not, in the order given
     let count = |keys: &[&str], of: &mut dyn Iterator<Item = String>| {
-        let mut n: BTreeMap<String, usize> = keys.iter().map(|k| ((*k).into(), 0)).collect();
+        let mut n: serde_json::Map<String, Value> =
+            keys.iter().map(|k| ((*k).into(), 0.into())).collect();
         for k in of {
-            *n.entry(k).or_default() += 1;
+            let v = n.entry(k).or_insert(0.into());
+            *v = (v.as_u64().unwrap_or(0) + 1).into();
         }
         n
     };
+    // a gone task is history, not the desk
     let live = || s.tasks.iter().filter(|t| t.phase != "gone");
     let tasks = count(
-        &["idle", "working", "blocked", "done", "unknown", "gone"],
-        &mut s.tasks.iter().map(|t| match t.phase.as_str() {
-            "gone" => "gone".into(),
-            _ => t.status.clone().unwrap_or_else(|| "unknown".into()),
-        }),
+        &["working", "blocked", "idle", "done", "unknown"],
+        &mut live().map(|t| t.status.clone().unwrap_or_else(|| "unknown".into())),
     );
     let machines = count(
         &["reachable", "unreachable", "unknown"],
@@ -808,7 +809,7 @@ fn desk(bin: &str, s: &Snapshot) -> Value {
     let blocked: Vec<Value> = live()
         .filter(|t| t.status.as_deref() == Some("blocked"))
         .map(
-            |t| json!({ "machine": t.machine, "pane": t.pane, "repo": t.repo, "branch": t.branch }),
+            |t| json!({ "pane": t.pane, "machine": t.machine, "repo": t.repo, "branch": t.branch }),
         )
         .collect();
     let start = s.escalations.len().saturating_sub(HOME_ESCALATIONS);
@@ -820,7 +821,7 @@ fn desk(bin: &str, s: &Snapshot) -> Value {
             let pane = live()
                 .find(|t| t.role == "mate" && t.mate.as_deref() == Some(e.mate.as_str()))
                 .map(|t| t.pane.clone());
-            json!({ "at": e.at, "mate": e.mate, "pane": pane, "text": head(&e.text, HOME_TEXT) })
+            json!({ "mate": e.mate, "pane": pane, "at": e.at, "text": head(&e.text, HOME_TEXT) })
         })
         .collect();
 
@@ -997,7 +998,7 @@ mod tests {
         let new = toon::encode(&spec("new").context("new")?.help());
         assert!(
             new.contains("command: drover new\n")
-                && new.contains("the first prompt,required,\"--prompt <prompt>\"\n")
+                && new.contains("\"--prompt <prompt>\",required,the first prompt\n")
         );
         assert!(new.contains("examples[2]:") && !new.contains("attach"));
         let f = spec("scout close")
@@ -1060,23 +1061,22 @@ mod tests {
 bin: ~/.local/bin/drover
 description: Runs coding agents in herdr worktrees and drives them from the terminal or Discord or another agent
 desk:
+  tasks:
+    working: 0
+    blocked: 1
+    idle: 1
+    done: 0
+    unknown: 0
+  mates: 1
   machines:
     reachable: 1
-    unknown: 0
     unreachable: 1
-  mates: 1
-  tasks:
-    blocked: 1
-    done: 0
-    gone: 1
-    idle: 1
     unknown: 0
-    working: 0
 needs:
-  blocked[1]{branch,machine,pane,repo}:
-    fix/x,host,\"w1:p1\",drover
-  escalations[1]{at,mate,pane,text}:
-    1781600000,docs,\"w2:p1\",which section?
+  blocked[1]{pane,machine,repo,branch}:
+    \"w1:p1\",host,drover,fix/x
+  escalations[1]{mate,pane,at,text}:
+    docs,\"w2:p1\",1781600000,which section?
 help[6]:
   - drover screen --pane <pane>
   - drover keys --pane <pane> --keys <keys>

@@ -101,16 +101,18 @@ drover is also a terminal tool. `drover help` is the full reference, for humans 
 
 The terminal is an [AXI](https://github.com/kunchenguid/axi): agents and other tools read it and turn it into the next command.
 
-- stdout is [TOON](https://toonformat.dev). `snapshot` and `watch` stay JSON, for programs. Keys come out sorted (serde_json orders them), with a root `help` last.
+- stdout is [TOON](https://toonformat.dev). `snapshot` and `watch` stay JSON, for programs. Fields come out in the order the reply builds them (serde_json's `preserve_order`), so the order is part of each record's design.
 - Errors are TOON on stdout too: `error: <what>` and `help: <command that fixes it>`. Exit 0 ok (a no-op too), 1 error, 2 usage error. A service error raised as `cli::Failure` carries its own `help`; any other falls back to `drover <cmd> --help`.
 - One `Spec` per command in `cli.rs` is the only list of its flags: parsing, the unknown-flag error, `--help`, and `drover help` read it. An unknown flag fails before anything else, naming the flag and the valid ones.
-- `drover` alone is the home view, built from the snapshot: `bin`, `description`, `desk` counts, `needs` (blocked agents, escalations), `help`.
+- `drover` alone is the home view, built from the snapshot: `bin`, `description`, `desk` counts, `needs` (blocked agents, escalations), `help`. The counts are the live desk: a gone task is history and is not counted.
 - `-v`, `-V` and `--version` print the bare version.
 - Converted so far: `agents`, `config`. The rest are `Reply::Text` until they move.
 
 ### Field names
 
 One name per thing, the same in TOON, the snapshot JSON and help placeholders (`<pane>` is the value of a `pane` field). A list is one record per row.
+
+Field order, in every record: the id that feeds the next command first, then its status, then the rest, then long text last. A document ends with `help`. For example `agents{pane,machine,status,harness,cwd}`, `machines{name,reach}`, `flags{flag,default,about}`, `blocked{pane,machine,repo,branch}`, `escalations{mate,pane,at,text}`. Count maps keep a fixed key order with zeros shown.
 
 | Field | Is | Feeds |
 |---|---|---|

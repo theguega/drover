@@ -1,5 +1,5 @@
 // JSON to TOON (toonformat.dev), what the terminal prints. Comma delimiter, two-space indent.
-// serde_json sorts object keys, so fields come out sorted, except that a root `help` goes last.
+// Fields come out in the order they were built (serde_json's preserve_order).
 // Strings with spaces in an array are listed one per line, which TOON also reads.
 
 use serde_json::{Map, Value};
@@ -8,12 +8,7 @@ use serde_json::{Map, Value};
 pub fn encode(v: &Value) -> String {
     let mut out = String::new();
     match v {
-        Value::Object(map) => {
-            let (help, rest): (Vec<_>, Vec<_>) = map.iter().partition(|(k, _)| *k == "help");
-            for (k, v) in rest.into_iter().chain(help) {
-                field(&mut out, 0, k, v);
-            }
-        }
+        Value::Object(map) => object(&mut out, 0, map),
         Value::Array(items) => array(&mut out, 0, "", items),
         _ => line(&mut out, 0, &primitive(v)),
     }
@@ -203,7 +198,7 @@ mod tests {
         let v = json!({"user": {"id": 123, "name": "Ada", "tags": ["reading", "gaming"], "active": true, "prefs": []}});
         assert_eq!(
             encode(&v),
-            "user:\n  active: true\n  id: 123\n  name: Ada\n  prefs[0]:\n  tags[2]: reading,gaming\n"
+            "user:\n  id: 123\n  name: Ada\n  tags[2]: reading,gaming\n  active: true\n  prefs[0]:\n"
         );
     }
 
@@ -239,15 +234,15 @@ mod tests {
     }
 
     #[test]
-    fn numbers_roots_and_help() {
+    fn numbers_roots_and_phrases() {
         assert_eq!(
             encode(&json!({"n": -0.0, "f": 1.5, "big": 1e21})),
-            "big: 1000000000000000000000\nf: 1.5\nn: 0\n"
+            "n: 0\nf: 1.5\nbig: 1000000000000000000000\n"
         );
         assert_eq!(encode(&json!([1, 2])), "[2]: 1,2\n");
         assert_eq!(encode(&json!("x")), "x\n");
         assert_eq!(
-            encode(&json!({"help": ["drover agents"], "a": null})),
+            encode(&json!({"a": null, "help": ["drover agents"]})),
             "a: null\nhelp[1]:\n  - drover agents\n"
         );
     }
