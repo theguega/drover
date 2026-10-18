@@ -1856,6 +1856,8 @@ mod tests {
             mates: root.clone(),
             started: AtomicBool::new(false),
             wake: Notify::new(),
+            changed: Notify::new(),
+            reachability: StdMutex::new(HashMap::new()),
             saving: Mutex::new(()),
         };
         let a = MateName::parse("a")?;
