@@ -108,7 +108,8 @@ The terminal is an [AXI](https://github.com/kunchenguid/axi): agents and other t
 - `-v`, `-V` and `--version` print the bare version.
 - Long text is cut to 1000 characters, with its whole length in `chars` and a `help` line for `--full`: a screen keeps its end, a journal entry its start. `--full` is declared only on commands that cut (`screen`, `journal`, `recall`). Discord asks for everything, so its text does not change.
 - A list capped at its limit says `count: 5 of 42`. An empty one says so in a line, such as `journal: 0 entries for drover`.
-- Converted so far: `agents`, `config`, `worktrees`, `usage`, `screen`, `journal`, `recall`. The rest are `Reply::Text` until they move.
+- A command that changes the desk answers with the fields that feed the next command (`pane`, `machine`, `thread`, ...), then `help`. When the desired state already held it exits 0 with `noop: <why>` (`already open`, `already taken`, `already released`, `already ending`, `already gone`, `already closed`) and changes nothing. Only a real failure exits 1. `keys` answers with the pane's screen, as `screen` does.
+- Converted: every command but `snapshot`, `watch` and `complete`, which stay JSON or bare names.
 
 ### Field names
 
@@ -120,7 +121,7 @@ Field order, in every record: the id that feeds the next command first, then its
 |---|---|---|
 | `machine` | a machine name, as `drover config` lists it | `--machine <machine>` |
 | `pane` | a herdr pane id, like `wAX:p1` | `--pane <pane>` |
-| `thread` | a Discord thread id (in the snapshot today, only whether one is bound) | `--thread <thread>` |
+| `thread` | a Discord thread id, present when one is bound (in the snapshot, only whether) | `--thread <thread>` |
 | `mate` | a mate name | `--mate <mate>`, `drover mate <name>` |
 | `id` | a journal entry id | `drover journal rm <id>` |
 | `repo`, `branch` | the task's repo and branch | `--repo <repo>`, `--branch <branch>` |
@@ -136,6 +137,15 @@ Field order, in every record: the id that feeds the next command first, then its
 | `window`, `percent` | a usage limit and how much of it is used | |
 | `pool`, `used_usd`, `limit_usd` | a spend limit (`extra`, `plan`, `on-demand`, `on-demand-team`) and its dollars | |
 | `day`, `text` | a journal entry's date and its text | |
+| `workspace` | a herdr workspace id | |
+| `scout` | a scout's id, like `scout-1a2b3c` | `drover scout close --pane <scout>` |
+| `noop` | why nothing changed: the state already held | |
+| `delivery` | a prompt sent: `sent` or `queued` | |
+| `entry` | `done`'s journal entry: `asked` (the agent is writing it) or `none` | |
+| `closed` | whether `done` has closed the task yet | |
+| `teardown` | what `done` was asked to end with: `close` or `remove` | |
+| `checkout` | after `done --remove`: `removed` or `kept` | |
+| `event` | the mate log event a command wrote: `brief`, `escalated` | |
 | `chars` | the whole length of a field that was cut | `--full` |
 | `count` | `5 of 42`, on a capped list | |
 | `cwd`, `bin` | a path, with the home directory as `~` | |

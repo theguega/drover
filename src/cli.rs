@@ -585,6 +585,7 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
                 .split_whitespace()
                 .map(String::from)
                 .collect(),
+            discord: false,
         }),
         "send" => Action::Send(Send {
             thread: flags.target()?,

@@ -1055,10 +1055,12 @@ impl App {
             th.say(http, format!("```\n{}\n```", entry.replace("```", "")))
                 .await?;
         }
-        self.teardown(http, t, teardown).await
+        self.teardown(http, t, teardown).await?;
+        Ok(())
     }
 
-    async fn teardown(&self, http: &Http, t: &Task, teardown: Teardown) -> Result<()> {
+    // Whether the checkout was removed too.
+    async fn teardown(&self, http: &Http, t: &Task, teardown: Teardown) -> Result<bool> {
         let m = self.machine(&t.machine)?;
         // drover-wt rm closes the workspace too; anything it kept is only closed
         let (removed, mut note) = match teardown {
@@ -1097,7 +1099,7 @@ impl App {
         if let Some(th) = t.thread {
             let _ = th.edit_thread(http, EditThread::new().archived(true)).await;
         }
-        Ok(())
+        Ok(removed)
     }
 
     // Discord turns an interaction into an Action; the text it gets back is what the thread sees.
@@ -1146,6 +1148,7 @@ impl App {
                     .split_whitespace()
                     .map(String::from)
                     .collect(),
+                discord: true,
             }),
             "done" => Action::Done(Done {
                 thread,
@@ -1274,6 +1277,7 @@ impl App {
             key => Action::Keys(Keys {
                 thread,
                 keys: vec![key.into()],
+                discord: true,
             }),
         };
         i.defer(http).await?;

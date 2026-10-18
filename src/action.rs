@@ -8,6 +8,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use serenity::all::{ChannelId, Http};
 use tokio::time::sleep;
 
@@ -123,6 +124,9 @@ pub struct Send {
 pub struct Keys {
     pub thread: String,
     pub keys: Vec<String>,
+    // a read that fails is text in the message, not an error
+    #[serde(default)]
+    pub discord: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -189,6 +193,7 @@ pub enum Reply {
     Screen(ScreenView),
     Journal(Entries),
     Recall(Entries),
+    Change(Change),
 }
 
 impl Reply {
@@ -203,7 +208,73 @@ impl Reply {
             Self::Screen(s) => fenced(&s.text, ""),
             Self::Journal(e) => e.discord("no entries", true),
             Self::Recall(e) => e.discord("nothing", false),
+            Self::Change(c) => c.discord.clone(),
         }
+    }
+}
+
+// What a command that changes the desk did, as the fields that feed the next command. Fields come out in
+// the order they are set: the id, then `noop` when the desired state already held, then the rest.
+#[derive(Serialize)]
+pub struct Change {
+    #[serde(flatten)]
+    fields: Map<String, Value>,
+    #[serde(skip)]
+    discord: String,
+}
+
+impl Change {
+    fn new(discord: impl Into<String>) -> Self {
+        Self {
+            fields: Map::new(),
+            discord: discord.into(),
+        }
+    }
+
+    // The task's pane and machine.
+    fn at(t: &Task, noop: Option<&str>, discord: impl Into<String>) -> Self {
+        Self::new(discord)
+            .with("pane", &t.pane.0)
+            .with("machine", &t.machine)
+            .maybe("noop", noop)
+    }
+
+    // A task as the next command needs it.
+    fn task(t: &Task, noop: Option<&str>, discord: impl Into<String>) -> Self {
+        Self::at(t, noop, discord)
+            .with("workspace", &t.workspace.0)
+            .with("repo", &t.repo)
+            .maybe("branch", t.branch.as_ref())
+            .with("harness", &t.kind)
+            .maybe("mate", t.role.mate())
+            .maybe("thread", t.thread)
+    }
+
+    fn with(self, key: &str, v: impl Serialize) -> Self {
+        self.maybe(key, Some(v))
+    }
+
+    fn maybe(mut self, key: &str, v: Option<impl Serialize>) -> Self {
+        if let Some(v) = v {
+            self.fields
+                .insert(key.into(), serde_json::to_value(v).unwrap_or_default());
+        }
+        self
+    }
+
+    fn help(self, commands: Vec<String>) -> Self {
+        match commands.is_empty() {
+            true => self,
+            false => self.with("help", commands),
+        }
+    }
+
+    // What to do with a pane that was just opened or found.
+    fn watch(self, pane: &PaneId) -> Self {
+        self.help(vec![
+            format!("drover screen --pane {}", pane.0),
+            format!("drover send --pane {} --text <text>", pane.0),
+        ])
     }
 }
 
@@ -564,6 +635,27 @@ impl std::fmt::Display for MateName {
 impl App {
     pub async fn act(&self, http: &Http, action: Action) -> Result<Reply> {
         let text = match action {
+            Action::New(n) => return Ok(Reply::Change(self.cmd_new(http, &n).await?)),
+            Action::Attach(a) => return Ok(Reply::Change(self.cmd_attach(http, &a).await?)),
+            Action::Mate(m) => return Ok(Reply::Change(self.cmd_mate(http, &m).await?)),
+            Action::Scout(s) => return Ok(Reply::Change(self.cmd_scout(http, &s).await?)),
+            Action::Brief(b) => return Ok(Reply::Change(self.cmd_brief(&b)?)),
+            Action::Escalate(n) => return Ok(Reply::Change(self.cmd_escalate(http, &n).await?)),
+            Action::ScoutClose(t) => {
+                return Ok(Reply::Change(self.cmd_scout_close(http, &t.thread).await?));
+            }
+            Action::Send(s) => return Ok(Reply::Change(self.cmd_send(&s).await?)),
+            Action::Take(t) => {
+                return Ok(Reply::Change(self.set_owner(&t.thread, Owner::User).await?));
+            }
+            Action::Release(t) => {
+                return Ok(Reply::Change(self.set_owner(&t.thread, Owner::Mate).await?));
+            }
+            Action::Keys(k) => return Ok(Reply::Screen(self.cmd_keys(&k).await?)),
+            Action::Done(d) => return Ok(Reply::Change(self.cmd_done(http, &d).await?)),
+            Action::JournalRemove(r) => {
+                return Ok(Reply::Change(self.cmd_journal_remove(r.id).await?));
+            }
             Action::Agents => return Ok(Reply::Agents(self.cmd_agents().await)),
             Action::Config => return Ok(Reply::Config(self.config())),
             Action::Worktrees => return Ok(Reply::Worktrees(self.cmd_worktrees().await?)),
@@ -571,36 +663,14 @@ impl App {
             Action::Screen(l) => return Ok(Reply::Screen(self.cmd_screen(&l).await?)),
             Action::Recall(r) => return Ok(Reply::Recall(self.cmd_recall(&r).await?)),
             Action::JournalList(l) => return Ok(Reply::Journal(self.cmd_journal_list(&l).await?)),
-            Action::New(n) => self.cmd_new(http, &n).await,
-            Action::Attach(a) => self.cmd_attach(http, &a).await,
             Action::Snapshot => self.snapshot().await,
             Action::Watch => bail!("watch streams over the control socket"),
             Action::Complete(c) => self.cmd_complete(c).await,
-            Action::Mate(m) => self.cmd_mate(http, &m).await,
-            Action::Scout(s) => self.cmd_scout(http, &s).await,
-            Action::Brief(b) => self.cmd_brief(&b),
-            Action::Escalate(n) => self.cmd_escalate(http, &n).await,
-            Action::ScoutClose(t) => self.cmd_scout_close(http, &t.thread).await,
-            Action::Send(s) => self.cmd_send(&s).await,
-            Action::Take(t) => self.set_owner(&t.thread, Owner::User).await,
-            Action::Release(t) => self.set_owner(&t.thread, Owner::Mate).await,
-            Action::Keys(k) => {
-                let (m, pane) = self.target(&k.thread).await?;
-                let keys: Vec<&str> = k.keys.iter().map(String::as_str).collect();
-                herdr::keys(m, &pane, &keys).await?;
-                sleep(Duration::from_millis(700)).await;
-                Ok(screen(m, &pane, "").await)
-            }
-            Action::Done(d) => self.cmd_done(http, &d).await,
-            Action::JournalRemove(r) => Ok(match self.journal.remove(r.id).await? {
-                true => format!("removed #{}", r.id),
-                false => format!("no journal entry #{}", r.id),
-            }),
         };
         text.map(Reply::Text)
     }
 
-    async fn cmd_new(&self, http: &Http, n: &New) -> Result<String> {
+    async fn cmd_new(&self, http: &Http, n: &New) -> Result<Change> {
         let m = self.machine(&n.machine)?;
         let repo = Name::parse(&n.repo)?;
         let r#ref = Name::parse(&n.branch)?;
@@ -611,21 +681,28 @@ impl App {
 
         let wt = herdr::worktree(m, &repo, &r#ref).await?;
         if let Some((_, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
-            let where_at = match cell.lock().await.thread {
-                Some(th) => format!("<#{th}>"),
-                None => wt.pane_id.0,
-            };
-            return Ok(format!("already open in {where_at}"));
+            let t = cell.lock().await;
+            let at = t
+                .thread
+                .map_or_else(|| t.pane.0.clone(), |th| format!("<#{th}>"));
+            return Ok(
+                Change::task(&t, Some("already open"), format!("already open in {at}"))
+                    .watch(&t.pane),
+            );
         }
         if herdr::agents(m)
             .await?
             .iter()
             .any(|a| a.pane_id == wt.pane_id)
         {
-            return Ok(format!(
-                "an agent already runs in {}, attach to it instead",
-                wt.pane_id.0
-            ));
+            return Err(cli::Failure::new(
+                format!(
+                    "an agent already runs in {} that drover does not follow",
+                    wt.pane_id.0
+                ),
+                format!("drover attach --machine {} --pane {}", m.name, wt.pane_id.0),
+            )
+            .into());
         }
 
         let repo = repo.as_str();
@@ -663,7 +740,7 @@ impl App {
                 "{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"
             );
         }
-        self.insert(Task {
+        let task = Task {
             thread,
             machine: m.name.clone(),
             pane: wt.pane_id.clone(),
@@ -685,7 +762,10 @@ impl App {
             dialog_msg: None,
             queued: None,
             inbox: Vec::new(),
-        });
+        };
+        let shown = thread.map_or_else(|| wt.pane_id.0.clone(), |th| format!("<#{th}>"));
+        let out = Change::task(&task, None, shown).watch(&wt.pane_id);
+        self.insert(task);
         self.save().await;
         if let Some(name) = &n.mate {
             log::append(&self.mate_dir(name), log::Event::Linked, &wt.pane_id.0)?;
@@ -701,13 +781,10 @@ impl App {
             model.as_ref(),
         )
         .await?;
-        Ok(match thread {
-            Some(th) => format!("<#{th}>"),
-            None => wt.pane_id.0,
-        })
+        Ok(out)
     }
 
-    async fn cmd_attach(&self, http: &Http, at: &Attach) -> Result<String> {
+    async fn cmd_attach(&self, http: &Http, at: &Attach) -> Result<Change> {
         let m = match at.machine.as_deref() {
             Some(name) => self.machine(name)?,
             None => self.machine_of_pane(&at.pane).await.unwrap_or(&self.host),
@@ -730,7 +807,12 @@ impl App {
             }
             if let Some(th) = t.thread {
                 if at.mate.is_none() {
-                    return Ok(format!("already open in <#{th}>"));
+                    return Ok(Change::task(
+                        &t,
+                        Some("already open"),
+                        format!("already open in <#{th}>"),
+                    )
+                    .watch(&pane));
                 }
             } else if at.discord {
                 let middle = t.branch.as_ref().unwrap_or(&t.kind);
@@ -740,12 +822,17 @@ impl App {
                 t.thread = Some(th);
                 th.send_message(http, screen_msg(m, &pane).await).await?;
             } else if at.mate.is_none() {
-                return Ok(format!("already open in {}", pane.0));
+                return Ok(Change::task(
+                    &t,
+                    Some("already open"),
+                    format!("already open in {}", pane.0),
+                )
+                .watch(&pane));
             }
-            let out = match t.thread {
-                Some(th) => format!("<#{th}>"),
-                None => pane.0.clone(),
-            };
+            let shown = t
+                .thread
+                .map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
+            let out = Change::task(&t, None, shown).watch(&pane);
             drop(t);
             self.save().await;
             if let Some(name) = &at.mate {
@@ -775,7 +862,7 @@ impl App {
             Some(s) => herdr::reply(m, s).await?.map(|r| r.id),
             None => None,
         };
-        self.insert(Task {
+        let task = Task {
             thread,
             machine: m.name.clone(),
             pane: pane.clone(),
@@ -797,7 +884,10 @@ impl App {
             dialog_msg: None,
             queued: None,
             inbox: Vec::new(),
-        });
+        };
+        let shown = thread.map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
+        let out = Change::task(&task, None, shown).watch(&pane);
+        self.insert(task);
         self.save().await;
         if let Some(name) = &at.mate {
             log::append(&self.mate_dir(name), log::Event::Linked, &pane.0)?;
@@ -805,10 +895,8 @@ impl App {
         }
         if let Some(th) = thread {
             th.send_message(http, screen_msg(m, &pane).await).await?;
-            Ok(format!("<#{th}>"))
-        } else {
-            Ok(pane.0)
         }
+        Ok(out)
     }
 
     async fn cmd_agents(&self) -> Agents {
@@ -999,14 +1087,42 @@ impl App {
     }
 
     // A prompt from the terminal: the same path as a Discord message in the thread.
-    async fn cmd_send(&self, s: &Send) -> Result<String> {
+    async fn cmd_send(&self, s: &Send) -> Result<Change> {
         let (_, cell) = self.find_task(&s.thread).await?;
-        Ok(match self.send_prompt(&cell, &s.text, None).await? {
-            Sent::Now => "sent",
-            Sent::Queued => "queued, sent when the agent is idle",
-            Sent::Blocked => "the agent waits on a dialog: answer it with keys, then send again",
-        }
-        .into())
+        let (pane, machine) = {
+            let t = cell.lock().await;
+            (t.pane.clone(), t.machine.clone())
+        };
+        let (delivery, said) = match self.send_prompt(&cell, &s.text, None).await? {
+            Sent::Now => ("sent", "sent"),
+            Sent::Queued => ("queued", "queued, sent when the agent is idle"),
+            Sent::Blocked => {
+                return Err(cli::Failure::new(
+                    "the agent waits on a dialog",
+                    format!("drover screen --pane {}", pane.0),
+                )
+                .into());
+            }
+        };
+        Ok(Change::new(said)
+            .with("pane", &pane.0)
+            .with("machine", machine)
+            .with("delivery", delivery)
+            .help(vec![format!("drover screen --pane {}", pane.0)]))
+    }
+
+    // Keys to the pane, then what its terminal shows.
+    async fn cmd_keys(&self, k: &Keys) -> Result<ScreenView> {
+        let (m, pane) = self.target(&k.thread).await?;
+        let keys: Vec<&str> = k.keys.iter().map(String::as_str).collect();
+        herdr::keys(m, &pane, &keys).await?;
+        sleep(Duration::from_millis(700)).await;
+        self.cmd_screen(&Look {
+            thread: k.thread.clone(),
+            full: k.discord,
+            discord: k.discord,
+        })
+        .await
     }
 
     // A prompt from Discord or the terminal. `msg` is the Discord message that carries its reaction.
@@ -1088,30 +1204,39 @@ impl App {
     }
 
     // A question for the desk from a mate: posted in its thread (if any) and kept in its log.
-    async fn cmd_escalate(&self, http: &Http, n: &Note) -> Result<String> {
+    async fn cmd_escalate(&self, http: &Http, n: &Note) -> Result<Change> {
         let name = &n.mate;
         let (pane, th) = self
             .mate_task(name)
             .await
             .context(format!("no running mate {name}"))?;
         log::append(&self.mate_dir(name), log::Event::Escalated, &n.text)?;
-        if let Some(th) = th {
-            th.say(http, &n.text).await?;
-            Ok(format!("escalated to <#{th}>"))
-        } else {
-            Ok(format!("escalated for mate {name} ({})", pane.0))
-        }
+        let said = match th {
+            Some(th) => {
+                th.say(http, &n.text).await?;
+                format!("escalated to <#{th}>")
+            }
+            None => format!("escalated for mate {name} ({})", pane.0),
+        };
+        Ok(Change::new(said)
+            .with("mate", name)
+            .with("pane", &pane.0)
+            .with("machine", &self.host.name)
+            .maybe("thread", th)
+            .with("event", log::Event::Escalated.as_str()))
     }
 
     // A note for the mate, in its log, for it to read when it next looks.
-    fn cmd_brief(&self, b: &Note) -> Result<String> {
+    fn cmd_brief(&self, b: &Note) -> Result<Change> {
         let name = &b.mate;
         log::append(&self.mate_dir(name), log::Event::Brief, &b.text)?;
-        Ok(format!("noted for mate {name}"))
+        Ok(Change::new(format!("noted for mate {name}"))
+            .with("mate", name)
+            .with("event", log::Event::Brief.as_str()))
     }
 
     // A scout: a short look with no repo, in its own folder and pane, with nothing to journal.
-    async fn cmd_scout(&self, http: &Http, s: &Scout) -> Result<String> {
+    async fn cmd_scout(&self, http: &Http, s: &Scout) -> Result<Change> {
         let id = scout_id();
         let dir = self.mates.join("state").join("scouts").join(&id);
         std::fs::create_dir_all(&dir)?;
@@ -1126,7 +1251,7 @@ impl App {
         } else {
             (None, None)
         };
-        self.insert(Task {
+        let task = Task {
             thread,
             machine: self.host.name.clone(),
             pane: pane.clone(),
@@ -1147,17 +1272,31 @@ impl App {
             dialog_msg: None,
             queued: None,
             inbox: Vec::new(),
-        });
+        };
+        let shown = thread.map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
+        let out = Change::task(&task, None, shown)
+            .with("scout", &id)
+            .help(vec![
+                format!("drover screen --pane {}", pane.0),
+                format!("drover scout close --pane {id}"),
+            ]);
+        self.insert(task);
         self.save().await;
         herdr::start(&self.host, &id, harness::DEFAULT, &pane, &cwd, None).await?;
-        Ok(match thread {
-            Some(th) => format!("<#{th}>"),
-            None => pane.0,
-        })
+        Ok(out)
     }
 
-    async fn cmd_scout_close(&self, http: &Http, target: &str) -> Result<String> {
-        let (key, cell) = self.find_task(target).await?;
+    async fn cmd_scout_close(&self, http: &Http, target: &str) -> Result<Change> {
+        let (key, cell) = match self.find_task(target).await {
+            Ok(found) => found,
+            // a closed scout's task is gone, and its id is all that is left
+            Err(_) if target.starts_with("scout-") => {
+                return Ok(Change::new(format!("closed {target}"))
+                    .with("scout", target)
+                    .with("noop", "already closed"));
+            }
+            Err(e) => return Err(e),
+        };
         let t = cell.lock().await.clone();
         let Role::Scout(scout) = t.role.clone() else {
             bail!("this task is not a scout");
@@ -1166,10 +1305,10 @@ impl App {
         self.save().await;
         self.teardown(http, &t, Teardown::Close).await?;
         remove_scout_dir(&self.mates.join("state").join("scouts"), &scout)?;
-        Ok(format!("closed {scout}"))
+        Ok(Change::at(&t, None, format!("closed {scout}")).with("scout", &scout))
     }
 
-    async fn cmd_mate(&self, http: &Http, m: &Mate) -> Result<String> {
+    async fn cmd_mate(&self, http: &Http, m: &Mate) -> Result<Change> {
         let name = m.name.clone();
         let mut live = 0;
         for (_, cell) in self.cells() {
@@ -1198,7 +1337,7 @@ impl App {
         } else {
             (None, None)
         };
-        self.insert(Task {
+        let task = Task {
             thread,
             machine: self.host.name.clone(),
             pane: pane.clone(),
@@ -1219,7 +1358,13 @@ impl App {
             dialog_msg: None,
             queued: None,
             inbox: Vec::new(),
-        });
+        };
+        let shown = thread.map_or_else(|| pane.0.clone(), |th| format!("<#{th}>"));
+        let out = Change::task(&task, None, shown).help(vec![
+            format!("drover brief --mate {name} --text <text>"),
+            format!("drover new --machine {} --repo <repo> --branch <branch> --prompt <prompt> --mate {name}", self.host.name),
+        ]);
+        self.insert(task);
         self.save().await;
         log::append(&self.mate_dir(&name), log::Event::Started, &pane.0)?;
         self.write_owners(&name, None).await?;
@@ -1232,10 +1377,7 @@ impl App {
             None,
         )
         .await?;
-        Ok(match thread {
-            Some(th) => format!("<#{th}>"),
-            None => pane.0,
-        })
+        Ok(out)
     }
 
     // A new agent nobody started through drover: link it to a mate that works on the same repo and branch.
@@ -1318,21 +1460,40 @@ impl App {
         Ok(())
     }
 
-    async fn set_owner(&self, target: &str, owner: Owner) -> Result<String> {
+    async fn set_owner(&self, target: &str, owner: Owner) -> Result<Change> {
         let (_, cell) = self.find_task(target).await?;
-        let (pane, name) = {
+        let (out, name, same) = {
             let mut t = cell.lock().await;
             let pane = t.pane.0.clone();
             let Role::Crew { mate, owner: o } = &mut t.role else {
                 bail!("{pane} is not linked to a mate");
             };
+            let same = *o == owner;
             *o = owner;
-            (pane, mate.clone())
+            let mate = mate.clone();
+            let noop = match (same, owner) {
+                (false, _) => None,
+                (true, Owner::User) => Some("already taken"),
+                (true, Owner::Mate) => Some("already released"),
+            };
+            let out = Change::at(&t, noop, format!("{pane} is {}", owner.as_str()))
+                .with("mate", &mate)
+                .with("owner", owner.as_str());
+            (out, mate, same)
         };
+        if same {
+            return Ok(out);
+        }
         log::append(&self.mate_dir(&name), log::Event::Owner, owner.as_str())?;
         self.write_owners(&name, None).await?;
         self.save().await;
-        Ok(format!("{pane} is {}", owner.as_str()))
+        Ok(match owner {
+            Owner::User => out.help(vec![format!(
+                "drover send --pane {} --text <text>",
+                cell.lock().await.pane.0
+            )]),
+            Owner::Mate => out,
+        })
     }
 
     async fn cmd_worktrees(&self) -> Result<Worktrees> {
@@ -1376,17 +1537,26 @@ impl App {
         Ok(out)
     }
 
-    async fn cmd_done(&self, http: &Http, d: &Done) -> Result<String> {
+    async fn cmd_done(&self, http: &Http, d: &Done) -> Result<Change> {
         let (key, cell) = self.find_task(&d.thread).await?;
         let teardown = if d.remove {
             Teardown::Remove
         } else {
             Teardown::Close
         };
-        let th = {
+        let (th, base) = {
             let mut t = cell.lock().await;
             if matches!(t.role, Role::Scout(_)) {
                 bail!("a scout ends with scout-close");
+            }
+            // asking again would send a second journal prompt; --no-journal still ends the wait
+            let noop = match (&t.phase, d.journal) {
+                (Phase::Gone, _) => Some("already gone"),
+                (Phase::Ending(_), true) => Some("already ending"),
+                _ => None,
+            };
+            if let Some(why) = noop {
+                return Ok(Change::at(&t, noop, why));
             }
             if teardown == Teardown::Remove && t.origin == Origin::Attached {
                 bail!("drover didn't open this worktree, remove it by hand");
@@ -1395,14 +1565,21 @@ impl App {
                 herdr::prompt(self.machine(&t.machine)?, &t.pane, journal::ENTRY_PROMPT).await?;
                 t.phase = Phase::Ending(teardown);
             }
-            t.thread
+            (t.thread, Change::at(&t, None, ""))
         };
         if !d.journal {
             let t = cell.lock().await.clone();
             self.remove(&key);
             self.save().await;
-            self.teardown(http, &t, teardown).await?;
-            return Ok("closed without a journal entry".into());
+            let removed = self.teardown(http, &t, teardown).await?;
+            let mut out = Change::at(&t, None, "closed without a journal entry")
+                .with("entry", "none")
+                .with("closed", true)
+                .with("teardown", teardown);
+            if teardown == Teardown::Remove {
+                out = out.with("checkout", if removed { "removed" } else { "kept" });
+            }
+            return Ok(out);
         }
         if let Some(th) = th {
             let msg = th.say(http, "writing the journal entry").await?;
@@ -1412,7 +1589,23 @@ impl App {
         } else {
             self.save().await;
         }
-        Ok("asked the agent for the journal entry".into())
+        let mut out = base;
+        out.discord = "asked the agent for the journal entry".into();
+        Ok(out
+            .with("entry", "asked")
+            .with("closed", false)
+            .with("teardown", teardown)
+            .help(vec!["drover journal".into()]))
+    }
+
+    async fn cmd_journal_remove(&self, id: i64) -> Result<Change> {
+        let removed = self.journal.remove(id).await?;
+        Ok(match removed {
+            true => Change::new(format!("removed #{id}")).with("id", id),
+            false => Change::new(format!("no journal entry #{id}"))
+                .with("id", id)
+                .with("noop", "already gone"),
+        })
     }
 }
 
@@ -1666,6 +1859,88 @@ mod tests {
             String::new(),
         ));
         assert_eq!(hit.discord(), "2026-10-18 drover theo/x\nwhat: x");
+    }
+
+    // The text the old String replies posted, and the fields the terminal gets instead.
+    #[test]
+    fn write_commands_post_the_same_discord_text() -> Result<()> {
+        let task = |role| Task {
+            thread: None,
+            machine: "host".into(),
+            pane: PaneId("w1:p1".into()),
+            workspace: WorkspaceId("w1".into()),
+            kind: "claude".into(),
+            repo: "drover".into(),
+            branch: Some("theo/x".into()),
+            origin: Origin::Opened,
+            role,
+            phase: Phase::Idle,
+            status: None,
+            session: None,
+            last_reply: None,
+            reply: None,
+            prompt_msg: None,
+            dialog_msg: None,
+            queued: None,
+            inbox: Vec::new(),
+        };
+        let crew = task(Role::Crew {
+            mate: MateName::parse("docs")?,
+            owner: Owner::Mate,
+        });
+        let opened = Reply::Change(Change::task(&crew, None, "w1:p1").watch(&crew.pane));
+        assert_eq!(opened.discord(), "w1:p1");
+        assert_eq!(
+            toon_of(&opened),
+            "pane: \"w1:p1\"\nmachine: host\nworkspace: w1\nrepo: drover\nbranch: theo/x\nharness: claude\nmate: docs\n\
+             help[2]:\n  - \"drover screen --pane w1:p1\"\n  - \"drover send --pane w1:p1 --text <text>\"\n"
+        );
+
+        let noop = Reply::Change(
+            Change::at(&crew, Some("already taken"), "w1:p1 is user").with("owner", "user"),
+        );
+        assert_eq!(noop.discord(), "w1:p1 is user");
+        assert_eq!(
+            toon_of(&noop),
+            "pane: \"w1:p1\"\nmachine: host\nnoop: already taken\nowner: user\n"
+        );
+
+        let sent = Reply::Change(
+            Change::new("queued, sent when the agent is idle")
+                .with("pane", "w1:p1")
+                .with("delivery", "queued"),
+        );
+        assert_eq!(sent.discord(), "queued, sent when the agent is idle");
+        assert_eq!(toon_of(&sent), "pane: \"w1:p1\"\ndelivery: queued\n");
+
+        let closing = Reply::Change(
+            Change::at(&crew, None, "asked the agent for the journal entry")
+                .with("entry", "asked")
+                .with("closed", false)
+                .with("teardown", Teardown::Remove),
+        );
+        assert_eq!(closing.discord(), "asked the agent for the journal entry");
+        assert_eq!(
+            toon_of(&closing),
+            "pane: \"w1:p1\"\nmachine: host\nentry: asked\nclosed: false\nteardown: remove\n"
+        );
+
+        let gone = Reply::Change(
+            Change::new("no journal entry #7")
+                .with("id", 7)
+                .with("noop", "already gone"),
+        );
+        assert_eq!(gone.discord(), "no journal entry #7");
+        assert_eq!(toon_of(&gone), "id: 7\nnoop: already gone\n");
+
+        // a thread id is text, so a program reads it back as it is
+        let mut threaded = crew.clone();
+        threaded.thread = Some(ChannelId::new(42));
+        assert!(
+            toon_of(&Reply::Change(Change::task(&threaded, None, "")))
+                .ends_with("mate: docs\nthread: \"42\"\n")
+        );
+        Ok(())
     }
 
     #[test]
