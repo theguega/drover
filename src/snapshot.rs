@@ -65,8 +65,17 @@ impl App {
             .collect();
         drop(reachability);
 
+        let usage = self
+            .usage
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+
         Ok(json!({
             "machines": machines,
+            "usage": usage,
             "tasks": tasks,
             "mates": mates,
             "escalations": escalations,

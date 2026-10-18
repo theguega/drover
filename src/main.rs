@@ -220,6 +220,8 @@ struct Excerpt {
 
 // Characters of a reply the snapshot keeps.
 const REPLY_EXCERPT: usize = 300;
+// Between reads of the usage endpoints for the snapshot.
+const USAGE_REFRESH: Duration = Duration::from_secs(300);
 
 impl Excerpt {
     fn of(reply: &str) -> Self {
@@ -379,6 +381,8 @@ struct App {
     changed: Notify,
     /// Per machine, from its watcher. A machine never tried is absent.
     reachability: StdMutex<HashMap<String, Reachability>>,
+    /// The last `/usage` read of every machine, refreshed in the background so a snapshot never waits on it.
+    usage: StdMutex<Option<Usage>>,
     /// Saves share one temp file, so they take turns.
     saving: Mutex<()>,
 }
@@ -425,6 +429,7 @@ impl App {
             wake: Notify::new(),
             changed: Notify::new(),
             reachability: StdMutex::new(HashMap::new()),
+            usage: StdMutex::new(None),
             saving: Mutex::new(()),
         })
     }
@@ -1713,6 +1718,19 @@ impl EventHandler for Handler {
                 watch_machine(app, http, m).await;
             });
         }
+        let usage_app = Arc::clone(&app);
+        tokio::spawn(async move {
+            loop {
+                if let Ok(u) = usage_app.cmd_usage().await {
+                    *usage_app
+                        .usage
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner) = Some(u);
+                    usage_app.changed.notify_waiters();
+                }
+                tokio::time::sleep(USAGE_REFRESH).await;
+            }
+        });
         let (control_app, control_http) = (Arc::clone(&app), Arc::clone(&http));
         tokio::spawn(async move {
             if let Err(e) = control::serve(control_app, control_http).await {
@@ -1948,6 +1966,7 @@ mod tests {
             wake: Notify::new(),
             changed: Notify::new(),
             reachability: StdMutex::new(HashMap::new()),
+            usage: StdMutex::new(None),
             saving: Mutex::new(()),
         };
         let a = MateName::parse("a")?;
