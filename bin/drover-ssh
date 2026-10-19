@@ -3,6 +3,17 @@
 #   DROVER_HOST=meerkat drover agents
 set -euo pipefail
 
+root=$(cd "$(dirname "$(realpath "$0")")/.." && pwd)
+case "${1:-}" in
+  --skill) exec cat "$root/skills/drover/SKILL.md" ;;
+  completion)
+    case "${2:-}" in
+      zsh) exec cat "$root/completions/_drover" ;;
+      bash) exec cat "$root/completions/drover.bash" ;;
+    esac
+    ;;
+esac
+
 host=${DROVER_HOST:?set DROVER_HOST to the ssh name of the drover host}
 # serve starts a second Discord bot, so only the host may run it
 [[ "${1:-}" == serve ]] && { echo "serve runs on $host, not here" >&2; exit 1; }

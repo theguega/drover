@@ -12,10 +12,15 @@ use crate::action::{
     Note, Recall, Scout, Send, Target,
 };
 
+const SKILL: &str = include_str!("../skills/drover/SKILL.md");
+const COMPLETION_ZSH: &str = include_str!("../completions/_drover");
+const COMPLETION_BASH: &str = include_str!("../completions/drover.bash");
+
 pub enum Invocation {
     Home,
     Version,
     Help,
+    Print(&'static str),
     Usage(&'static Spec),
     Run(&'static Spec, Action),
 }
@@ -474,6 +479,17 @@ pub fn parse(args: &[String]) -> Result<Invocation, Failure> {
     };
     match cmd.as_str() {
         "-v" | "-V" | "--version" => return Ok(Invocation::Version),
+        "--skill" => return Ok(Invocation::Print(SKILL)),
+        "completion" => {
+            return match rest.first().map(String::as_str) {
+                Some("zsh") => Ok(Invocation::Print(COMPLETION_ZSH)),
+                Some("bash") => Ok(Invocation::Print(COMPLETION_BASH)),
+                _ => Err(Failure::new(
+                    "usage: drover completion <zsh|bash>",
+                    "drover completion zsh",
+                )),
+            };
+        }
         "help" | "-h" | "--help" => {
             return Ok(
                 match rest
@@ -705,6 +721,10 @@ pub async fn run(parsed: Result<Invocation, Failure>) -> i32 {
         }
         Ok(Invocation::Help) => {
             print!("{}", help());
+            return 0;
+        }
+        Ok(Invocation::Print(s)) => {
+            print!("{s}");
             return 0;
         }
         Ok(Invocation::Usage(spec)) => return print(&spec.help()),
@@ -1011,6 +1031,11 @@ mod tests {
         for v in ["-v", "-V", "--version"] {
             assert!(matches!(parse(&args(v)), Ok(Invocation::Version)));
         }
+        assert!(matches!(parse(&args("--skill")), Ok(Invocation::Print(SKILL))));
+        assert!(matches!(
+            parse(&args("completion zsh")),
+            Ok(Invocation::Print(COMPLETION_ZSH))
+        ));
         assert!(matches!(parse(&[]), Ok(Invocation::Home)));
     }
 
