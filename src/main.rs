@@ -126,13 +126,6 @@ impl Phase {
     fn waiting(&self) -> bool {
         matches!(self, Self::Waiting | Self::Ending(_))
     }
-
-    // Whether this status push ends a turn whose reply is due: one a prompt started, or one the
-    // agent started itself, such as Claude Code resuming when a background task finishes.
-    #[must_use]
-    fn turn_ends(&self, prev: Option<Status>, now: Status) -> bool {
-        now.ready() && (self.waiting() || prev == Some(Status::Working))
-    }
 }
 
 // Who may send input to a pane: the desk user, or the mate that dispatched it.
@@ -1512,7 +1505,7 @@ impl App {
         if let Phase::Starting { prompt } = &t.phase {
             let prompt = prompt.clone();
             if let Some(s) = &t.session {
-                t.last_reply = herdr::reply(m, s).await?.map(|r| r.id);
+                t.last_reply = herdr::reply(m, s).await?.reply.map(|r| r.id);
             }
             t.phase = match herdr::prompt(m, &t.pane, &prompt).await {
                 Ok(()) => Phase::Waiting,
@@ -1533,7 +1526,7 @@ impl App {
         let quiet = matches!(t.role, Role::Mate(_)) && !t.phase.waiting();
         let th = th.filter(|_| !quiet);
         let mut said = None;
-        if !t.phase.turn_ends(prev, now) {
+        if !(t.phase.waiting() || was_working) {
             return self.drain_queue(http, &mut t, m).await;
         }
         if harness::find(&t.kind).is_some_and(|h| h.transcript) {
@@ -1639,8 +1632,9 @@ enum Seen {
     Gone,
 }
 
-// The transcript trails the status flip: until the turn's end line lands, the newest text may be
-// one from the middle of the turn, so wait for that line before taking it.
+// The transcript trails the status flip: while the turn is open its last text may not be written
+// yet, and the newest text is one from the middle of the turn. A turn with no end line coming
+// (an interrupt, a local command) is not open, so this waits only on a turn being written.
 async fn fresh_reply(
     m: &Machine,
     s: &SessionId,
@@ -1648,18 +1642,14 @@ async fn fresh_reply(
 ) -> Result<Option<herdr::Reply>> {
     let mut newest = None;
     for _ in 0..20 {
-        if let Some(r) = herdr::reply(m, s)
-            .await?
-            .filter(|r| Some(r.id.as_str()) != last)
-        {
-            if r.ended {
-                return Ok(Some(r));
-            }
-            newest = Some(r);
+        let turn = herdr::reply(m, s).await?;
+        let fresh = turn.reply.filter(|r| Some(r.id.as_str()) != last);
+        if !turn.open {
+            return Ok(fresh);
         }
+        newest = fresh.or(newest);
         sleep(Duration::from_millis(250)).await;
     }
-    // a transcript that never writes the end line still gets its newest text through
     Ok(newest)
 }
 
@@ -1945,19 +1935,6 @@ mod tests {
         let back = parse_state(&serde_json::to_string(&tasks)?)?;
         assert!(back.get("host:p2").map(|t| &t.role) == tasks.get("host:p2").map(|t| &t.role));
         Ok(())
-    }
-
-    #[test]
-    fn every_turn_that_ends_is_due_a_reply() {
-        use Status::{Blocked, Done, Idle, Working};
-        // no prompt started it: the agent resumed on its own, and its mate still hears the end
-        assert!(Phase::Idle.turn_ends(Some(Working), Idle));
-        assert!(Phase::Idle.turn_ends(Some(Working), Done));
-        assert!(Phase::Waiting.turn_ends(Some(Idle), Idle));
-        assert!(Phase::Ending(Teardown::Close).turn_ends(None, Done));
-        assert!(!Phase::Idle.turn_ends(Some(Idle), Idle));
-        assert!(!Phase::Idle.turn_ends(Some(Working), Blocked));
-        assert!(!Phase::Waiting.turn_ends(Some(Idle), Working));
     }
 
     #[test]

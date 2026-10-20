@@ -981,7 +981,7 @@ impl App {
         };
         let session = a.session();
         let last_reply = match &session {
-            Some(s) => herdr::reply(m, s).await?.map(|r| r.id),
+            Some(s) => herdr::reply(m, s).await?.reply.map(|r| r.id),
             None => None,
         };
         let task = Task {
@@ -1185,7 +1185,7 @@ impl App {
         }
         let m = self.machine(&t.machine)?;
         let reply = match &t.session {
-            Some(s) => herdr::reply(m, s).await?,
+            Some(s) => herdr::reply(m, s).await?.reply,
             None => None,
         };
         let r = reply.ok_or_else(|| cli::Failure::new("no reply yet", screen))?;

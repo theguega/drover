@@ -926,20 +926,25 @@ impl Line {
 pub struct Reply {
     pub id: String,
     pub text: String,
-    // the turn's end line follows it: no later text of the same turn can come
-    pub ended: bool,
 }
 
-// Last assistant text after the latest real prompt in a Claude Code transcript.
-// Reads from the end and doubles the window until it reaches that prompt, so a long
+// The newest turn of a Claude Code transcript: the turn after its latest real prompt.
+#[derive(Default)]
+pub struct Turn {
+    pub reply: Option<Reply>, // its last assistant text
+    // the agent wrote in it and its end line has not come yet, so a later text may still land
+    pub open: bool,
+}
+
+// Reads from the end and doubles the window until it reaches the latest prompt, so a long
 // session crosses ssh only as far as its latest turn.
-pub async fn reply(m: &Machine, session: &SessionId) -> Result<Option<Reply>> {
+pub async fn reply(m: &Machine, session: &SessionId) -> Result<Turn> {
     let file = format!("{}.jsonl", session.0);
     let local = match m.reach {
         Reach::Ssh => None,
         Reach::Local => match find_local(&file).await? {
             Some(path) => Some(path),
-            None => return Ok(None),
+            None => return Ok(Turn::default()),
         },
     };
     let mut window = TAIL;
@@ -948,12 +953,12 @@ pub async fn reply(m: &Machine, session: &SessionId) -> Result<Option<Reply>> {
             Some(path) => tail(path, window).await?,
             None => match ssh_tail(m, &file, window).await? {
                 Some(t) => t,
-                None => return Ok(None),
+                None => return Ok(Turn::default()),
             },
         };
         match last_reply(&text) {
-            Scan::Reply(r) => return Ok(r),
-            Scan::NoPrompt if whole => return Ok(None),
+            Scan::Turn(t) => return Ok(t),
+            Scan::NoPrompt if whole => return Ok(Turn::default()),
             Scan::NoPrompt => window *= 2,
         }
     }
@@ -1006,32 +1011,39 @@ async fn ssh_tail(m: &Machine, file: &str, window: u64) -> Result<Option<(String
 
 enum Scan {
     NoPrompt,
-    Reply(Option<Reply>),
+    Turn(Turn),
 }
 
-// Walks back from the end, so only the latest turn is parsed.
+// Walks back from the end, so only the latest turn is parsed. An interrupt or a local command
+// such as /compact is a prompt with nothing after it, so its turn is not open.
 #[must_use]
 fn last_reply(jsonl: &str) -> Scan {
     let mut reply = None;
-    let mut ended = false;
+    // the newest line that tells: an assistant line opens the turn, the end line closes it
+    let mut open = None;
     for line in jsonl.lines().rev() {
         let Ok(e) = serde_json::from_str::<Line>(line) else {
             continue;
         };
         if e.is_prompt() {
-            return Scan::Reply(reply);
+            return Scan::Turn(Turn {
+                reply,
+                open: open.unwrap_or(false),
+            });
         }
-        if reply.is_some() {
+        if e.ends_turn() {
+            open.get_or_insert(false);
+        }
+        if e.kind != "assistant" {
             continue;
         }
-        ended |= e.ends_turn();
-        if e.kind == "assistant"
+        open.get_or_insert(true);
+        if reply.is_none()
             && let Some(text) = e.texts().filter(|t| !t.is_empty()).last()
         {
             reply = Some(Reply {
                 id: e.uuid.clone(),
                 text: text.into(),
-                ended,
             });
         }
     }
@@ -1077,43 +1089,69 @@ mod tests {
         .join("\n");
         assert!(matches!(
             last_reply(&jsonl),
-            Scan::Reply(Some(r)) if r.id == "a2" && r.text == "new" && !r.ended
+            Scan::Turn(Turn { reply: Some(r), .. }) if r.id == "a2" && r.text == "new"
         ));
 
         let only_prompt = r#"{"type":"user","message":{"content":"hi"}}"#;
-        assert!(matches!(last_reply(only_prompt), Scan::Reply(None)));
+        assert!(matches!(
+            last_reply(only_prompt),
+            Scan::Turn(Turn { reply: None, .. })
+        ));
         let no_prompt = r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"x"}]}}"#;
         assert!(matches!(last_reply(no_prompt), Scan::NoPrompt));
     }
 
-    // The status flips before the turn's last text reaches the transcript, so a text from the
-    // middle of the turn is the newest one for a moment. Only the end line makes it the reply.
-    #[test]
-    fn a_reply_ends_its_turn_only_before_the_end_line() {
-        let prompt = r#"{"type":"user","message":{"content":"go"}}"#;
-        let mid = r#"{"type":"assistant","uuid":"m","message":{"content":[{"type":"text","text":"13 pass, then the full checks:"}]}}"#;
-        let tool = r#"{"type":"assistant","uuid":"t","message":{"content":[{"type":"tool_use","id":"x"}]}}"#;
-        let result =
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#;
-        let last = r#"{"type":"assistant","uuid":"l","message":{"content":[{"type":"text","text":"DONE: 2cde9f6"}]}}"#;
-        let end = r#"{"type":"system","subtype":"turn_duration","isMeta":false}"#;
+    // Lines as Claude Code 2.1 writes them.
+    const PROMPT: &str = r#"{"type":"user","message":{"content":"go"}}"#;
+    const MID: &str = r#"{"type":"assistant","uuid":"m","message":{"content":[{"type":"text","text":"13 pass, then the full checks:"}]}}"#;
+    const TOOL: &str =
+        r#"{"type":"assistant","uuid":"t","message":{"content":[{"type":"tool_use","id":"x"}]}}"#;
+    const RESULT: &str =
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#;
+    const LAST: &str = r#"{"type":"assistant","uuid":"l","message":{"content":[{"type":"text","text":"DONE: 2cde9f6"}]}}"#;
+    const END: &str = r#"{"type":"system","subtype":"turn_duration","isMeta":false}"#;
+    const NOTIFY: &str = r#"{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}}"#;
+    const INTERRUPT: &str = r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#;
+    const COMPACT: &str =
+        r#"{"type":"user","message":{"content":"<command-name>/compact</command-name>"}}"#;
 
-        let flushing = [prompt, mid, tool, result].join("\n");
-        assert!(matches!(
-            last_reply(&flushing),
-            Scan::Reply(Some(r)) if r.id == "m" && !r.ended
-        ));
-        let written = [prompt, mid, tool, result, last, end].join("\n");
-        assert!(matches!(
-            last_reply(&written),
-            Scan::Reply(Some(r)) if r.id == "l" && r.ended
-        ));
-        // a turn that resumes on its own has no prompt line: the newest text still wins
-        let resumed = [prompt, mid, end, tool, result, last, end].join("\n");
-        assert!(matches!(
-            last_reply(&resumed),
-            Scan::Reply(Some(r)) if r.id == "l" && r.ended
-        ));
+    // The reply's id, and whether the turn is still open.
+    fn turn(lines: &[&str]) -> Option<(Option<String>, bool)> {
+        match last_reply(&lines.join("\n")) {
+            Scan::Turn(t) => Some((t.reply.map(|r| r.id), t.open)),
+            Scan::NoPrompt => None,
+        }
+    }
+
+    // The status flips before the turn's last text is written, and the newest text is then one
+    // from the middle of the turn. The turn stays open until its end line.
+    #[test]
+    fn a_turn_is_open_until_its_end_line() {
+        let open = turn(&[PROMPT, MID, TOOL, RESULT]);
+        assert_eq!(open, Some((Some("m".into()), true)));
+        let ended = turn(&[PROMPT, MID, TOOL, RESULT, LAST, END]);
+        assert_eq!(ended, Some((Some("l".into()), false)));
+    }
+
+    // Claude Code resumes on its own when a background task ends, with a notification prompt.
+    #[test]
+    fn a_task_notification_starts_a_turn_of_its_own() {
+        // the mid-turn text ended its turn; the notification's turn has written no text yet
+        let resuming = turn(&[PROMPT, MID, END, NOTIFY, TOOL, RESULT]);
+        assert_eq!(resuming, Some((None, true)));
+        let resumed = turn(&[PROMPT, MID, END, NOTIFY, TOOL, RESULT, LAST, END]);
+        assert_eq!(resumed, Some((Some("l".into()), false)));
+    }
+
+    // Turns that never get an end line: there is nothing to wait for.
+    #[test]
+    fn an_interrupt_or_a_local_command_is_not_open() {
+        assert_eq!(
+            turn(&[PROMPT, MID, TOOL, RESULT, INTERRUPT]),
+            Some((None, false))
+        );
+        assert_eq!(turn(&[PROMPT, LAST, END, COMPACT]), Some((None, false)));
+        assert_eq!(turn(&[PROMPT, LAST, END, NOTIFY]), Some((None, false)));
     }
 
     #[test]
