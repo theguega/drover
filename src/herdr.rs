@@ -962,15 +962,33 @@ pub struct Turn {
     pub open: bool,
 }
 
-// Reads from the end and doubles the window until it reaches the latest prompt, so a long
-// session crosses ssh only as far as its latest turn.
 pub async fn reply(m: &Machine, session: &SessionId) -> Result<Turn> {
+    let turn = read_back(m, session, |text| match last_reply(text) {
+        Scan::Turn(t) => Some(t),
+        Scan::NoPrompt => None,
+    });
+    Ok(turn.await?.unwrap_or_default())
+}
+
+// The newest assistant text in the transcript, in whichever turn: one still being written, or
+// the last before an interrupt.
+pub async fn last_text(m: &Machine, session: &SessionId) -> Result<Option<Reply>> {
+    read_back(m, session, newest_text).await
+}
+
+// Reads the transcript from the end and doubles the window until `scan` finds what it looks for,
+// so a long session crosses ssh only as far as it needs. None when the file has none.
+async fn read_back<T>(
+    m: &Machine,
+    session: &SessionId,
+    scan: impl Fn(&str) -> Option<T>,
+) -> Result<Option<T>> {
     let file = format!("{}.jsonl", session.0);
     let local = match m.reach {
         Reach::Ssh => None,
         Reach::Local => match find_local(&file).await? {
             Some(path) => Some(path),
-            None => return Ok(Turn::default()),
+            None => return Ok(None),
         },
     };
     let mut window = TAIL;
@@ -979,13 +997,13 @@ pub async fn reply(m: &Machine, session: &SessionId) -> Result<Turn> {
             Some(path) => tail(path, window).await?,
             None => match ssh_tail(m, &file, window).await? {
                 Some(t) => t,
-                None => return Ok(Turn::default()),
+                None => return Ok(None),
             },
         };
-        match last_reply(&text) {
-            Scan::Turn(t) => return Ok(t),
-            Scan::NoPrompt if whole => return Ok(Turn::default()),
-            Scan::NoPrompt => window *= 2,
+        match scan(&text) {
+            Some(found) => return Ok(Some(found)),
+            None if whole => return Ok(None),
+            None => window *= 2,
         }
     }
 }
@@ -1038,6 +1056,18 @@ async fn ssh_tail(m: &Machine, file: &str, window: u64) -> Result<Option<(String
 enum Scan {
     NoPrompt,
     Turn(Turn),
+}
+
+#[must_use]
+fn newest_text(jsonl: &str) -> Option<Reply> {
+    jsonl.lines().rev().find_map(|line| {
+        let e = serde_json::from_str::<Line>(line).ok()?;
+        let text = e.texts().filter(|t| !t.is_empty()).last()?;
+        (e.kind == "assistant").then(|| Reply {
+            id: e.uuid.clone(),
+            text: text.into(),
+        })
+    })
 }
 
 // Walks back from the end, so only the latest turn is parsed. An interrupt or a local command
@@ -1167,6 +1197,21 @@ mod tests {
         assert_eq!(resuming, Some((None, true)));
         let resumed = turn(&[PROMPT, MID, END, NOTIFY, TOOL, RESULT, LAST, END]);
         assert_eq!(resumed, Some((Some("l".into()), false)));
+    }
+
+    // drover reply: the agent is at work, or was interrupted, and still has a last reply to show.
+    #[test]
+    fn the_newest_text_crosses_turns() {
+        let last = |lines: &[&str]| newest_text(&lines.join("\n")).map(|r| r.id);
+        assert_eq!(
+            last(&[PROMPT, LAST, END, PROMPT, TOOL, RESULT]),
+            Some("l".into())
+        );
+        assert_eq!(
+            last(&[PROMPT, MID, TOOL, RESULT, INTERRUPT]),
+            Some("m".into())
+        );
+        assert_eq!(last(&[PROMPT, TOOL]), None);
     }
 
     // Turns that never get an end line: there is nothing to wait for.

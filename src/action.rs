@@ -1242,7 +1242,7 @@ impl App {
         }
         let m = self.machine(&t.machine)?;
         let reply = match &t.session {
-            Some(s) => herdr::reply(m, s).await?.reply,
+            Some(s) => herdr::last_text(m, s).await?,
             None => None,
         };
         let r = reply.ok_or_else(|| cli::Failure::new("no reply yet", screen))?;
