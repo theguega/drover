@@ -83,6 +83,7 @@ drover keys --pane <pane> --keys "esc enter"    # prints the screen after the ke
 drover done --pane <pane> --remove
 ```
 
+- `--text -` (and `--prompt -` on `new`) reads the text from stdin. Use it for long or multi-line text, so the shell expands nothing: `drover send --pane <pane> --text - <<'EOF'`.
 - `send` to a working agent keeps one queued prompt and sends it on the next idle. A second `send` before then fails with `one message is already queued`: wait for the reply.
 - Read `drover screen` before `drover keys`, and before retrying a prompt. A dialog is the user's to answer unless the user's instructions cover it.
 - `done` asks the agent for a five-line journal entry (what, why, outcome, decisions, next), stores it, then closes the workspace. `--no-journal` only when the user asks.

@@ -113,7 +113,11 @@ const SPECS: &[Spec] = &[
                 "required",
                 "a new name or an existing branch or #<pr>",
             ),
-            Arg("--prompt <prompt>", "required", "the first prompt"),
+            Arg(
+                "--prompt <prompt>",
+                "required",
+                "the first prompt, or - to read it from stdin",
+            ),
             Arg("--agent <agent>", harness::DEFAULT, "claude or cursor"),
             Arg(
                 "--model <model>",
@@ -173,7 +177,11 @@ const SPECS: &[Spec] = &[
         about: "Log a question for the desk and post it in the mate's thread if it has one",
         args: &[
             Arg("--mate <mate>", "required", "the mate asking"),
-            Arg("--text <text>", "required", "the question"),
+            Arg(
+                "--text <text>",
+                "required",
+                "the question, or - to read it from stdin",
+            ),
         ],
         examples: [
             "drover escalate --mate docs --text 'which section first?'",
@@ -185,7 +193,11 @@ const SPECS: &[Spec] = &[
         about: "Add a note to a mate's log for it to read",
         args: &[
             Arg("--mate <mate>", "required", "the mate to tell"),
-            Arg("--text <text>", "required", "the note"),
+            Arg(
+                "--text <text>",
+                "required",
+                "the note, or - to read it from stdin",
+            ),
         ],
         examples: [
             "drover brief --mate docs --text 'the README is frozen until Friday'",
@@ -287,7 +299,15 @@ const SPECS: &[Spec] = &[
     Spec {
         name: "send",
         about: "Send a prompt to a task's agent: queued while it works",
-        args: &[PANE, THREAD, Arg("--text <text>", "required", "the prompt")],
+        args: &[
+            PANE,
+            THREAD,
+            Arg(
+                "--text <text>",
+                "required",
+                "the prompt, or - to read it from stdin",
+            ),
+        ],
         examples: [
             "drover send --pane wAX:p1 --text 'run the tests again'",
             "drover send --thread 1300000000000000000 --text 'ship it'",
@@ -547,7 +567,7 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
             machine: flags.req("machine")?,
             repo: flags.req("repo")?,
             branch: flags.req("branch")?,
-            prompt: flags.req("prompt")?,
+            prompt: flags.text("prompt")?,
             agent: flags.opt("agent"),
             model: flags.opt("model"),
             scout: flags.on("scout"),
@@ -572,11 +592,11 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
         }),
         "escalate" => Action::Escalate(Note {
             mate: MateName::parse(&flags.req("mate")?)?,
-            text: flags.req("text")?,
+            text: flags.text("text")?,
         }),
         "brief" => Action::Brief(Note {
             mate: MateName::parse(&flags.req("mate")?)?,
-            text: flags.req("text")?,
+            text: flags.text("text")?,
         }),
         "agents" => Action::Agents,
         "worktrees" => Action::Worktrees,
@@ -615,7 +635,7 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
         }),
         "send" => Action::Send(Send {
             thread: flags.target()?,
-            text: flags.req("text")?,
+            text: flags.text("text")?,
         }),
         "scout" => Action::Scout(Scout {
             prompt: words()?,
@@ -701,6 +721,19 @@ impl Flags {
 
     fn req(&self, name: &str) -> Result<String> {
         self.opt(name).context(format!("missing --{name}"))
+    }
+
+    // `-` reads the text from stdin, so a long prompt needs no shell quoting: `$5` stays `$5`.
+    fn text(&self, name: &str) -> Result<String> {
+        let v = self.req(name)?;
+        if v != "-" {
+            return Ok(v);
+        }
+        let read = std::io::read_to_string(std::io::stdin())?;
+        match read.trim_end() {
+            "" => bail!("--{name} - read nothing from stdin"),
+            text => Ok(text.into()),
+        }
     }
 
     fn target(&self) -> Result<String> {
@@ -1057,7 +1090,7 @@ mod tests {
         let new = toon::encode(&spec("new").context("new")?.help());
         assert!(
             new.contains("command: drover new\n")
-                && new.contains("\"--prompt <prompt>\",required,the first prompt\n")
+                && new.contains("\"--prompt <prompt>\",required,\"the first prompt, or - to read it from stdin\"\n")
         );
         assert!(new.contains("examples[2]:") && !new.contains("attach"));
         let f = spec("scout close")
