@@ -872,7 +872,7 @@ impl App {
     // with this model, as `new` starts one. The pane, its worktree and its owner stay.
     async fn renew(&self, cell: &Cell, n: &New, prompt: &str) -> Result<Change> {
         let model = n.model.as_deref().map(Name::parse).transpose()?;
-        let (m, pane, dropped) = {
+        let (m, pane) = {
             let mut t = cell.lock().await;
             if t.role.crew_of_mate() != n.mate.as_ref() {
                 bail!(
@@ -917,8 +917,7 @@ impl App {
                 });
             }
             t.restarting(prompt);
-            // a prompt queued for the old conversation means nothing to the new one
-            (m, t.pane.clone(), t.queued.take())
+            (m, t.pane.clone())
         };
         self.save().await;
 
@@ -934,25 +933,9 @@ impl App {
                 break;
             }
         }
-        let t = {
-            let mut t = cell.lock().await;
-            if !gone {
-                t.phase = Phase::Idle;
-                drop(t);
-                self.save().await;
-                bail!("the agent in {} did not exit", pane.0);
-            }
-            // as for a new task: the prompt goes out on the new agent's first ready push,
-            // read from a transcript of its own
-            t.phase = Phase::Starting {
-                prompt: prompt.into(),
-            };
-            t.status = None;
-            t.session = None;
-            t.reply = None;
-            t.clone()
-        };
+        let after = self.after_exit(cell, gone).await;
         self.save().await;
+        let (t, dropped) = after?;
         let name = agent_name(t.branch.as_ref().or(t.commit.as_ref()).unwrap_or(&t.kind));
         let started = match herdr::checkout_path(m, &t.workspace).await {
             Ok(path) => herdr::start(m, &name, &t.kind, &pane, &path, model.as_ref()).await,
@@ -975,6 +958,21 @@ impl App {
             .maybe("dropped", dropped)
             .maybe("warning", self.label(m, &pane, n).await)
             .watch(&pane))
+    }
+
+    // After the wait for the old agent to exit: the task with its replacement starting and the
+    // queued prompt that went with the old one, or an error with the task as it was.
+    async fn after_exit(&self, cell: &Cell, gone: bool) -> Result<(Task, Option<String>)> {
+        let mut t = cell.lock().await;
+        if !gone {
+            t.restart_abandoned();
+            bail!(
+                "the agent in {} did not exit; the task is as it was",
+                t.pane.0
+            );
+        }
+        let dropped = t.restart_started();
+        Ok((t.clone(), dropped))
     }
 
     // The old agent left and no new one started: the pane has no agent, so the task is gone, as
@@ -2246,6 +2244,32 @@ mod tests {
         assert!(cell.lock().await.phase == Phase::Gone);
         assert_eq!(owners()?, "\n");
         let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    // The old agent may still exit after the wait: the task keeps its status and session, so a
+    // reconcile then marks it gone, and its queued prompt is still there.
+    #[tokio::test]
+    async fn an_agent_that_does_not_exit_leaves_the_task_as_it_was() -> Result<()> {
+        let app = crate::tests::test_app(CREW_TASK, &scratch("restart-timeout"))?;
+        let (_, cell) = app.cells().into_iter().next().context("p1")?;
+        cell.lock().await.restarting("next");
+        assert!(app.after_exit(&cell, false).await.is_err());
+        let t = cell.lock().await;
+        assert!(t.phase == Phase::Waiting && t.status == Some(Status::Idle));
+        assert_eq!(t.queued.as_deref(), Some("later"));
+        drop(t);
+
+        cell.lock().await.restarting("next");
+        let (t, dropped) = app.after_exit(&cell, true).await?;
+        assert!(
+            t.phase
+                == Phase::Starting {
+                    prompt: "next".into()
+                }
+                && t.status.is_none()
+        );
+        assert_eq!(dropped.as_deref(), Some("later"));
         Ok(())
     }
 

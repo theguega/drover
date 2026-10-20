@@ -357,6 +357,27 @@ impl Task {
             from: Box::new(from),
         };
     }
+
+    // The old agent never left: the task is as it was before --fresh.
+    fn restart_abandoned(&mut self) {
+        self.phase = match std::mem::replace(&mut self.phase, Phase::Idle) {
+            Phase::Restarting { from, .. } => *from,
+            phase => phase,
+        };
+    }
+
+    // The old agent left. As for a new task, the prompt goes out on the new agent's first ready
+    // push and is read from a transcript of its own. A prompt queued for the old conversation
+    // means nothing to the new one, so it is dropped and returned.
+    fn restart_started(&mut self) -> Option<String> {
+        if let Phase::Restarting { prompt, .. } = std::mem::replace(&mut self.phase, Phase::Idle) {
+            self.phase = Phase::Starting { prompt };
+        }
+        self.status = None;
+        self.session = None;
+        self.reply = None;
+        self.queued.take()
+    }
 }
 
 #[must_use]
