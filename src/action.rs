@@ -70,6 +70,9 @@ pub struct New {
     // a task by pane or thread: open a checkout at its commit, in place of machine, repo and branch
     #[serde(default)]
     pub at: Option<String>,
+    // when the branch is open already: clear its agent's context and send the prompt there
+    #[serde(default)]
+    pub fresh: bool,
     #[serde(default)]
     pub discord: bool,
 }
@@ -592,6 +595,16 @@ pub enum Sent {
     Blocked, // a dialog holds the agent; nothing was sent
 }
 
+// The --machine --repo --branch of a task, for a command that opens the same place again.
+fn place_of(t: &Task) -> String {
+    format!(
+        "--machine {} --repo {} --branch {}",
+        t.machine,
+        t.repo,
+        t.branch.as_deref().unwrap_or("<branch>")
+    )
+}
+
 // Most mates a desk runs at once.
 const MAX_MATES: usize = 3;
 
@@ -718,8 +731,25 @@ impl App {
             .name;
         let model = n.model.as_deref().map(Name::parse).transpose()?;
 
+        let memory = self.journal.context(repo.as_str(), &n.prompt, 2000).await?;
+        let mut prompt = if n.scout {
+            format!("{SCOUT}\n\n{}", n.prompt)
+        } else {
+            n.prompt.clone()
+        };
+        if n.mate.is_some() {
+            prompt = format!("{prompt}\n\n{CREW}");
+        }
+        if !memory.is_empty() {
+            prompt = format!(
+                "{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"
+            );
+        }
         let wt = herdr::worktree(m, &repo, &r#ref, n.at.is_some()).await?;
         if let Some((_, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
+            if n.fresh {
+                return self.renew(&cell, n, &prompt).await;
+            }
             let t = cell.lock().await;
             let at = t
                 .thread
@@ -732,6 +762,7 @@ impl App {
             .help(vec![
                 format!("drover send --pane {} --text <text>", t.pane.0),
                 format!("drover new --at {} --prompt <prompt>", t.pane.0),
+                format!("drover new --fresh {} --prompt <prompt>", place_of(&t)),
             ]));
         }
         if herdr::agents(m)
@@ -770,20 +801,6 @@ impl App {
             (None, None)
         };
 
-        let memory = self.journal.context(repo, &n.prompt, 2000).await?;
-        let mut prompt = if n.scout {
-            format!("{SCOUT}\n\n{}", n.prompt)
-        } else {
-            n.prompt.clone()
-        };
-        if n.mate.is_some() {
-            prompt = format!("{prompt}\n\n{CREW}");
-        }
-        if !memory.is_empty() {
-            prompt = format!(
-                "{prompt}\n\nContext from earlier tasks (journal, may be stale):\n{memory}"
-            );
-        }
         let task = Task {
             thread,
             machine: m.name.clone(),
@@ -831,6 +848,61 @@ impl App {
         if let Some(label) = &n.name {
             herdr::rename_pane(m, &wt.pane_id, label).await?;
         }
+        Ok(out)
+    }
+
+    // A fresh conversation for the agent already in this pane: the context goes, the pane, its
+    // worktree and its owner stay, and the prompt goes out as a first prompt would.
+    async fn renew(&self, cell: &Cell, n: &New, prompt: &str) -> Result<Change> {
+        let mut t = cell.lock().await;
+        if t.role.crew_of_mate() != n.mate.as_ref() {
+            bail!(
+                "{} is not driven by {}",
+                t.pane.0,
+                n.mate.as_ref().map_or("the desk", MateName::as_str)
+            );
+        }
+        let Some(clear) = harness::find(&t.kind).and_then(|h| h.clear) else {
+            bail!(
+                "{} cannot clear its context in place; close the task and start a new one",
+                t.kind
+            );
+        };
+        let m = self.machine(&t.machine)?;
+        if let Err(e) = herdr::prompt(m, &t.pane, clear).await {
+            return Err(match e.is_busy() || e.is(&herdr::Code::AgentBlocked) {
+                true => cli::Failure::new(
+                    "the agent is not idle; wait for its reply",
+                    format!("drover screen --pane {}", t.pane.0),
+                )
+                .into(),
+                false => e.into(),
+            });
+        }
+        // the clear shows no status change to wait on, and the prompt must not land in the middle of it
+        let mut sent = Err(herdr::Error::failed("not sent".into()));
+        for _ in 0..20 {
+            sleep(Duration::from_millis(500)).await;
+            sent = herdr::prompt(m, &t.pane, prompt).await;
+            if !sent.as_ref().is_err_and(herdr::Error::is_busy) {
+                break;
+            }
+        }
+        sent?;
+        // the new conversation has a new transcript, learned from agent.list on the next push;
+        // the old last reply stays, so the old transcript is never read as this turn's
+        t.session = None;
+        t.reply = None;
+        t.queued = None;
+        t.phase = Phase::Waiting;
+        if let Some(label) = &n.name {
+            herdr::rename_pane(m, &t.pane, label).await?;
+        }
+        let out = Change::task(&t, None, format!("fresh agent in {}", t.pane.0))
+            .with("delivery", "sent")
+            .watch(&t.pane);
+        drop(t);
+        self.save().await;
         Ok(out)
     }
 

@@ -4,16 +4,20 @@ pub struct Harness {
     pub name: &'static str,
     // the reply is read from a transcript; otherwise the terminal screen is the reply
     pub transcript: bool,
+    // the prompt that starts a fresh conversation in the running agent
+    pub clear: Option<&'static str>,
 }
 
 pub const HARNESSES: [Harness; 2] = [
     Harness {
         name: "claude",
         transcript: true,
+        clear: Some("/clear"),
     },
     Harness {
         name: "cursor",
         transcript: false,
+        clear: None,
     },
 ];
 

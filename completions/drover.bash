@@ -26,7 +26,7 @@ _drover() {
     --agent|--model|--branch|--repo|--prompt|--text|--keys|--name) return ;;
     *)
       case $cmd in
-        new) words="--machine --repo --branch --prompt --agent --model --scout --mate --name --at --discord" ;;
+        new) words="--machine --repo --branch --prompt --agent --model --scout --mate --name --at --fresh --discord" ;;
         attach) words="--machine --pane --discord" ;;
         link) words="--machine --pane --mate" ;;
         escalate|brief) words="--mate --text" ;;

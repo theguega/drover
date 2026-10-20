@@ -1131,6 +1131,7 @@ impl App {
                 mate: None,
                 name: None,
                 at: None,
+                fresh: false,
                 machine: req(i, "machine")?.into(),
                 repo: req(i, "repo")?.into(),
                 branch: req(i, "branch")?.into(),

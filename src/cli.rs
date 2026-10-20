@@ -140,6 +140,11 @@ const SPECS: &[Spec] = &[
                 "none",
                 "a detached checkout at that task's commit in place of --machine --repo --branch: a reviewer's; done removes it",
             ),
+            Arg(
+                "--fresh",
+                "off",
+                "if the branch is open already: clear its agent's context (claude) and send the prompt there, keeping the pane and its owner",
+            ),
             DISCORD,
         ],
         examples: [
@@ -588,6 +593,7 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
                 .transpose()?,
             name: flags.opt("name"),
             at: flags.opt("at"),
+            fresh: flags.on("fresh"),
             discord: flags.on("discord"),
         })),
         "attach" => Action::Attach(Attach {
@@ -998,7 +1004,7 @@ mod tests {
     fn unknown_flags_fail_first_and_list_the_valid_ones() {
         let f = failure("new --machine h --repo r --branch b --prompt p --modle opus");
         assert!(f.is_some_and(|f| f.error
-            == "unknown flag --modle; drover new takes --machine --repo --branch --prompt --agent --model --scout --mate --name --at --discord"
+            == "unknown flag --modle; drover new takes --machine --repo --branch --prompt --agent --model --scout --mate --name --at --fresh --discord"
             && f.help.as_deref()
                 == Some("drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>")));
         let f = failure("agents --bogus");
