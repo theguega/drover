@@ -934,7 +934,7 @@ impl App {
                 break;
             }
         }
-        let (t, path) = {
+        let t = {
             let mut t = cell.lock().await;
             if !gone {
                 t.phase = Phase::Idle;
@@ -950,17 +950,45 @@ impl App {
             t.status = None;
             t.session = None;
             t.reply = None;
-            let path = herdr::checkout_path(m, &t.workspace).await?;
-            (t.clone(), path)
+            t.clone()
         };
         self.save().await;
         let name = agent_name(t.branch.as_ref().or(t.commit.as_ref()).unwrap_or(&t.kind));
-        herdr::start(m, &name, &t.kind, &pane, &path, model.as_ref()).await?;
+        let started = match herdr::checkout_path(m, &t.workspace).await {
+            Ok(path) => herdr::start(m, &name, &t.kind, &pane, &path, model.as_ref()).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = started {
+            self.restart_failed(cell).await?;
+            self.save().await;
+            return Err(cli::Failure::new(
+                format!(
+                    "the old agent exited and the new one did not start ({e}), so {} is gone",
+                    pane.0
+                ),
+                fresh_of(&t),
+            )
+            .into());
+        }
         Ok(Change::task(&t, None, format!("fresh agent in {}", pane.0))
             .maybe("model", model.as_ref().map(Name::as_str))
             .maybe("dropped", dropped)
             .maybe("warning", self.label(m, &pane, n).await)
             .watch(&pane))
+    }
+
+    // The old agent left and no new one started: the pane has no agent, so the task is gone, as
+    // an exit makes it, and leaves its mate's owner list.
+    async fn restart_failed(&self, cell: &Cell) -> Result<()> {
+        let mate = {
+            let mut t = cell.lock().await;
+            t.phase = Phase::Gone;
+            t.role.mate().cloned()
+        };
+        if let Some(mate) = mate {
+            self.write_owners(&mate, None).await?;
+        }
+        Ok(())
     }
 
     async fn cmd_attach(&self, http: &Http, at: &Attach) -> Result<Change> {
@@ -2194,6 +2222,30 @@ mod tests {
             fresh_of(&t),
             "drover new --machine host --repo opalin --branch theo/x --fresh --prompt <prompt>"
         );
+        Ok(())
+    }
+
+    const CREW_TASK: &str = r#"{"host:p1": {"machine":"host","pane":"p1","workspace":"w","kind":"claude","repo":"drover","branch":"theo/x","origin":"opened","role":{"crew":{"mate":"a","owner":"mate"}},"phase":"waiting","status":"idle","queued":"later"}}"#;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("drover-{name}-{}", std::process::id()))
+    }
+
+    // The old agent exited and the new one did not start: no agent is left to follow.
+    #[tokio::test]
+    async fn a_failed_restart_leaves_the_task_gone() -> Result<()> {
+        let root = scratch("restart-failed");
+        let app = crate::tests::test_app(CREW_TASK, &root)?;
+        let a = MateName::parse("a")?;
+        let owners = || std::fs::read_to_string(root.join("state/a/owners"));
+        app.write_owners(&a, None).await?;
+        assert_eq!(owners()?, "p1 mate\n");
+        let (_, cell) = app.cells().into_iter().next().context("p1")?;
+        cell.lock().await.restarting("next");
+        app.restart_failed(&cell).await?;
+        assert!(cell.lock().await.phase == Phase::Gone);
+        assert_eq!(owners()?, "\n");
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 

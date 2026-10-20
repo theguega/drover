@@ -2012,6 +2012,32 @@ mod tests {
         assert_eq!(unix("2024-02-29T12:00:00Z"), Some(1_709_208_000));
     }
 
+    // An App over this state, with its mates under `root`. Nothing here calls save, which writes ./state.json.
+    pub(crate) fn test_app(state: &str, root: &std::path::Path) -> Result<App> {
+        Ok(App {
+            token: String::new(),
+            guild: GuildId::new(1),
+            channel: ChannelId::new(1),
+            allowed: HashSet::new(),
+            host: Machine::new("host".into(), Reach::Local),
+            remotes: Vec::new(),
+            tasks: StdMutex::new(
+                parse_state(state)?
+                    .into_iter()
+                    .map(|(k, t)| (k, Arc::new(Mutex::new(t))))
+                    .collect(),
+            ),
+            journal: Journal::open(":memory:")?,
+            mates: root.into(),
+            started: AtomicBool::new(false),
+            wake: Notify::new(),
+            changed: Notify::new(),
+            reachability: StdMutex::new(HashMap::new()),
+            usage: StdMutex::new(None),
+            saving: Mutex::new(()),
+        })
+    }
+
     #[tokio::test]
     async fn owners_skip_the_held_cell_and_gone_crew() -> Result<()> {
         let crew = |pane: &str, phase: &str| {
@@ -2026,28 +2052,7 @@ mod tests {
             crew("p3", "gone")
         );
         let root = std::env::temp_dir().join(format!("drover-owners-{}", std::process::id()));
-        let app = App {
-            token: String::new(),
-            guild: GuildId::new(1),
-            channel: ChannelId::new(1),
-            allowed: HashSet::new(),
-            host: Machine::new("host".into(), Reach::Local),
-            remotes: Vec::new(),
-            tasks: StdMutex::new(
-                parse_state(&state)?
-                    .into_iter()
-                    .map(|(k, t)| (k, Arc::new(Mutex::new(t))))
-                    .collect(),
-            ),
-            journal: Journal::open(":memory:")?,
-            mates: root.clone(),
-            started: AtomicBool::new(false),
-            wake: Notify::new(),
-            changed: Notify::new(),
-            reachability: StdMutex::new(HashMap::new()),
-            usage: StdMutex::new(None),
-            saving: Mutex::new(()),
-        };
+        let app = test_app(&state, &root)?;
         let a = MateName::parse("a")?;
         let cells = app.cells();
         let (_, held) = cells.iter().find(|(k, _)| k == "host:p1").context("p1")?;
