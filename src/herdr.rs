@@ -841,6 +841,8 @@ struct Line {
     #[serde(default)]
     is_compact_summary: bool,
     #[serde(default)]
+    subtype: Option<String>,
+    #[serde(default)]
     uuid: String,
     message: Option<Msg>,
 }
@@ -881,6 +883,11 @@ impl Line {
             }
     }
 
+    // Claude Code writes this once a turn is over, after the turn's last text.
+    fn ends_turn(&self) -> bool {
+        self.kind == "system" && self.subtype.as_deref() == Some("turn_duration")
+    }
+
     fn texts(&self) -> impl Iterator<Item = &str> {
         let blocks = match self.content() {
             Some(Content::Blocks(b)) => b.as_slice(),
@@ -897,6 +904,8 @@ impl Line {
 pub struct Reply {
     pub id: String,
     pub text: String,
+    // the turn's end line follows it: no later text of the same turn can come
+    pub ended: bool,
 }
 
 // Last assistant text after the latest real prompt in a Claude Code transcript.
@@ -982,6 +991,7 @@ enum Scan {
 #[must_use]
 fn last_reply(jsonl: &str) -> Scan {
     let mut reply = None;
+    let mut ended = false;
     for line in jsonl.lines().rev() {
         let Ok(e) = serde_json::from_str::<Line>(line) else {
             continue;
@@ -989,13 +999,17 @@ fn last_reply(jsonl: &str) -> Scan {
         if e.is_prompt() {
             return Scan::Reply(reply);
         }
-        if reply.is_none()
-            && e.kind == "assistant"
+        if reply.is_some() {
+            continue;
+        }
+        ended |= e.ends_turn();
+        if e.kind == "assistant"
             && let Some(text) = e.texts().filter(|t| !t.is_empty()).last()
         {
             reply = Some(Reply {
                 id: e.uuid.clone(),
                 text: text.into(),
+                ended,
             });
         }
     }
@@ -1041,13 +1055,43 @@ mod tests {
         .join("\n");
         assert!(matches!(
             last_reply(&jsonl),
-            Scan::Reply(Some(r)) if r.id == "a2" && r.text == "new"
+            Scan::Reply(Some(r)) if r.id == "a2" && r.text == "new" && !r.ended
         ));
 
         let only_prompt = r#"{"type":"user","message":{"content":"hi"}}"#;
         assert!(matches!(last_reply(only_prompt), Scan::Reply(None)));
         let no_prompt = r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"x"}]}}"#;
         assert!(matches!(last_reply(no_prompt), Scan::NoPrompt));
+    }
+
+    // The status flips before the turn's last text reaches the transcript, so a text from the
+    // middle of the turn is the newest one for a moment. Only the end line makes it the reply.
+    #[test]
+    fn a_reply_ends_its_turn_only_before_the_end_line() {
+        let prompt = r#"{"type":"user","message":{"content":"go"}}"#;
+        let mid = r#"{"type":"assistant","uuid":"m","message":{"content":[{"type":"text","text":"13 pass, then the full checks:"}]}}"#;
+        let tool = r#"{"type":"assistant","uuid":"t","message":{"content":[{"type":"tool_use","id":"x"}]}}"#;
+        let result =
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#;
+        let last = r#"{"type":"assistant","uuid":"l","message":{"content":[{"type":"text","text":"DONE: 2cde9f6"}]}}"#;
+        let end = r#"{"type":"system","subtype":"turn_duration","isMeta":false}"#;
+
+        let flushing = [prompt, mid, tool, result].join("\n");
+        assert!(matches!(
+            last_reply(&flushing),
+            Scan::Reply(Some(r)) if r.id == "m" && !r.ended
+        ));
+        let written = [prompt, mid, tool, result, last, end].join("\n");
+        assert!(matches!(
+            last_reply(&written),
+            Scan::Reply(Some(r)) if r.id == "l" && r.ended
+        ));
+        // a turn that resumes on its own has no prompt line: the newest text still wins
+        let resumed = [prompt, mid, end, tool, result, last, end].join("\n");
+        assert!(matches!(
+            last_reply(&resumed),
+            Scan::Reply(Some(r)) if r.id == "l" && r.ended
+        ));
     }
 
     #[test]
