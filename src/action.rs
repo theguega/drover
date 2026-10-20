@@ -916,23 +916,20 @@ impl App {
                     false => e.into(),
                 });
             }
-            // no status or session until the new agent's first push, so the old transcript is never read as its own
-            t.status = None;
-            t.session = None;
-            t.reply = None;
-            t.phase = Phase::Restarting {
-                prompt: prompt.into(),
-            };
+            t.restarting(prompt);
             // a prompt queued for the old conversation means nothing to the new one
             (m, t.pane.clone(), t.queued.take())
         };
         self.save().await;
 
-        // unlocked while the old agent exits, so this pane's pushes never wait on it
+        // unlocked while the old agent exits, so this pane's pushes never wait on it;
+        // a list that fails, an ssh blip, only means not seen gone yet
         let mut gone = false;
         for _ in 0..20 {
             sleep(Duration::from_millis(500)).await;
-            gone = !herdr::agents(m).await?.iter().any(|a| a.pane_id == pane);
+            gone = herdr::agents(m)
+                .await
+                .is_ok_and(|list| !list.iter().any(|a| a.pane_id == pane));
             if gone {
                 break;
             }
@@ -945,10 +942,14 @@ impl App {
                 self.save().await;
                 bail!("the agent in {} did not exit", pane.0);
             }
-            // as for a new task: the prompt goes out on the new agent's first ready push
+            // as for a new task: the prompt goes out on the new agent's first ready push,
+            // read from a transcript of its own
             t.phase = Phase::Starting {
                 prompt: prompt.into(),
             };
+            t.status = None;
+            t.session = None;
+            t.reply = None;
             let path = herdr::checkout_path(m, &t.workspace).await?;
             (t.clone(), path)
         };

@@ -115,7 +115,9 @@ enum Teardown {
 #[serde(rename_all = "lowercase")]
 enum Phase {
     Starting { prompt: String }, // first prompt, sent once the agent is ready
-    Restarting { prompt: String }, // the old agent exits; pushes wait until its replacement starts
+    // --fresh: the old agent exits and pushes wait. `from` is the phase to go back to when nothing
+    // replaces the agent, such as after a service restart in the middle of it.
+    Restarting { prompt: String, from: Box<Phase> },
     Idle,
     Waiting,          // a prompt from Discord is waiting for its reply
     Ending(Teardown), // /done sent, next reply is the journal entry
@@ -295,7 +297,11 @@ impl From<Stored> for Task {
             _ if s.expecting => Phase::Waiting,
             _ => Phase::Idle,
         };
-        let phase = s.phase.clone().unwrap_or_else(legacy);
+        // no --fresh survives a restart of drover: the task is as it was, and reconcile sees whether its agent left
+        let phase = match s.phase.clone().unwrap_or_else(legacy) {
+            Phase::Restarting { from, .. } => *from,
+            phase => phase,
+        };
         let origin = s.origin.unwrap_or(if s.owned {
             Origin::Opened
         } else {
@@ -338,6 +344,18 @@ impl From<Stored> for Task {
             queued: s.queued,
             inbox: s.inbox,
         }
+    }
+}
+
+impl Task {
+    // --fresh sent the exit. The status and session stay, so pushes that come before the
+    // replacement starts still see the old agent, and a reconcile can tell it left.
+    fn restarting(&mut self, prompt: &str) {
+        let from = std::mem::replace(&mut self.phase, Phase::Idle);
+        self.phase = Phase::Restarting {
+            prompt: prompt.into(),
+            from: Box::new(from),
+        };
     }
 }
 
@@ -1961,6 +1979,20 @@ mod tests {
         assert!(t.commit.as_deref() == Some("2cde9f6") && t.branch.is_none());
         let back = parse_state(&serde_json::to_string(&tasks)?)?;
         assert!(back.get("host:p1").and_then(|t| t.commit.as_deref()) == Some("2cde9f6"));
+        Ok(())
+    }
+
+    // A --fresh cut short by a drover restart must not leave the task deaf to events for good.
+    #[test]
+    fn a_restart_of_drover_ends_a_fresh_in_flight() -> Result<()> {
+        let mut tasks = parse_state(
+            r#"{"host:p1": {"machine":"host","pane":"p1","workspace":"w","kind":"claude","repo":"drover","origin":"opened","role":"task","phase":"waiting","status":"idle"}}"#,
+        )?;
+        let t = tasks.get_mut("host:p1").context("p1")?;
+        t.restarting("next node");
+        let back = parse_state(&serde_json::to_string(&tasks)?)?;
+        let t = back.get("host:p1").context("p1")?;
+        assert!(t.phase == Phase::Waiting && t.status == Some(Status::Idle));
         Ok(())
     }
 
