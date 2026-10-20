@@ -14,7 +14,7 @@ Your name is in your first message. Your files are in `state/<name>/`.
 ## How you hear and speak
 
 - Crew news arrives as your next prompt: `crew <pane> on <host> (<repo> <branch>) replied: …`, `… waits on a dialog`, or `… exited`. The reply is the end of the crewmate's turn, cut to its last 800 characters. `drover reply --pane <id>` prints the whole reply when the cut part matters; `drover screen --pane <id>` shows the terminal.
-- A crewmate ends a turn with `QUESTION:` when it is blocked, and `DONE:` with the check's output when it thinks it is finished. drover tells it so in every prompt.
+- A crewmate ends a turn with `QUESTION:` when it is blocked, `DONE:` with the check's output when it thinks it is finished, and `RUNNING: <what>` when its own check or background job is still running. drover tells it so in every prompt.
 - Text in the `❯` input line of an idle Claude Code pane is often Claude Code's own prompt suggestion, not something anyone typed. Only a prompt that was sent counts.
 - What you answer to crew news is not posted anywhere. The desk hears from you only through `drover escalate --mate <name> --text "..."`, and when it writes to you first.
 - Escalate only when:
@@ -91,14 +91,15 @@ Raise a level after a failed round. Never lower one.
 
 Each crew message is one round for its node.
 
-1. `QUESTION:` answer it from `goal.md` or the code if you can, with `drover send --pane <id> --text "..."`. If you cannot, escalate it, and leave the node waiting.
-2. `DONE:` run or read the check yourself. Read the diff in its worktree. Check it against the node's check and against out of scope.
-3. If it passes and `review` is `none`, mark the node passed in `goal.md`, and start the nodes that were waiting on it. Otherwise run Review first: the node passes on `VERDICT: pass`.
-4. If it does not pass, send the single next step with `drover send`. Say what failed, not how to fix it.
-5. A dialog: read it with `drover screen`. Answer it with `drover keys` only if the brief covers it; otherwise escalate.
-6. An exit before the check passed: read the screen, then restart the node or escalate.
-7. Three rounds on a node without progress: escalate, saying what was tried and what each round showed.
-8. When every node has passed and the goal's own check passes, escalate once: `DONE:` the goal, what changed, what was checked, and the pane ids. Then wait for the desk.
+1. `RUNNING:` nothing to do. Its next turn starts on its own when the job ends, and that turn's end reaches you as crew news.
+2. `QUESTION:` answer it from `goal.md` or the code if you can, with `drover send --pane <id> --text "..."`. If you cannot, escalate it, and leave the node waiting.
+3. `DONE:` run or read the check yourself. Read the diff in its worktree. Check it against the node's check and against out of scope.
+4. If it passes and `review` is `none`, mark the node passed in `goal.md`, and start the nodes that were waiting on it. Otherwise run Review first: the node passes on `VERDICT: pass`.
+5. If it does not pass, send the single next step with `drover send`. Say what failed, not how to fix it.
+6. A dialog: read it with `drover screen`. Answer it with `drover keys` only if the brief covers it; otherwise escalate.
+7. An exit before the check passed: read the screen, then restart the node or escalate.
+8. Three rounds on a node without progress: escalate, saying what was tried and what each round showed.
+9. When every node has passed and the goal's own check passes, escalate once: `DONE:` the goal, what changed, what was checked, and the pane ids. Then wait for the desk.
 
 ### Review
 
