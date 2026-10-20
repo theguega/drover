@@ -141,6 +141,7 @@ Field order, in every record: the id that feeds the next command first, then its
 | `scout` | a scout's id, like `scout-1a2b3c` | `drover scout close --pane <scout>` |
 | `noop` | why nothing changed: the state already held | |
 | `delivery` | a prompt sent: `sent` or `queued` | |
+| `dropped` | a queued prompt `new --fresh` threw away with the old conversation | |
 | `entry` | `done`'s journal entry: `asked` (the agent is writing it) or `none` | |
 | `closed` | whether `done` has closed the task yet | |
 | `teardown` | what `done` was asked to end with: `close` or `remove` | |

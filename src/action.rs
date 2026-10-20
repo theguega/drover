@@ -862,6 +862,11 @@ impl App {
                 n.mate.as_ref().map_or("the desk", MateName::as_str)
             );
         }
+        match t.phase {
+            Phase::Ending(_) => bail!("{} is ending: its journal entry is on the way", t.pane.0),
+            Phase::Starting { .. } => bail!("{} has not had its first prompt yet", t.pane.0),
+            Phase::Idle | Phase::Waiting | Phase::Gone => {}
+        }
         let Some(clear) = harness::find(&t.kind).and_then(|h| h.clear) else {
             bail!(
                 "{} cannot clear its context in place; close the task and start a new one",
@@ -893,13 +898,15 @@ impl App {
         // the old last reply stays, so the old transcript is never read as this turn's
         t.session = None;
         t.reply = None;
-        t.queued = None;
+        let dropped = t.queued.take();
         t.phase = Phase::Waiting;
         if let Some(label) = &n.name {
             herdr::rename_pane(m, &t.pane, label).await?;
         }
+        // a prompt queued for the old conversation means nothing to the new one
         let out = Change::task(&t, None, format!("fresh agent in {}", t.pane.0))
             .with("delivery", "sent")
+            .maybe("dropped", dropped)
             .watch(&t.pane);
         drop(t);
         self.save().await;
