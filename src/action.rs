@@ -845,10 +845,14 @@ impl App {
             model.as_ref(),
         )
         .await?;
-        if let Some(label) = &n.name {
-            herdr::rename_pane(m, &wt.pane_id, label).await?;
-        }
-        Ok(out)
+        Ok(out.maybe("warning", self.label(m, &wt.pane_id, n).await))
+    }
+
+    // The agent runs and its prompt is on the way by now, so a label that fails is a warning, not a failed start.
+    async fn label(&self, m: &Machine, pane: &PaneId, n: &New) -> Option<String> {
+        let label = n.name.as_ref()?;
+        let e = herdr::rename_pane(m, pane, label).await.err()?;
+        Some(format!("pane not named {label}: {e}"))
     }
 
     // A fresh agent in place of the one in this pane: the old one exits and a new one starts there
@@ -938,12 +942,10 @@ impl App {
         self.save().await;
         let name = agent_name(t.branch.as_deref().unwrap_or(&t.kind));
         herdr::start(m, &name, &t.kind, &pane, &path, model.as_ref()).await?;
-        if let Some(label) = &n.name {
-            herdr::rename_pane(m, &pane, label).await?;
-        }
         Ok(Change::task(&t, None, format!("fresh agent in {}", pane.0))
             .maybe("model", model.as_ref().map(Name::as_str))
             .maybe("dropped", dropped)
+            .maybe("warning", self.label(m, &pane, n).await)
             .watch(&pane))
     }
 
