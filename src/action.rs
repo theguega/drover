@@ -255,6 +255,7 @@ impl Change {
             .with("workspace", &t.workspace.0)
             .with("repo", &t.repo)
             .maybe("branch", t.branch.as_ref())
+            .maybe("commit", t.commit.as_ref())
             .with("harness", &t.kind)
             .maybe("mate", t.role.mate())
             .maybe("thread", t.thread)
@@ -595,14 +596,18 @@ pub enum Sent {
     Blocked, // a dialog holds the agent; nothing was sent
 }
 
-// The --machine --repo --branch of a task, for a command that opens the same place again.
-fn place_of(t: &Task) -> String {
-    format!(
-        "--machine {} --repo {} --branch {}",
-        t.machine,
-        t.repo,
-        t.branch.as_deref().unwrap_or("<branch>")
-    )
+// The command that puts a fresh agent where this task runs: a detached checkout is reached again
+// through --at, since there is one per commit.
+fn fresh_of(t: &Task) -> String {
+    match (&t.commit, &t.branch) {
+        (Some(_), _) | (None, None) => {
+            format!("drover new --at {} --fresh --prompt <prompt>", t.pane.0)
+        }
+        (None, Some(b)) => format!(
+            "drover new --machine {} --repo {} --branch {b} --fresh --prompt <prompt>",
+            t.machine, t.repo
+        ),
+    }
 }
 
 // Most mates a desk runs at once.
@@ -715,11 +720,12 @@ impl App {
             Some(at) => {
                 let (_, cell) = self.find_task(at).await?;
                 let t = cell.lock().await;
-                let branch = t
-                    .branch
+                let head = t
+                    .commit
                     .clone()
-                    .context(format!("{} is on no branch", t.pane.0))?;
-                (t.machine.clone(), t.repo.clone(), branch)
+                    .or_else(|| t.branch.clone())
+                    .context(format!("{} has no branch or commit", t.pane.0))?;
+                (t.machine.clone(), t.repo.clone(), head)
             }
             None => (n.machine.clone(), n.repo.clone(), n.branch.clone()),
         };
@@ -762,7 +768,7 @@ impl App {
             .help(vec![
                 format!("drover send --pane {} --text <text>", t.pane.0),
                 format!("drover new --at {} --prompt <prompt>", t.pane.0),
-                format!("drover new --fresh {} --prompt <prompt>", place_of(&t)),
+                fresh_of(&t),
             ]));
         }
         if herdr::agents(m)
@@ -783,7 +789,7 @@ impl App {
         let repo = repo.as_str();
         let (thread, prompt_msg) = if n.discord {
             let th = self
-                .open_thread(http, &format!("{repo} · {} · {}", wt.branch, m.name))
+                .open_thread(http, &format!("{repo} · {} · {}", wt.head.label(), m.name))
                 .await?;
             let head = th
                 .say(
@@ -808,7 +814,14 @@ impl App {
             workspace: wt.workspace_id,
             kind: kind.into(),
             repo: repo.into(),
-            branch: Some(wt.branch.clone()),
+            branch: match &wt.head {
+                herdr::Head::Branch(b) => Some(b.clone()),
+                herdr::Head::Commit(_) => None,
+            },
+            commit: match &wt.head {
+                herdr::Head::Commit(c) => Some(c.clone()),
+                herdr::Head::Branch(_) => None,
+            },
             origin: match n.at {
                 Some(_) => Origin::Detached,
                 None => Origin::Opened,
@@ -838,7 +851,7 @@ impl App {
         // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
         herdr::start(
             m,
-            &agent_name(&wt.branch),
+            &agent_name(&wt.head.label()),
             kind,
             &wt.pane_id,
             &wt.path,
@@ -940,7 +953,7 @@ impl App {
             (t.clone(), path)
         };
         self.save().await;
-        let name = agent_name(t.branch.as_deref().unwrap_or(&t.kind));
+        let name = agent_name(t.branch.as_ref().or(t.commit.as_ref()).unwrap_or(&t.kind));
         herdr::start(m, &name, &t.kind, &pane, &path, model.as_ref()).await?;
         Ok(Change::task(&t, None, format!("fresh agent in {}", pane.0))
             .maybe("model", model.as_ref().map(Name::as_str))
@@ -1035,6 +1048,7 @@ impl App {
             kind: a.agent,
             repo,
             branch: None,
+            commit: None,
             origin: Origin::Attached,
             role: at.mate.clone().map_or(Role::Task, |mate| Role::Crew {
                 mate,
@@ -1472,6 +1486,7 @@ impl App {
             kind: harness::DEFAULT.into(),
             repo: "scouts".into(),
             branch: None,
+            commit: None,
             origin: Origin::Attached,
             role: Role::Scout(id.clone()),
             phase: Phase::Starting {
@@ -1564,6 +1579,7 @@ impl App {
             kind: harness::DEFAULT.into(),
             repo: "mates".into(),
             branch: None,
+            commit: None,
             origin: Origin::Attached,
             role: Role::Mate(name.clone()),
             phase: Phase::Starting {
@@ -2089,6 +2105,7 @@ mod tests {
             kind: "claude".into(),
             repo: "drover".into(),
             branch: Some("theo/x".into()),
+            commit: None,
             origin: Origin::Opened,
             role,
             phase: Phase::Idle,
@@ -2156,6 +2173,25 @@ mod tests {
         assert!(
             toon_of(&Reply::Change(Change::task(&threaded, None, "")))
                 .ends_with("mate: docs\nthread: \"42\"\n")
+        );
+        Ok(())
+    }
+
+    // A detached checkout has no branch to pass to --branch; there is one per commit, so --at reaches it.
+    #[test]
+    fn a_fresh_agent_on_a_detached_checkout_goes_through_at() -> Result<()> {
+        let mut t: Task = serde_json::from_str(
+            r#"{"machine":"host","pane":"wR:p1","workspace":"w","kind":"claude","repo":"opalin","commit":"2cde9f6","origin":"detached","role":"task","phase":"idle"}"#,
+        )?;
+        assert_eq!(
+            fresh_of(&t),
+            "drover new --at wR:p1 --fresh --prompt <prompt>"
+        );
+        t.commit = None;
+        t.branch = Some("theo/x".into());
+        assert_eq!(
+            fresh_of(&t),
+            "drover new --machine host --repo opalin --branch theo/x --fresh --prompt <prompt>"
         );
         Ok(())
     }

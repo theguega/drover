@@ -191,7 +191,9 @@ struct Task {
     kind: String,
     repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    branch: Option<String>, // none for an agent drover attached to, a mate, or a scout
+    branch: Option<String>, // none for an agent drover attached to, a mate, a scout, or a detached checkout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commit: Option<String>, // the commit a detached checkout was opened at
     origin: Origin,
     role: Role,
     phase: Phase,
@@ -247,6 +249,8 @@ struct Stored {
     repo: String,
     #[serde(default)]
     branch: Option<String>,
+    #[serde(default)]
+    commit: Option<String>,
     origin: Option<Origin>,
     role: Option<Role>,
     owner: Option<Owner>,
@@ -315,7 +319,14 @@ impl From<Stored> for Task {
             workspace: s.workspace,
             kind: s.kind,
             repo: s.repo,
-            branch: s.branch.filter(|b| !b.is_empty()),
+            // a detached checkout from before commits were kept had its folder name as branch
+            commit: s.commit.or_else(|| {
+                let at = s.branch.as_deref()?.rsplit_once(".at-")?.1;
+                (origin == Origin::Detached).then(|| at.into())
+            }),
+            branch: s
+                .branch
+                .filter(|b| !b.is_empty() && origin != Origin::Detached),
             origin,
             role,
             phase,
@@ -1938,6 +1949,18 @@ mod tests {
         assert!(role("host:p4") == Some(Role::Task));
         let back = parse_state(&serde_json::to_string(&tasks)?)?;
         assert!(back.get("host:p2").map(|t| &t.role) == tasks.get("host:p2").map(|t| &t.role));
+        Ok(())
+    }
+
+    // The first detached checkouts kept their folder name as branch, which --at cannot rev-parse.
+    #[test]
+    fn a_detached_task_keeps_its_commit() -> Result<()> {
+        let old = r#"{"host:p1": {"machine":"host","pane":"p1","workspace":"w","kind":"claude","repo":"opalin","branch":"theo-x.at-2cde9f6","origin":"detached","role":"task","phase":"idle"}}"#;
+        let tasks = parse_state(old)?;
+        let t = tasks.get("host:p1").context("p1")?;
+        assert!(t.commit.as_deref() == Some("2cde9f6") && t.branch.is_none());
+        let back = parse_state(&serde_json::to_string(&tasks)?)?;
+        assert!(back.get("host:p1").and_then(|t| t.commit.as_deref()) == Some("2cde9f6"));
         Ok(())
     }
 

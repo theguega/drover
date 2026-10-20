@@ -179,7 +179,24 @@ pub struct Worktree {
     pub workspace_id: WorkspaceId,
     pub pane_id: PaneId,
     pub path: String,
-    pub branch: String,
+    pub head: Head,
+}
+
+// What a checkout is on: a branch, or a commit for a detached one.
+pub enum Head {
+    Branch(String),
+    Commit(String),
+}
+
+impl Head {
+    // How a person reads it: the branch, or `at-<sha>` as drover-wt names the folder.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Branch(b) => b.clone(),
+            Self::Commit(c) => format!("at-{c}"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -391,19 +408,23 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name, detach: bool) -> R
         return Err(failure(&o));
     }
     let c = serde_json::from_str::<Done>(&o.out)?.result;
-    // a detached checkout has no branch; its folder name, `<repo>.<branch>.at-<sha>`, stands in
-    let branch = c.worktree.branch.unwrap_or_else(|| {
-        let folder = c.worktree.path.rsplit('/').next().unwrap_or_default();
-        folder
-            .strip_prefix(&format!("{}.", repo.as_str()))
-            .unwrap_or(folder)
-            .into()
-    });
+    // drover-wt names a detached checkout `<repo>.at-<sha>`, the commit it was opened at
+    let folder = c.worktree.path.rsplit('/').next().unwrap_or_default();
+    let head = match (detach, c.worktree.branch) {
+        (false, Some(b)) => Head::Branch(b),
+        (false, None) => return Err(Error::failed(format!("{folder} is on no branch"))),
+        (true, _) => Head::Commit(
+            folder
+                .strip_prefix(&format!("{}.at-", repo.as_str()))
+                .ok_or_else(|| Error::failed(format!("{folder} is not a detached checkout")))?
+                .into(),
+        ),
+    };
     Ok(Worktree {
         workspace_id: c.workspace.workspace_id,
         pane_id: c.root_pane.pane_id,
         path: c.worktree.path,
-        branch,
+        head,
     })
 }
 

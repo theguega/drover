@@ -109,9 +109,9 @@ git -C "$root" fetch -q --prune origin
 if ((detach)); then
   # a reviewer reads the commit it was given: detached, so the branch never moves under the implementer
   sha=$(git -C "$root" rev-parse --short "$arg^{commit}")
-  slug="${arg//\//-}.at-$sha"
-  path="$(dirname "$root")/$repo.$slug"
-  label=$slug
+  # one checkout per commit, however it was named
+  label="at-$sha"
+  path="$(dirname "$root")/$repo.$label"
   if [[ -d "$path" ]]; then
     # a reviewer edits nothing, so changes here are left from an earlier look
     [[ -z $(git -C "$path" status --porcelain) ]] || { echo "$path has changes, remove it with drover-wt rm -f $path" >&2; exit 1; }
