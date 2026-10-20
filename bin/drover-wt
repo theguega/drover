@@ -113,8 +113,13 @@ if ((detach)); then
   label="at-$sha"
   path="$(dirname "$root")/$repo.$label"
   if [[ -d "$path" ]]; then
-    # a reviewer edits nothing, so changes here are left from an earlier look
-    [[ -z $(git -C "$path" status --porcelain) ]] || { echo "$path has changes, remove it with drover-wt rm -f $path" >&2; exit 1; }
+    # open in a workspace: its reviewer is still there, and what it wrote is its own.
+    # held by none: changes are left from an earlier look, and a new reviewer must not read them
+    held=$(herdr workspace list | jq -r --arg p "$path" '.result.workspaces[] | select(.worktree.checkout_path == $p) | .workspace_id')
+    if [[ -z "$held" && -n $(git -C "$path" status --porcelain) ]]; then
+      echo "$path has changes from an earlier look, remove it with drover-wt rm -f $path" >&2
+      exit 1
+    fi
     exec herdr worktree open --cwd "$root" --path "$path" --label "$label" "${flags[@]}"
   fi
   git -C "$root" worktree add -q --detach "$path" "$sha"
