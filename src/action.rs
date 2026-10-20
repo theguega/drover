@@ -255,6 +255,7 @@ impl Change {
             .with("workspace", &t.workspace.0)
             .with("repo", &t.repo)
             .maybe("branch", t.branch.as_ref())
+            .maybe("commit", t.commit.as_ref())
             .with("harness", &t.kind)
             .maybe("mate", t.role.mate())
             .maybe("thread", t.thread)
@@ -595,14 +596,18 @@ pub enum Sent {
     Blocked, // a dialog holds the agent; nothing was sent
 }
 
-// The --machine --repo --branch of a task, for a command that opens the same place again.
-fn place_of(t: &Task) -> String {
-    format!(
-        "--machine {} --repo {} --branch {}",
-        t.machine,
-        t.repo,
-        t.branch.as_deref().unwrap_or("<branch>")
-    )
+// The command that puts a fresh agent where this task runs: a detached checkout is reached again
+// through --at, since there is one per commit.
+fn fresh_of(t: &Task) -> String {
+    match (&t.commit, &t.branch) {
+        (Some(_), _) | (None, None) => {
+            format!("drover new --at {} --fresh --prompt <prompt>", t.pane.0)
+        }
+        (None, Some(b)) => format!(
+            "drover new --machine {} --repo {} --branch {b} --fresh --prompt <prompt>",
+            t.machine, t.repo
+        ),
+    }
 }
 
 // Most mates a desk runs at once.
@@ -715,11 +720,12 @@ impl App {
             Some(at) => {
                 let (_, cell) = self.find_task(at).await?;
                 let t = cell.lock().await;
-                let branch = t
-                    .branch
+                let head = t
+                    .commit
                     .clone()
-                    .context(format!("{} is on no branch", t.pane.0))?;
-                (t.machine.clone(), t.repo.clone(), branch)
+                    .or_else(|| t.branch.clone())
+                    .context(format!("{} has no branch or commit", t.pane.0))?;
+                (t.machine.clone(), t.repo.clone(), head)
             }
             None => (n.machine.clone(), n.repo.clone(), n.branch.clone()),
         };
@@ -746,9 +752,9 @@ impl App {
             );
         }
         let wt = herdr::worktree(m, &repo, &r#ref, n.at.is_some()).await?;
-        if let Some((_, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
+        if let Some((key, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
             if n.fresh {
-                return self.renew(&cell, n, &prompt).await;
+                return self.renew(&key, &cell, n, &prompt).await;
             }
             let t = cell.lock().await;
             let at = t
@@ -762,7 +768,7 @@ impl App {
             .help(vec![
                 format!("drover send --pane {} --text <text>", t.pane.0),
                 format!("drover new --at {} --prompt <prompt>", t.pane.0),
-                format!("drover new --fresh {} --prompt <prompt>", place_of(&t)),
+                fresh_of(&t),
             ]));
         }
         if herdr::agents(m)
@@ -783,7 +789,7 @@ impl App {
         let repo = repo.as_str();
         let (thread, prompt_msg) = if n.discord {
             let th = self
-                .open_thread(http, &format!("{repo} · {} · {}", wt.branch, m.name))
+                .open_thread(http, &format!("{repo} · {} · {}", wt.head.label(), m.name))
                 .await?;
             let head = th
                 .say(
@@ -808,7 +814,14 @@ impl App {
             workspace: wt.workspace_id,
             kind: kind.into(),
             repo: repo.into(),
-            branch: Some(wt.branch.clone()),
+            branch: match &wt.head {
+                herdr::Head::Branch(b) => Some(b.clone()),
+                herdr::Head::Commit(_) => None,
+            },
+            commit: match &wt.head {
+                herdr::Head::Commit(c) => Some(c.clone()),
+                herdr::Head::Branch(_) => None,
+            },
             origin: match n.at {
                 Some(_) => Origin::Detached,
                 None => Origin::Opened,
@@ -838,24 +851,28 @@ impl App {
         // a startup dialog shows up through the poller; the prompt goes out once the agent is idle
         herdr::start(
             m,
-            &agent_name(&wt.branch),
+            &agent_name(&wt.head.label()),
             kind,
             &wt.pane_id,
             &wt.path,
             model.as_ref(),
         )
         .await?;
-        if let Some(label) = &n.name {
-            herdr::rename_pane(m, &wt.pane_id, label).await?;
-        }
-        Ok(out)
+        Ok(out.maybe("warning", self.label(m, &wt.pane_id, n).await))
+    }
+
+    // The agent runs and its prompt is on the way by now, so a label that fails is a warning, not a failed start.
+    async fn label(&self, m: &Machine, pane: &PaneId, n: &New) -> Option<String> {
+        let label = n.name.as_ref()?;
+        let e = herdr::rename_pane(m, pane, label).await.err()?;
+        Some(format!("pane not named {label}: {e}"))
     }
 
     // A fresh agent in place of the one in this pane: the old one exits and a new one starts there
     // with this model, as `new` starts one. The pane, its worktree and its owner stay.
-    async fn renew(&self, cell: &Cell, n: &New, prompt: &str) -> Result<Change> {
+    async fn renew(&self, key: &str, cell: &Cell, n: &New, prompt: &str) -> Result<Change> {
         let model = n.model.as_deref().map(Name::parse).transpose()?;
-        let (m, pane, dropped) = {
+        let (m, pane) = {
             let mut t = cell.lock().await;
             if t.role.crew_of_mate() != n.mate.as_ref() {
                 bail!(
@@ -899,52 +916,90 @@ impl App {
                     false => e.into(),
                 });
             }
-            // no status or session until the new agent's first push, so the old transcript is never read as its own
-            t.status = None;
-            t.session = None;
-            t.reply = None;
-            t.phase = Phase::Restarting {
-                prompt: prompt.into(),
-            };
-            // a prompt queued for the old conversation means nothing to the new one
-            (m, t.pane.clone(), t.queued.take())
+            t.restarting(prompt);
+            (m, t.pane.clone())
         };
         self.save().await;
 
-        // unlocked while the old agent exits, so this pane's pushes never wait on it
+        // unlocked while the old agent exits, so this pane's pushes never wait on it;
+        // a list that fails, an ssh blip, only means not seen gone yet
         let mut gone = false;
         for _ in 0..20 {
             sleep(Duration::from_millis(500)).await;
-            gone = !herdr::agents(m).await?.iter().any(|a| a.pane_id == pane);
+            gone = herdr::agents(m)
+                .await
+                .is_ok_and(|list| !list.iter().any(|a| a.pane_id == pane));
             if gone {
                 break;
             }
         }
-        let (t, path) = {
-            let mut t = cell.lock().await;
-            if !gone {
-                t.phase = Phase::Idle;
-                drop(t);
-                self.save().await;
-                bail!("the agent in {} did not exit", pane.0);
-            }
-            // as for a new task: the prompt goes out on the new agent's first ready push
-            t.phase = Phase::Starting {
-                prompt: prompt.into(),
-            };
-            let path = herdr::checkout_path(m, &t.workspace).await?;
-            (t.clone(), path)
-        };
+        let after = self.after_exit(key, cell, gone).await;
         self.save().await;
-        let name = agent_name(t.branch.as_deref().unwrap_or(&t.kind));
-        herdr::start(m, &name, &t.kind, &pane, &path, model.as_ref()).await?;
-        if let Some(label) = &n.name {
-            herdr::rename_pane(m, &pane, label).await?;
+        let (t, dropped) = after?;
+        let name = agent_name(t.branch.as_ref().or(t.commit.as_ref()).unwrap_or(&t.kind));
+        let started = match herdr::checkout_path(m, &t.workspace).await {
+            Ok(path) => herdr::start(m, &name, &t.kind, &pane, &path, model.as_ref()).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = started {
+            self.restart_failed(cell).await?;
+            self.save().await;
+            return Err(cli::Failure::new(
+                format!(
+                    "the old agent exited and the new one did not start ({e}), so {} is gone",
+                    pane.0
+                ),
+                fresh_of(&t),
+            )
+            .into());
         }
         Ok(Change::task(&t, None, format!("fresh agent in {}", pane.0))
             .maybe("model", model.as_ref().map(Name::as_str))
             .maybe("dropped", dropped)
+            .maybe("warning", self.label(m, &pane, n).await)
             .watch(&pane))
+    }
+
+    // After the wait for the old agent to exit: the task with its replacement starting and the
+    // queued prompt that went with the old one, or an error with the task as it was.
+    async fn after_exit(
+        &self,
+        key: &str,
+        cell: &Cell,
+        gone: bool,
+    ) -> Result<(Task, Option<String>)> {
+        // done --no-journal may have closed it while the lock was free; its workspace may be gone
+        let followed = self.map().get(key).is_some_and(|c| Arc::ptr_eq(c, cell));
+        let mut t = cell.lock().await;
+        if !followed {
+            bail!(
+                "{} was closed while its agent exited; no new agent started",
+                t.pane.0
+            );
+        }
+        if !gone {
+            t.restart_abandoned();
+            bail!(
+                "the agent in {} did not exit; the task is as it was",
+                t.pane.0
+            );
+        }
+        let dropped = t.restart_started();
+        Ok((t.clone(), dropped))
+    }
+
+    // The old agent left and no new one started: the pane has no agent, so the task is gone, as
+    // an exit makes it, and leaves its mate's owner list.
+    async fn restart_failed(&self, cell: &Cell) -> Result<()> {
+        let mate = {
+            let mut t = cell.lock().await;
+            t.phase = Phase::Gone;
+            t.role.mate().cloned()
+        };
+        if let Some(mate) = mate {
+            self.write_owners(&mate, None).await?;
+        }
+        Ok(())
     }
 
     async fn cmd_attach(&self, http: &Http, at: &Attach) -> Result<Change> {
@@ -1033,6 +1088,7 @@ impl App {
             kind: a.agent,
             repo,
             branch: None,
+            commit: None,
             origin: Origin::Attached,
             role: at.mate.clone().map_or(Role::Task, |mate| Role::Crew {
                 mate,
@@ -1226,7 +1282,7 @@ impl App {
         }
         let m = self.machine(&t.machine)?;
         let reply = match &t.session {
-            Some(s) => herdr::reply(m, s).await?.reply,
+            Some(s) => herdr::last_text(m, s).await?,
             None => None,
         };
         let r = reply.ok_or_else(|| cli::Failure::new("no reply yet", screen))?;
@@ -1470,6 +1526,7 @@ impl App {
             kind: harness::DEFAULT.into(),
             repo: "scouts".into(),
             branch: None,
+            commit: None,
             origin: Origin::Attached,
             role: Role::Scout(id.clone()),
             phase: Phase::Starting {
@@ -1562,6 +1619,7 @@ impl App {
             kind: harness::DEFAULT.into(),
             repo: "mates".into(),
             branch: None,
+            commit: None,
             origin: Origin::Attached,
             role: Role::Mate(name.clone()),
             phase: Phase::Starting {
@@ -2087,6 +2145,7 @@ mod tests {
             kind: "claude".into(),
             repo: "drover".into(),
             branch: Some("theo/x".into()),
+            commit: None,
             origin: Origin::Opened,
             role,
             phase: Phase::Idle,
@@ -2155,6 +2214,87 @@ mod tests {
             toon_of(&Reply::Change(Change::task(&threaded, None, "")))
                 .ends_with("mate: docs\nthread: \"42\"\n")
         );
+        Ok(())
+    }
+
+    // A detached checkout has no branch to pass to --branch; there is one per commit, so --at reaches it.
+    #[test]
+    fn a_fresh_agent_on_a_detached_checkout_goes_through_at() -> Result<()> {
+        let mut t: Task = serde_json::from_str(
+            r#"{"machine":"host","pane":"wR:p1","workspace":"w","kind":"claude","repo":"opalin","commit":"2cde9f6","origin":"detached","role":"task","phase":"idle"}"#,
+        )?;
+        assert_eq!(
+            fresh_of(&t),
+            "drover new --at wR:p1 --fresh --prompt <prompt>"
+        );
+        t.commit = None;
+        t.branch = Some("theo/x".into());
+        assert_eq!(
+            fresh_of(&t),
+            "drover new --machine host --repo opalin --branch theo/x --fresh --prompt <prompt>"
+        );
+        Ok(())
+    }
+
+    const CREW_TASK: &str = r#"{"host:p1": {"machine":"host","pane":"p1","workspace":"w","kind":"claude","repo":"drover","branch":"theo/x","origin":"opened","role":{"crew":{"mate":"a","owner":"mate"}},"phase":"waiting","status":"idle","queued":"later"}}"#;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("drover-{name}-{}", std::process::id()))
+    }
+
+    // The old agent exited and the new one did not start: no agent is left to follow.
+    #[tokio::test]
+    async fn a_failed_restart_leaves_the_task_gone() -> Result<()> {
+        let root = scratch("restart-failed");
+        let app = crate::tests::test_app(CREW_TASK, &root)?;
+        let a = MateName::parse("a")?;
+        let owners = || std::fs::read_to_string(root.join("state/a/owners"));
+        app.write_owners(&a, None).await?;
+        assert_eq!(owners()?, "p1 mate\n");
+        let (_, cell) = app.cells().into_iter().next().context("p1")?;
+        cell.lock().await.restarting("next");
+        app.restart_failed(&cell).await?;
+        assert!(cell.lock().await.phase == Phase::Gone);
+        assert_eq!(owners()?, "\n");
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    // The old agent may still exit after the wait: the task keeps its status and session, so a
+    // reconcile then marks it gone, and its queued prompt is still there.
+    #[tokio::test]
+    async fn an_agent_that_does_not_exit_leaves_the_task_as_it_was() -> Result<()> {
+        let app = crate::tests::test_app(CREW_TASK, &scratch("restart-timeout"))?;
+        let (_, cell) = app.cells().into_iter().next().context("p1")?;
+        cell.lock().await.restarting("next");
+        assert!(app.after_exit("host:p1", &cell, false).await.is_err());
+        let t = cell.lock().await;
+        assert!(t.phase == Phase::Waiting && t.status == Some(Status::Idle));
+        assert_eq!(t.queued.as_deref(), Some("later"));
+        drop(t);
+
+        cell.lock().await.restarting("next");
+        let (t, dropped) = app.after_exit("host:p1", &cell, true).await?;
+        assert!(
+            t.phase
+                == Phase::Starting {
+                    prompt: "next".into()
+                }
+                && t.status.is_none()
+        );
+        assert_eq!(dropped.as_deref(), Some("later"));
+        Ok(())
+    }
+
+    // done --no-journal can close the task while --fresh waits for the old agent to exit.
+    #[tokio::test]
+    async fn a_task_closed_during_the_wait_gets_no_new_agent() -> Result<()> {
+        let app = crate::tests::test_app(CREW_TASK, &scratch("restart-closed"))?;
+        let (key, cell) = app.cells().into_iter().next().context("p1")?;
+        cell.lock().await.restarting("next");
+        app.remove(&key);
+        assert!(app.after_exit(&key, &cell, true).await.is_err());
+        assert!(matches!(cell.lock().await.phase, Phase::Restarting { .. }));
         Ok(())
     }
 

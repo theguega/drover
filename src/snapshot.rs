@@ -97,6 +97,7 @@ fn task_json(key: &str, t: &Task) -> Value {
         "pane": t.pane.0,
         "repo": t.repo,
         "branch": t.branch,
+        "commit": t.commit,
         "harness": t.kind,
         "role": role,
         "mate": mate,

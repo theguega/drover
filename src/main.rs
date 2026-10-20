@@ -115,7 +115,9 @@ enum Teardown {
 #[serde(rename_all = "lowercase")]
 enum Phase {
     Starting { prompt: String }, // first prompt, sent once the agent is ready
-    Restarting { prompt: String }, // the old agent exits; pushes wait until its replacement starts
+    // --fresh: the old agent exits and pushes wait. `from` is the phase to go back to when nothing
+    // replaces the agent, such as after a service restart in the middle of it.
+    Restarting { prompt: String, from: Box<Phase> },
     Idle,
     Waiting,          // a prompt from Discord is waiting for its reply
     Ending(Teardown), // /done sent, next reply is the journal entry
@@ -191,7 +193,9 @@ struct Task {
     kind: String,
     repo: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    branch: Option<String>, // none for an agent drover attached to, a mate, or a scout
+    branch: Option<String>, // none for an agent drover attached to, a mate, a scout, or a detached checkout
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commit: Option<String>, // the commit a detached checkout was opened at
     origin: Origin,
     role: Role,
     phase: Phase,
@@ -247,6 +251,8 @@ struct Stored {
     repo: String,
     #[serde(default)]
     branch: Option<String>,
+    #[serde(default)]
+    commit: Option<String>,
     origin: Option<Origin>,
     role: Option<Role>,
     owner: Option<Owner>,
@@ -291,7 +297,11 @@ impl From<Stored> for Task {
             _ if s.expecting => Phase::Waiting,
             _ => Phase::Idle,
         };
-        let phase = s.phase.clone().unwrap_or_else(legacy);
+        // no --fresh survives a restart of drover: the task is as it was, and reconcile sees whether its agent left
+        let phase = match s.phase.clone().unwrap_or_else(legacy) {
+            Phase::Restarting { from, .. } => *from,
+            phase => phase,
+        };
         let origin = s.origin.unwrap_or(if s.owned {
             Origin::Opened
         } else {
@@ -315,7 +325,14 @@ impl From<Stored> for Task {
             workspace: s.workspace,
             kind: s.kind,
             repo: s.repo,
-            branch: s.branch.filter(|b| !b.is_empty()),
+            // a detached checkout from before commits were kept had its folder name as branch
+            commit: s.commit.or_else(|| {
+                let at = s.branch.as_deref()?.rsplit_once(".at-")?.1;
+                (origin == Origin::Detached).then(|| at.into())
+            }),
+            branch: s
+                .branch
+                .filter(|b| !b.is_empty() && origin != Origin::Detached),
             origin,
             role,
             phase,
@@ -327,6 +344,39 @@ impl From<Stored> for Task {
             queued: s.queued,
             inbox: s.inbox,
         }
+    }
+}
+
+impl Task {
+    // --fresh sent the exit. The status and session stay, so pushes that come before the
+    // replacement starts still see the old agent, and a reconcile can tell it left.
+    fn restarting(&mut self, prompt: &str) {
+        let from = std::mem::replace(&mut self.phase, Phase::Idle);
+        self.phase = Phase::Restarting {
+            prompt: prompt.into(),
+            from: Box::new(from),
+        };
+    }
+
+    // The old agent never left: the task is as it was before --fresh.
+    fn restart_abandoned(&mut self) {
+        self.phase = match std::mem::replace(&mut self.phase, Phase::Idle) {
+            Phase::Restarting { from, .. } => *from,
+            phase => phase,
+        };
+    }
+
+    // The old agent left. As for a new task, the prompt goes out on the new agent's first ready
+    // push and is read from a transcript of its own. A prompt queued for the old conversation
+    // means nothing to the new one, so it is dropped and returned.
+    fn restart_started(&mut self) -> Option<String> {
+        if let Phase::Restarting { prompt, .. } = std::mem::replace(&mut self.phase, Phase::Idle) {
+            self.phase = Phase::Starting { prompt };
+        }
+        self.status = None;
+        self.session = None;
+        self.reply = None;
+        self.queued.take()
     }
 }
 
@@ -1079,10 +1129,12 @@ impl App {
         let m = self.machine(&t.machine)?;
         // drover-wt rm closes the workspace too; anything it kept is only closed
         let (removed, mut note) = match teardown {
-            Teardown::Remove => match herdr::remove(m, &t.workspace).await {
-                Ok(said) => (true, said),
-                Err(e) => (false, format!("kept the checkout: {e}")),
-            },
+            Teardown::Remove => {
+                match herdr::remove(m, &t.workspace, t.origin == Origin::Detached).await {
+                    Ok(said) => (true, said),
+                    Err(e) => (false, format!("kept the checkout: {e}")),
+                }
+            }
             Teardown::Close => (false, String::new()),
         };
         if !removed {
@@ -1939,6 +1991,32 @@ mod tests {
         Ok(())
     }
 
+    // The first detached checkouts kept their folder name as branch, which --at cannot rev-parse.
+    #[test]
+    fn a_detached_task_keeps_its_commit() -> Result<()> {
+        let old = r#"{"host:p1": {"machine":"host","pane":"p1","workspace":"w","kind":"claude","repo":"opalin","branch":"theo-x.at-2cde9f6","origin":"detached","role":"task","phase":"idle"}}"#;
+        let tasks = parse_state(old)?;
+        let t = tasks.get("host:p1").context("p1")?;
+        assert!(t.commit.as_deref() == Some("2cde9f6") && t.branch.is_none());
+        let back = parse_state(&serde_json::to_string(&tasks)?)?;
+        assert!(back.get("host:p1").and_then(|t| t.commit.as_deref()) == Some("2cde9f6"));
+        Ok(())
+    }
+
+    // A --fresh cut short by a drover restart must not leave the task deaf to events for good.
+    #[test]
+    fn a_restart_of_drover_ends_a_fresh_in_flight() -> Result<()> {
+        let mut tasks = parse_state(
+            r#"{"host:p1": {"machine":"host","pane":"p1","workspace":"w","kind":"claude","repo":"drover","origin":"opened","role":"task","phase":"waiting","status":"idle"}}"#,
+        )?;
+        let t = tasks.get_mut("host:p1").context("p1")?;
+        t.restarting("next node");
+        let back = parse_state(&serde_json::to_string(&tasks)?)?;
+        let t = back.get("host:p1").context("p1")?;
+        assert!(t.phase == Phase::Waiting && t.status == Some(Status::Idle));
+        Ok(())
+    }
+
     #[test]
     fn helpers() {
         assert_eq!(slug("Feature/Fix-Bug!!x"), "feature-fix-bug-x");
@@ -1955,6 +2033,32 @@ mod tests {
         assert_eq!(unix("2024-02-29T12:00:00Z"), Some(1_709_208_000));
     }
 
+    // An App over this state, with its mates under `root`. Nothing here calls save, which writes ./state.json.
+    pub(crate) fn test_app(state: &str, root: &std::path::Path) -> Result<App> {
+        Ok(App {
+            token: String::new(),
+            guild: GuildId::new(1),
+            channel: ChannelId::new(1),
+            allowed: HashSet::new(),
+            host: Machine::new("host".into(), Reach::Local),
+            remotes: Vec::new(),
+            tasks: StdMutex::new(
+                parse_state(state)?
+                    .into_iter()
+                    .map(|(k, t)| (k, Arc::new(Mutex::new(t))))
+                    .collect(),
+            ),
+            journal: Journal::open(":memory:")?,
+            mates: root.into(),
+            started: AtomicBool::new(false),
+            wake: Notify::new(),
+            changed: Notify::new(),
+            reachability: StdMutex::new(HashMap::new()),
+            usage: StdMutex::new(None),
+            saving: Mutex::new(()),
+        })
+    }
+
     #[tokio::test]
     async fn owners_skip_the_held_cell_and_gone_crew() -> Result<()> {
         let crew = |pane: &str, phase: &str| {
@@ -1969,28 +2073,7 @@ mod tests {
             crew("p3", "gone")
         );
         let root = std::env::temp_dir().join(format!("drover-owners-{}", std::process::id()));
-        let app = App {
-            token: String::new(),
-            guild: GuildId::new(1),
-            channel: ChannelId::new(1),
-            allowed: HashSet::new(),
-            host: Machine::new("host".into(), Reach::Local),
-            remotes: Vec::new(),
-            tasks: StdMutex::new(
-                parse_state(&state)?
-                    .into_iter()
-                    .map(|(k, t)| (k, Arc::new(Mutex::new(t))))
-                    .collect(),
-            ),
-            journal: Journal::open(":memory:")?,
-            mates: root.clone(),
-            started: AtomicBool::new(false),
-            wake: Notify::new(),
-            changed: Notify::new(),
-            reachability: StdMutex::new(HashMap::new()),
-            usage: StdMutex::new(None),
-            saving: Mutex::new(()),
-        };
+        let app = test_app(&state, &root)?;
         let a = MateName::parse("a")?;
         let cells = app.cells();
         let (_, held) = cells.iter().find(|(k, _)| k == "host:p1").context("p1")?;

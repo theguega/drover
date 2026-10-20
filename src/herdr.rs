@@ -179,7 +179,24 @@ pub struct Worktree {
     pub workspace_id: WorkspaceId,
     pub pane_id: PaneId,
     pub path: String,
-    pub branch: String,
+    pub head: Head,
+}
+
+// What a checkout is on: a branch, or a commit for a detached one.
+pub enum Head {
+    Branch(String),
+    Commit(String),
+}
+
+impl Head {
+    // How a person reads it: the branch, or `at-<sha>` as drover-wt names the folder.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Branch(b) => b.clone(),
+            Self::Commit(c) => format!("at-{c}"),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -391,19 +408,23 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name, detach: bool) -> R
         return Err(failure(&o));
     }
     let c = serde_json::from_str::<Done>(&o.out)?.result;
-    // a detached checkout has no branch; its folder name, `<repo>.<branch>.at-<sha>`, stands in
-    let branch = c.worktree.branch.unwrap_or_else(|| {
-        let folder = c.worktree.path.rsplit('/').next().unwrap_or_default();
-        folder
-            .strip_prefix(&format!("{}.", repo.as_str()))
-            .unwrap_or(folder)
-            .into()
-    });
+    // drover-wt names a detached checkout `<repo>.at-<sha>`, the commit it was opened at
+    let folder = c.worktree.path.rsplit('/').next().unwrap_or_default();
+    let head = match (detach, c.worktree.branch) {
+        (false, Some(b)) => Head::Branch(b),
+        (false, None) => return Err(Error::failed(format!("{folder} is on no branch"))),
+        (true, _) => Head::Commit(
+            folder
+                .strip_prefix(&format!("{}.at-", repo.as_str()))
+                .ok_or_else(|| Error::failed(format!("{folder} is not a detached checkout")))?
+                .into(),
+        ),
+    };
     Ok(Worktree {
         workspace_id: c.workspace.workspace_id,
         pane_id: c.root_pane.pane_id,
         path: c.worktree.path,
-        branch,
+        head,
     })
 }
 
@@ -531,9 +552,11 @@ pub async fn checkout_path(m: &Machine, workspace: &WorkspaceId) -> Result<Strin
 }
 
 // Through drover-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
-pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
+// `force` removes a dirty one too, for a checkout on no branch that holds nothing to keep.
+pub async fn remove(m: &Machine, workspace: &WorkspaceId, force: bool) -> Result<String> {
     let path = Name::parse(&checkout_path(m, workspace).await?)?;
-    let o = sh(m, &format!("drover-wt rm '{}'", path.as_str()), LONG).await?;
+    let flag = if force { "-f " } else { "" };
+    let o = sh(m, &format!("drover-wt rm {flag}'{}'", path.as_str()), LONG).await?;
     if o.code != Some(0) {
         return Err(failure(&o));
     }
@@ -939,15 +962,33 @@ pub struct Turn {
     pub open: bool,
 }
 
-// Reads from the end and doubles the window until it reaches the latest prompt, so a long
-// session crosses ssh only as far as its latest turn.
 pub async fn reply(m: &Machine, session: &SessionId) -> Result<Turn> {
+    let turn = read_back(m, session, |text| match last_reply(text) {
+        Scan::Turn(t) => Some(t),
+        Scan::NoPrompt => None,
+    });
+    Ok(turn.await?.unwrap_or_default())
+}
+
+// The newest assistant text in the transcript, in whichever turn: one still being written, or
+// the last before an interrupt.
+pub async fn last_text(m: &Machine, session: &SessionId) -> Result<Option<Reply>> {
+    read_back(m, session, newest_text).await
+}
+
+// Reads the transcript from the end and doubles the window until `scan` finds what it looks for,
+// so a long session crosses ssh only as far as it needs. None when the file has none.
+async fn read_back<T>(
+    m: &Machine,
+    session: &SessionId,
+    scan: impl Fn(&str) -> Option<T>,
+) -> Result<Option<T>> {
     let file = format!("{}.jsonl", session.0);
     let local = match m.reach {
         Reach::Ssh => None,
         Reach::Local => match find_local(&file).await? {
             Some(path) => Some(path),
-            None => return Ok(Turn::default()),
+            None => return Ok(None),
         },
     };
     let mut window = TAIL;
@@ -956,13 +997,13 @@ pub async fn reply(m: &Machine, session: &SessionId) -> Result<Turn> {
             Some(path) => tail(path, window).await?,
             None => match ssh_tail(m, &file, window).await? {
                 Some(t) => t,
-                None => return Ok(Turn::default()),
+                None => return Ok(None),
             },
         };
-        match last_reply(&text) {
-            Scan::Turn(t) => return Ok(t),
-            Scan::NoPrompt if whole => return Ok(Turn::default()),
-            Scan::NoPrompt => window *= 2,
+        match scan(&text) {
+            Some(found) => return Ok(Some(found)),
+            None if whole => return Ok(None),
+            None => window *= 2,
         }
     }
 }
@@ -1015,6 +1056,18 @@ async fn ssh_tail(m: &Machine, file: &str, window: u64) -> Result<Option<(String
 enum Scan {
     NoPrompt,
     Turn(Turn),
+}
+
+#[must_use]
+fn newest_text(jsonl: &str) -> Option<Reply> {
+    jsonl.lines().rev().find_map(|line| {
+        let e = serde_json::from_str::<Line>(line).ok()?;
+        let text = e.texts().filter(|t| !t.is_empty()).last()?;
+        (e.kind == "assistant").then(|| Reply {
+            id: e.uuid.clone(),
+            text: text.into(),
+        })
+    })
 }
 
 // Walks back from the end, so only the latest turn is parsed. An interrupt or a local command
@@ -1144,6 +1197,21 @@ mod tests {
         assert_eq!(resuming, Some((None, true)));
         let resumed = turn(&[PROMPT, MID, END, NOTIFY, TOOL, RESULT, LAST, END]);
         assert_eq!(resumed, Some((Some("l".into()), false)));
+    }
+
+    // drover reply: the agent is at work, or was interrupted, and still has a last reply to show.
+    #[test]
+    fn the_newest_text_crosses_turns() {
+        let last = |lines: &[&str]| newest_text(&lines.join("\n")).map(|r| r.id);
+        assert_eq!(
+            last(&[PROMPT, LAST, END, PROMPT, TOOL, RESULT]),
+            Some("l".into())
+        );
+        assert_eq!(
+            last(&[PROMPT, MID, TOOL, RESULT, INTERRUPT]),
+            Some("m".into())
+        );
+        assert_eq!(last(&[PROMPT, TOOL]), None);
     }
 
     // Turns that never get an end line: there is nothing to wait for.

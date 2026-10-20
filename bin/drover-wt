@@ -3,7 +3,7 @@
 #   drover-wt <name>          new branch from origin's default branch
 #   drover-wt <branch>        existing local or remote branch
 #   drover-wt <#123|123>      GitHub pull request head
-#   drover-wt --at <branch>   detached checkout at the branch's commit, for a second look; rm removes it
+#   drover-wt --at <branch>   detached checkout at the branch's commit, for a second look; rm -f removes it
 #   drover-wt prompt          ask for one of the above, then open it
 #   drover-wt [ls]            list worktrees of this repo, or of every repo under REPOS_ROOT
 #   drover-wt rm [-f] [path]  remove a worktree (default: this one), its workspace, and its branch if merged
@@ -109,10 +109,19 @@ git -C "$root" fetch -q --prune origin
 if ((detach)); then
   # a reviewer reads the commit it was given: detached, so the branch never moves under the implementer
   sha=$(git -C "$root" rev-parse --short "$arg^{commit}")
-  slug="${arg//\//-}.at-$sha"
-  path="$(dirname "$root")/$repo.$slug"
-  label=$slug
-  [[ -d "$path" ]] && exec herdr worktree open --cwd "$root" --path "$path" --label "$label" "${flags[@]}"
+  # one checkout per commit, however it was named
+  label="at-$sha"
+  path="$(dirname "$root")/$repo.$label"
+  if [[ -d "$path" ]]; then
+    # open in a workspace: its reviewer is still there, and what it wrote is its own.
+    # held by none: changes are left from an earlier look, and a new reviewer must not read them
+    held=$(herdr workspace list | jq -r --arg p "$path" '.result.workspaces[] | select(.worktree.checkout_path == $p) | .workspace_id')
+    if [[ -z "$held" && -n $(git -C "$path" status --porcelain) ]]; then
+      echo "$path has changes from an earlier look, remove it with drover-wt rm -f $path" >&2
+      exit 1
+    fi
+    exec herdr worktree open --cwd "$root" --path "$path" --label "$label" "${flags[@]}"
+  fi
   git -C "$root" worktree add -q --detach "$path" "$sha"
 elif [[ "$arg" =~ ^#?([0-9]+)$ ]]; then
   branch="pr/${BASH_REMATCH[1]}"

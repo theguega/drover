@@ -142,6 +142,7 @@ Field order, in every record: the id that feeds the next command first, then its
 | `noop` | why nothing changed: the state already held | |
 | `delivery` | a prompt sent: `sent` or `queued` | |
 | `dropped` | a queued prompt `new --fresh` threw away with the old agent | |
+| `warning` | a step after the change that failed and did not undo it, such as naming the pane | |
 | `entry` | `done`'s journal entry: `asked` (the agent is writing it) or `none` | |
 | `closed` | whether `done` has closed the task yet | |
 | `teardown` | what `done` was asked to end with: `close` or `remove` | |
