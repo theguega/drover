@@ -752,9 +752,9 @@ impl App {
             );
         }
         let wt = herdr::worktree(m, &repo, &r#ref, n.at.is_some()).await?;
-        if let Some((_, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
+        if let Some((key, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
             if n.fresh {
-                return self.renew(&cell, n, &prompt).await;
+                return self.renew(&key, &cell, n, &prompt).await;
             }
             let t = cell.lock().await;
             let at = t
@@ -870,7 +870,7 @@ impl App {
 
     // A fresh agent in place of the one in this pane: the old one exits and a new one starts there
     // with this model, as `new` starts one. The pane, its worktree and its owner stay.
-    async fn renew(&self, cell: &Cell, n: &New, prompt: &str) -> Result<Change> {
+    async fn renew(&self, key: &str, cell: &Cell, n: &New, prompt: &str) -> Result<Change> {
         let model = n.model.as_deref().map(Name::parse).transpose()?;
         let (m, pane) = {
             let mut t = cell.lock().await;
@@ -933,7 +933,7 @@ impl App {
                 break;
             }
         }
-        let after = self.after_exit(cell, gone).await;
+        let after = self.after_exit(key, cell, gone).await;
         self.save().await;
         let (t, dropped) = after?;
         let name = agent_name(t.branch.as_ref().or(t.commit.as_ref()).unwrap_or(&t.kind));
@@ -962,8 +962,21 @@ impl App {
 
     // After the wait for the old agent to exit: the task with its replacement starting and the
     // queued prompt that went with the old one, or an error with the task as it was.
-    async fn after_exit(&self, cell: &Cell, gone: bool) -> Result<(Task, Option<String>)> {
+    async fn after_exit(
+        &self,
+        key: &str,
+        cell: &Cell,
+        gone: bool,
+    ) -> Result<(Task, Option<String>)> {
+        // done --no-journal may have closed it while the lock was free; its workspace may be gone
+        let followed = self.map().get(key).is_some_and(|c| Arc::ptr_eq(c, cell));
         let mut t = cell.lock().await;
+        if !followed {
+            bail!(
+                "{} was closed while its agent exited; no new agent started",
+                t.pane.0
+            );
+        }
         if !gone {
             t.restart_abandoned();
             bail!(
@@ -2254,14 +2267,14 @@ mod tests {
         let app = crate::tests::test_app(CREW_TASK, &scratch("restart-timeout"))?;
         let (_, cell) = app.cells().into_iter().next().context("p1")?;
         cell.lock().await.restarting("next");
-        assert!(app.after_exit(&cell, false).await.is_err());
+        assert!(app.after_exit("host:p1", &cell, false).await.is_err());
         let t = cell.lock().await;
         assert!(t.phase == Phase::Waiting && t.status == Some(Status::Idle));
         assert_eq!(t.queued.as_deref(), Some("later"));
         drop(t);
 
         cell.lock().await.restarting("next");
-        let (t, dropped) = app.after_exit(&cell, true).await?;
+        let (t, dropped) = app.after_exit("host:p1", &cell, true).await?;
         assert!(
             t.phase
                 == Phase::Starting {
@@ -2270,6 +2283,18 @@ mod tests {
                 && t.status.is_none()
         );
         assert_eq!(dropped.as_deref(), Some("later"));
+        Ok(())
+    }
+
+    // done --no-journal can close the task while --fresh waits for the old agent to exit.
+    #[tokio::test]
+    async fn a_task_closed_during_the_wait_gets_no_new_agent() -> Result<()> {
+        let app = crate::tests::test_app(CREW_TASK, &scratch("restart-closed"))?;
+        let (key, cell) = app.cells().into_iter().next().context("p1")?;
+        cell.lock().await.restarting("next");
+        app.remove(&key);
+        assert!(app.after_exit(&key, &cell, true).await.is_err());
+        assert!(matches!(cell.lock().await.phase, Phase::Restarting { .. }));
         Ok(())
     }
 
