@@ -1128,6 +1128,7 @@ impl App {
         let action = match i.data.name.as_str() {
             "new" => Action::New(New {
                 mate: None,
+                name: None,
                 machine: req(i, "machine")?.into(),
                 repo: req(i, "repo")?.into(),
                 branch: req(i, "branch")?.into(),

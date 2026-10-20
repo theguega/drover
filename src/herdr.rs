@@ -471,6 +471,17 @@ pub async fn screen(m: &Machine, pane: &PaneId, lines: u32) -> Result<String> {
         .text)
 }
 
+pub async fn rename_pane(m: &Machine, pane: &PaneId, label: &str) -> Result<()> {
+    m.link
+        .call::<IgnoredAny>(
+            "pane.rename",
+            json!({"pane_id": pane.0, "label": label}),
+            SHORT,
+        )
+        .await
+        .map(drop)
+}
+
 pub async fn close(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
     m.link
         .call::<IgnoredAny>(

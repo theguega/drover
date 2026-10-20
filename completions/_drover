@@ -46,6 +46,7 @@ _drover() {
       '--prompt=[prompt]:prompt:' \
       '--agent=[agent]:agent:' \
       '--model=[model]:model:' \
+      '--name=[pane label]:label:' \
       '--scout[report only, no changes]' \
       '--discord[open a Discord thread]' \
       "--mate=[mate]:mate:(${(f)"$(drover complete mates 2>/dev/null)"})" ;;

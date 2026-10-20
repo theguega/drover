@@ -130,6 +130,7 @@ const SPECS: &[Spec] = &[
                 "none",
                 "the mate that dispatches and owns the pane",
             ),
+            Arg("--name <label>", "none", "the pane's label in herdr"),
             DISCORD,
         ],
         examples: [
@@ -576,6 +577,7 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
                 .as_deref()
                 .map(MateName::parse)
                 .transpose()?,
+            name: flags.opt("name"),
             discord: flags.on("discord"),
         }),
         "attach" => Action::Attach(Attach {
@@ -959,7 +961,7 @@ mod tests {
     fn unknown_flags_fail_first_and_list_the_valid_ones() {
         let f = failure("new --machine h --repo r --branch b --prompt p --modle opus");
         assert!(f.is_some_and(|f| f.error
-            == "unknown flag --modle; drover new takes --machine --repo --branch --prompt --agent --model --scout --mate --discord"
+            == "unknown flag --modle; drover new takes --machine --repo --branch --prompt --agent --model --scout --mate --name --discord"
             && f.help.as_deref()
                 == Some("drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>")));
         let f = failure("agents --bogus");

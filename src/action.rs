@@ -64,6 +64,9 @@ pub struct New {
     pub scout: bool,
     // the mate that dispatches this crewmate, which then owns its pane
     pub mate: Option<MateName>,
+    // the pane's label in herdr
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub discord: bool,
 }
@@ -802,6 +805,9 @@ impl App {
             model.as_ref(),
         )
         .await?;
+        if let Some(label) = &n.name {
+            herdr::rename_pane(m, &wt.pane_id, label).await?;
+        }
         Ok(out)
     }
 
