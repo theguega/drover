@@ -53,6 +53,7 @@ Choose the primitive that matches the job:
 
 - **Task** (`drover new`): a worktree and a herdr workspace running one agent. drover opened the checkout, so `done --remove` may delete it.
 - **Repo scout** (`drover new --scout`): a task asked for a report and no changes. It is a task like any other and closes with `done`.
+- **Second look** (`drover new --at <pane> --prompt ...`): a detached checkout at another task's commit, on the same machine and repo, for a reviewer that edits nothing. `done` removes it.
 - **Attached task** (`drover attach`): an agent the user started at the desk, now followed by drover. drover did not open its worktree and never removes it.
 - **Scout** (`drover scout <prompt>`): a short look with no repo, in its own pane and scratch folder on the host. It closes with `drover scout close`, never `done`.
 - **Mate** (`drover mate <name>`): a dispatcher, at most three at a time. It starts crewmates with `drover new --mate <name>`, checks their work, and writes no code itself. Its playbook is `mates/AGENTS.md`.
@@ -73,7 +74,7 @@ Check `drover agents` and `drover worktrees` first, so you do not start a second
 drover new --machine <machine> --repo <repo> --branch <branch> --prompt "<instructions>"
 ```
 
-`--branch` takes a new name, an existing local or remote branch, or `#<pr>`. drover appends the repo's recent journal entries and the best matches for the prompt (at most 2 KB), starts the agent, and sends the prompt once it is ready. Read the pane id from the reply.
+`--branch` takes a new name, an existing local or remote branch, or `#<pr>`. A branch whose workspace is open answers `noop: already open, prompt not sent`: use `drover send` for that pane, or `--at <pane>` for a second agent on its commit. drover appends the repo's recent journal entries and the best matches for the prompt (at most 2 KB), starts the agent, and sends the prompt once it is ready. Read the pane id from the reply.
 
 ```bash
 drover send --pane <pane> --text "<prompt>"     # queued while the agent works

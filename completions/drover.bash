@@ -21,12 +21,12 @@ _drover() {
     --machine) words=$(drover complete machines 2>/dev/null) ;;
     --mate) words=$(drover complete mates 2>/dev/null) ;;
     --thread) words=$(drover complete threads 2>/dev/null) ;;
-    --pane) words=$(drover complete panes "$machine" 2>/dev/null) ;;
+    --pane|--at) words=$(drover complete panes "$machine" 2>/dev/null) ;;
     rm) [[ $cmd == journal ]] && words=$(drover complete journal 2>/dev/null) ;;
     --agent|--model|--branch|--repo|--prompt|--text|--keys|--name) return ;;
     *)
       case $cmd in
-        new) words="--machine --repo --branch --prompt --agent --model --scout --mate --name --discord" ;;
+        new) words="--machine --repo --branch --prompt --agent --model --scout --mate --name --at --discord" ;;
         attach) words="--machine --pane --discord" ;;
         link) words="--machine --pane --mate" ;;
         escalate|brief) words="--mate --text" ;;

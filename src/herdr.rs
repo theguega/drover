@@ -352,8 +352,9 @@ pub async fn panes(m: &Machine) -> Result<Vec<PaneId>> {
         .collect())
 }
 
-// Same entry point as the desk popup: a new name, an existing branch, or #pr.
-pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree> {
+// Same entry point as the desk popup: a new name, an existing branch, or #pr. `detach` opens a
+// checkout at the ref's commit instead, on no branch.
+pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name, detach: bool) -> Result<Worktree> {
     #[derive(Deserialize)]
     struct Done {
         result: Created,
@@ -375,12 +376,14 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
     #[derive(Deserialize)]
     struct Tree {
         path: String,
-        branch: String,
+        #[serde(default)]
+        branch: Option<String>,
     }
 
     let script = format!(
-        "cd {ROOT}/{} && drover-wt '{}' --no-focus",
+        "cd {ROOT}/{} && drover-wt {}'{}' --no-focus",
         repo.as_str(),
+        if detach { "--at " } else { "" },
         r#ref.as_str()
     );
     let o = sh(m, &script, LONG).await?;
@@ -388,11 +391,19 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name) -> Result<Worktree
         return Err(failure(&o));
     }
     let c = serde_json::from_str::<Done>(&o.out)?.result;
+    // a detached checkout has no branch; its folder name, `<repo>.<branch>.at-<sha>`, stands in
+    let branch = c.worktree.branch.unwrap_or_else(|| {
+        let folder = c.worktree.path.rsplit('/').next().unwrap_or_default();
+        folder
+            .strip_prefix(&format!("{}.", repo.as_str()))
+            .unwrap_or(folder)
+            .into()
+    });
     Ok(Worktree {
         workspace_id: c.workspace.workspace_id,
         pane_id: c.root_pane.pane_id,
         path: c.worktree.path,
-        branch: c.worktree.branch,
+        branch,
     })
 }
 

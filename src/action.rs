@@ -17,7 +17,7 @@ use super::*;
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Action {
-    New(New),
+    New(Box<New>),
     Attach(Attach),
     Agents,
     Worktrees,
@@ -67,6 +67,9 @@ pub struct New {
     // the pane's label in herdr
     #[serde(default)]
     pub name: Option<String>,
+    // a task by pane or thread: open a checkout at its commit, in place of machine, repo and branch
+    #[serde(default)]
+    pub at: Option<String>,
     #[serde(default)]
     pub discord: bool,
 }
@@ -695,24 +698,41 @@ impl App {
     }
 
     async fn cmd_new(&self, http: &Http, n: &New) -> Result<Change> {
-        let m = self.machine(&n.machine)?;
-        let repo = Name::parse(&n.repo)?;
-        let r#ref = Name::parse(&n.branch)?;
+        let (machine, repo, r#ref) = match &n.at {
+            Some(at) => {
+                let (_, cell) = self.find_task(at).await?;
+                let t = cell.lock().await;
+                let branch = t
+                    .branch
+                    .clone()
+                    .context(format!("{} is on no branch", t.pane.0))?;
+                (t.machine.clone(), t.repo.clone(), branch)
+            }
+            None => (n.machine.clone(), n.repo.clone(), n.branch.clone()),
+        };
+        let m = self.machine(&machine)?;
+        let repo = Name::parse(&repo)?;
+        let r#ref = Name::parse(&r#ref)?;
         let kind = harness::find(n.agent.as_deref().unwrap_or(harness::DEFAULT))
             .context("unknown agent, see drover help")?
             .name;
         let model = n.model.as_deref().map(Name::parse).transpose()?;
 
-        let wt = herdr::worktree(m, &repo, &r#ref).await?;
+        let wt = herdr::worktree(m, &repo, &r#ref, n.at.is_some()).await?;
         if let Some((_, cell)) = self.live_cell(&m.name, &wt.pane_id).await {
             let t = cell.lock().await;
             let at = t
                 .thread
                 .map_or_else(|| t.pane.0.clone(), |th| format!("<#{th}>"));
-            return Ok(
-                Change::task(&t, Some("already open"), format!("already open in {at}"))
-                    .watch(&t.pane),
-            );
+            return Ok(Change::task(
+                &t,
+                Some("already open, prompt not sent"),
+                format!("already open in {at}; the prompt was not sent"),
+            )
+            .help(vec![
+                format!("drover send --pane {} --text <text>", t.pane.0),
+                format!("drover new --at {} --prompt <prompt>", t.pane.0),
+            ]));
         }
         if herdr::agents(m)
             .await?
@@ -772,7 +792,10 @@ impl App {
             kind: kind.into(),
             repo: repo.into(),
             branch: Some(wt.branch.clone()),
-            origin: Origin::Opened,
+            origin: match n.at {
+                Some(_) => Origin::Detached,
+                None => Origin::Opened,
+            },
             role: n.mate.clone().map_or(Role::Task, |mate| Role::Crew {
                 mate,
                 owner: Owner::Mate,
@@ -1617,7 +1640,7 @@ impl App {
 
     async fn cmd_done(&self, http: &Http, d: &Done) -> Result<Change> {
         let (key, cell) = self.find_task(&d.thread).await?;
-        let teardown = if d.remove {
+        let teardown = if d.remove || cell.lock().await.origin == Origin::Detached {
             Teardown::Remove
         } else {
             Teardown::Close

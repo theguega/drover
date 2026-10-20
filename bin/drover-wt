@@ -3,6 +3,7 @@
 #   drover-wt <name>          new branch from origin's default branch
 #   drover-wt <branch>        existing local or remote branch
 #   drover-wt <#123|123>      GitHub pull request head
+#   drover-wt --at <branch>   detached checkout at the branch's commit, for a second look; rm removes it
 #   drover-wt prompt          ask for one of the above, then open it
 #   drover-wt [ls]            list worktrees of this repo, or of every repo under REPOS_ROOT
 #   drover-wt rm [-f] [path]  remove a worktree (default: this one), its workspace, and its branch if merged
@@ -79,6 +80,7 @@ case "${1:-}" in
     ;;
   rm) shift; rm_worktree "$@"; exit ;;
   ls) shift ;;
+  --at) ;;
   -h|--help|help) awk 'NR>1 && !/^#/{exit} NR>1{sub(/^# ?/, ""); print}' "$0"; exit ;;
   # a flag here would otherwise become a branch named after it
   -*) echo "unknown option $1, see --help" >&2; exit 1 ;;
@@ -94,7 +96,9 @@ if [[ $# -eq 0 ]]; then
   fi
   exit
 fi
-arg=$1
+detach=0
+[[ "$1" == --at ]] && detach=1 && shift
+arg=${1:?--at needs a branch or commit}
 shift
 flags=("${@:---focus}")
 
@@ -102,7 +106,15 @@ root=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
 repo=$(basename "$root")
 git -C "$root" fetch -q --prune origin
 
-if [[ "$arg" =~ ^#?([0-9]+)$ ]]; then
+if ((detach)); then
+  # a reviewer reads the commit it was given: detached, so the branch never moves under the implementer
+  sha=$(git -C "$root" rev-parse --short "$arg^{commit}")
+  slug="${arg//\//-}.at-$sha"
+  path="$(dirname "$root")/$repo.$slug"
+  label=$slug
+  [[ -d "$path" ]] && exec herdr worktree open --cwd "$root" --path "$path" --label "$label" "${flags[@]}"
+  git -C "$root" worktree add -q --detach "$path" "$sha"
+elif [[ "$arg" =~ ^#?([0-9]+)$ ]]; then
   branch="pr/${BASH_REMATCH[1]}"
   git -C "$root" fetch -q origin "+pull/${BASH_REMATCH[1]}/head:$branch"
 elif git -C "$root" show-ref -q --verify "refs/heads/$arg" \
@@ -114,23 +126,25 @@ else
   branch="$arg"
 fi
 
-slug=${branch//\//-}
-path="$(dirname "$root")/$repo.$slug"
-label=$slug
-[[ -n "$prefix" ]] && label=${slug#"$prefix-"}
+if ((!detach)); then
+  slug=${branch//\//-}
+  path="$(dirname "$root")/$repo.$slug"
+  label=$slug
+  [[ -n "$prefix" ]] && label=${slug#"$prefix-"}
 
-existing=$(git -C "$root" worktree list --porcelain \
-  | awk -v b="branch refs/heads/$branch" '/^worktree /{p=substr($0,10)} $0==b{print p}')
+  existing=$(git -C "$root" worktree list --porcelain \
+    | awk -v b="branch refs/heads/$branch" '/^worktree /{p=substr($0,10)} $0==b{print p}')
 
-if [[ -n "$existing" ]]; then
-  exec herdr worktree open --cwd "$root" --path "$existing" --label "$label" "${flags[@]}"
-elif git -C "$root" show-ref -q --verify "refs/heads/$branch"; then
-  git -C "$root" worktree add -q "$path" "$branch"
-elif git -C "$root" show-ref -q --verify "refs/remotes/origin/$branch"; then
-  git -C "$root" worktree add -q --track -b "$branch" "$path" "origin/$branch"
-else
-  base=$(git -C "$root" symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)
-  git -C "$root" worktree add -q --no-track -b "$branch" "$path" "$base"
+  if [[ -n "$existing" ]]; then
+    exec herdr worktree open --cwd "$root" --path "$existing" --label "$label" "${flags[@]}"
+  elif git -C "$root" show-ref -q --verify "refs/heads/$branch"; then
+    git -C "$root" worktree add -q "$path" "$branch"
+  elif git -C "$root" show-ref -q --verify "refs/remotes/origin/$branch"; then
+    git -C "$root" worktree add -q --track -b "$branch" "$path" "origin/$branch"
+  else
+    base=$(git -C "$root" symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)
+    git -C "$root" worktree add -q --no-track -b "$branch" "$path" "$base"
+  fi
 fi
 # untracked files of the main clone matching .worktreeinclude (gitignore syntax), e.g. .env or target/,
 # a matched directory as one copy-on-write clone where the filesystem has it (APFS, Btrfs, XFS)

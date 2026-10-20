@@ -101,6 +101,7 @@ const CREW: &str = "You are a crewmate. Your mate reads the end of each of your 
 enum Origin {
     Opened,   // worktree opened by drover, so /done may remove it
     Attached, // started at the desk, drover only follows it
+    Detached, // a checkout at another task's commit, opened by drover for a second look; /done removes it
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1126,9 +1127,10 @@ impl App {
     async fn on_command(&self, http: &Http, i: &CommandInteraction) -> Result<()> {
         let thread = i.channel_id.to_string();
         let action = match i.data.name.as_str() {
-            "new" => Action::New(New {
+            "new" => Action::New(Box::new(New {
                 mate: None,
                 name: None,
+                at: None,
                 machine: req(i, "machine")?.into(),
                 repo: req(i, "repo")?.into(),
                 branch: req(i, "branch")?.into(),
@@ -1137,7 +1139,7 @@ impl App {
                 model: opt(i, "model").map(String::from),
                 scout: flag(i, "scout") == Some(true),
                 discord: true,
-            }),
+            })),
             "attach" => Action::Attach(Attach {
                 mate: None,
                 machine: Some(req(i, "machine")?.into()),

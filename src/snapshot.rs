@@ -104,6 +104,7 @@ fn task_json(key: &str, t: &Task) -> Value {
         "origin": match t.origin {
             Origin::Opened => "opened",
             Origin::Attached => "attached",
+            Origin::Detached => "detached",
         },
         "phase": phase(&t.phase),
         "status": t.status.map(Status::as_str),

@@ -104,13 +104,17 @@ const SPECS: &[Spec] = &[
         args: &[
             Arg(
                 "--machine <machine>",
-                "required",
+                "required unless --at",
                 "a machine from drover config",
             ),
-            Arg("--repo <repo>", "required", "a repo under the repos root"),
+            Arg(
+                "--repo <repo>",
+                "required unless --at",
+                "a repo under the repos root",
+            ),
             Arg(
                 "--branch <branch>",
-                "required",
+                "required unless --at",
                 "a new name or an existing branch or #<pr>",
             ),
             Arg(
@@ -131,6 +135,11 @@ const SPECS: &[Spec] = &[
                 "the mate that dispatches and owns the pane",
             ),
             Arg("--name <label>", "none", "the pane's label in herdr"),
+            Arg(
+                "--at <pane>",
+                "none",
+                "a detached checkout at that task's commit in place of --machine --repo --branch: a reviewer's; done removes it",
+            ),
             DISCORD,
         ],
         examples: [
@@ -564,10 +573,10 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
         })
     };
     Ok(match spec.name {
-        "new" => Action::New(New {
-            machine: flags.req("machine")?,
-            repo: flags.req("repo")?,
-            branch: flags.req("branch")?,
+        "new" => Action::New(Box::new(New {
+            machine: flags.place("machine")?,
+            repo: flags.place("repo")?,
+            branch: flags.place("branch")?,
             prompt: flags.text("prompt")?,
             agent: flags.opt("agent"),
             model: flags.opt("model"),
@@ -578,8 +587,9 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
                 .map(MateName::parse)
                 .transpose()?,
             name: flags.opt("name"),
+            at: flags.opt("at"),
             discord: flags.on("discord"),
-        }),
+        })),
         "attach" => Action::Attach(Attach {
             machine: flags.opt("machine"),
             pane: flags.req("pane")?,
@@ -735,6 +745,15 @@ impl Flags {
         match read.trim_end() {
             "" => bail!("--{name} - read nothing from stdin"),
             text => Ok(text.into()),
+        }
+    }
+
+    // Where `new` opens: --at names a task whose place it takes, so these three come with neither.
+    fn place(&self, name: &str) -> Result<String> {
+        match (self.opt("at"), self.opt(name)) {
+            (Some(_), Some(_)) => bail!("--at takes the place of --{name}"),
+            (Some(_), None) => Ok(String::new()),
+            (None, _) => self.req(name),
         }
     }
 
@@ -958,10 +977,28 @@ mod tests {
     }
 
     #[test]
+    fn new_at_a_pane_takes_the_place_of_its_branch() -> Result<()> {
+        let Invocation::Run(_, Action::New(n)) = parse(&args("new --at wAX:p1 --prompt review"))?
+        else {
+            bail!("not a new");
+        };
+        assert!(n.at.as_deref() == Some("wAX:p1") && n.machine.is_empty());
+        assert!(
+            failure("new --at wAX:p1 --branch x --prompt p")
+                .is_some_and(|f| f.error == "--at takes the place of --branch")
+        );
+        assert!(
+            failure("new --machine h --repo r --prompt p")
+                .is_some_and(|f| f.error == "missing --branch")
+        );
+        Ok(())
+    }
+
+    #[test]
     fn unknown_flags_fail_first_and_list_the_valid_ones() {
         let f = failure("new --machine h --repo r --branch b --prompt p --modle opus");
         assert!(f.is_some_and(|f| f.error
-            == "unknown flag --modle; drover new takes --machine --repo --branch --prompt --agent --model --scout --mate --name --discord"
+            == "unknown flag --modle; drover new takes --machine --repo --branch --prompt --agent --model --scout --mate --name --at --discord"
             && f.help.as_deref()
                 == Some("drover new --machine <machine> --repo <repo> --branch <branch> --prompt <prompt>")));
         let f = failure("agents --bogus");

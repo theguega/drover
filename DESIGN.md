@@ -108,7 +108,7 @@ The terminal is an [AXI](https://github.com/kunchenguid/axi): agents and other t
 - `-v`, `-V` and `--version` print the bare version.
 - Long text is cut to 1000 characters, with its whole length in `chars` and a `help` line for `--full`: a screen keeps its end, a journal entry its start. `--full` is declared only on commands that cut (`screen`, `journal`, `recall`). `reply` prints a task's last reply whole, from the transcript. Discord asks for everything, so its text does not change.
 - A list capped at its limit says `count: 5 of 42`. An empty one says so in a line, such as `journal: 0 entries for drover`.
-- A command that changes the desk answers with the fields that feed the next command (`pane`, `machine`, `thread`, ...), then `help`. When the desired state already held it exits 0 with `noop: <why>` (`already open`, `already taken`, `already released`, `already ending`, `already gone`, `already closed`, `already running`) and changes nothing. Only a real failure exits 1. `keys` answers with the pane's screen, as `screen` does.
+- A command that changes the desk answers with the fields that feed the next command (`pane`, `machine`, `thread`, ...), then `help`. When the desired state already held it exits 0 with `noop: <why>` (`already open, prompt not sent`, `already taken`, `already released`, `already ending`, `already gone`, `already closed`, `already running`) and changes nothing. Only a real failure exits 1. `keys` answers with the pane's screen, as `screen` does.
 - Converted: every command but `snapshot`, `watch` and `complete`, which stay JSON or bare names.
 
 ### Field names
