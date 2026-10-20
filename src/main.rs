@@ -1079,10 +1079,12 @@ impl App {
         let m = self.machine(&t.machine)?;
         // drover-wt rm closes the workspace too; anything it kept is only closed
         let (removed, mut note) = match teardown {
-            Teardown::Remove => match herdr::remove(m, &t.workspace).await {
-                Ok(said) => (true, said),
-                Err(e) => (false, format!("kept the checkout: {e}")),
-            },
+            Teardown::Remove => {
+                match herdr::remove(m, &t.workspace, t.origin == Origin::Detached).await {
+                    Ok(said) => (true, said),
+                    Err(e) => (false, format!("kept the checkout: {e}")),
+                }
+            }
             Teardown::Close => (false, String::new()),
         };
         if !removed {

@@ -531,9 +531,11 @@ pub async fn checkout_path(m: &Machine, workspace: &WorkspaceId) -> Result<Strin
 }
 
 // Through drover-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
-pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
+// `force` removes a dirty one too, for a checkout on no branch that holds nothing to keep.
+pub async fn remove(m: &Machine, workspace: &WorkspaceId, force: bool) -> Result<String> {
     let path = Name::parse(&checkout_path(m, workspace).await?)?;
-    let o = sh(m, &format!("drover-wt rm '{}'", path.as_str()), LONG).await?;
+    let flag = if force { "-f " } else { "" };
+    let o = sh(m, &format!("drover-wt rm {flag}'{}'", path.as_str()), LONG).await?;
     if o.code != Some(0) {
         return Err(failure(&o));
     }

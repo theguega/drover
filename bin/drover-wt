@@ -3,7 +3,7 @@
 #   drover-wt <name>          new branch from origin's default branch
 #   drover-wt <branch>        existing local or remote branch
 #   drover-wt <#123|123>      GitHub pull request head
-#   drover-wt --at <branch>   detached checkout at the branch's commit, for a second look; rm removes it
+#   drover-wt --at <branch>   detached checkout at the branch's commit, for a second look; rm -f removes it
 #   drover-wt prompt          ask for one of the above, then open it
 #   drover-wt [ls]            list worktrees of this repo, or of every repo under REPOS_ROOT
 #   drover-wt rm [-f] [path]  remove a worktree (default: this one), its workspace, and its branch if merged
@@ -112,7 +112,11 @@ if ((detach)); then
   slug="${arg//\//-}.at-$sha"
   path="$(dirname "$root")/$repo.$slug"
   label=$slug
-  [[ -d "$path" ]] && exec herdr worktree open --cwd "$root" --path "$path" --label "$label" "${flags[@]}"
+  if [[ -d "$path" ]]; then
+    # a reviewer edits nothing, so changes here are left from an earlier look
+    [[ -z $(git -C "$path" status --porcelain) ]] || { echo "$path has changes, remove it with drover-wt rm -f $path" >&2; exit 1; }
+    exec herdr worktree open --cwd "$root" --path "$path" --label "$label" "${flags[@]}"
+  fi
   git -C "$root" worktree add -q --detach "$path" "$sha"
 elif [[ "$arg" =~ ^#?([0-9]+)$ ]]; then
   branch="pr/${BASH_REMATCH[1]}"
