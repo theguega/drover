@@ -1031,7 +1031,10 @@ mod tests {
         for v in ["-v", "-V", "--version"] {
             assert!(matches!(parse(&args(v)), Ok(Invocation::Version)));
         }
-        assert!(matches!(parse(&args("--skill")), Ok(Invocation::Print(SKILL))));
+        assert!(matches!(
+            parse(&args("--skill")),
+            Ok(Invocation::Print(SKILL))
+        ));
         assert!(matches!(
             parse(&args("completion zsh")),
             Ok(Invocation::Print(COMPLETION_ZSH))
