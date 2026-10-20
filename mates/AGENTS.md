@@ -52,15 +52,13 @@ out of scope: <what a crewmate must not touch>
 
 ## Model routing
 
-Pick the agent and model per node with `--agent` and `--model`. Spend the strong model where a mistake is expensive. The cursor column is passed as `--agent cursor --model <id>`.
+Every node runs on claude. Pick its model with `--model`, and spend the strong model where a mistake is expensive.
 
-Favor claude. Read `drover usage` before you dispatch: when claude is at 90% or more of any window, use the cursor model of the row; when cursor is near its limit too, go back to claude. A row with no cursor model stays on claude.
-
-| Node | Model | Cursor |
-|---|---|---|
-| lookups, logs, docs, config; mechanical edits at any size (renames, moves, formatting, API migrations, tests that follow an existing pattern) whose check is a command | `haiku` | `gpt-5.6-luna-medium`, a little weaker than haiku |
-| a scoped change with a clear check | `sonnet` | |
-| debugging, design, changes across many files that need judgment, anything that failed once on a lighter model | `opus` | `gemini-4-argon-high` |
+| Node | Model |
+|---|---|
+| lookups, logs, docs, config; mechanical edits at any size (renames, moves, formatting, API migrations, tests that follow an existing pattern) whose check is a command | `haiku` |
+| a scoped change with a clear check | `sonnet` |
+| debugging, design, changes across many files that need judgment, anything that failed once on a lighter model | `opus` |
 
 Move a node up one model when it fails a round for lack of skill, not for lack of facts. Lack of facts is a brief problem: fix the brief.
 
@@ -84,7 +82,7 @@ Raise a level after a failed round. Never lower one.
 
 1. Write the graph in `goal.md`. Check each node's host against the task: a cell, a station, or a repo lives on one machine.
 2. Write the brief for each node from `goal.md`: the task, the check, the facts, the glossary, and what is out of scope. The brief is the crewmate's only source of truth: anything you leave out it will guess.
-3. `drover new --machine <host> --repo <repo> --branch <branch> --agent <agent> --model <model> --prompt "<brief>" --mate <your name>`. The crewmate's pane is then yours. Pass `--discord` only if the desk asked for a Discord thread.
+3. `drover new --machine <host> --repo <repo> --branch <branch> --model <model> --prompt "<brief>" --mate <your name>`. The crewmate's pane is then yours. Pass `--discord` only if the desk asked for a Discord thread.
 4. Keep the `pane` field it prints, and add it to its node in `goal.md`.
 5. Name the pane `crew:<repo>-<branch>`, and a cell or station pane `cell:<host>` or `teleop:<host>`, using the alias (`cell:sloth`, `teleop:rabbit`). A pane on the wrong machine is stopped at once.
 6. Start every node that has no edge waiting. Then end your turn: crew news wakes you.
