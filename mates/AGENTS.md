@@ -16,7 +16,8 @@ Your name is in your first message. Your files are in `state/<name>/`.
 - Crew news arrives as your next prompt: `crew <pane> on <host> (<repo> <branch>) replied: …`, `… waits on a dialog`, or `… exited`. The reply is the end of the crewmate's turn, cut to its last 800 characters. `drover reply --pane <id>` prints the whole reply when the cut part matters; `drover screen --pane <id>` shows the terminal.
 - A crewmate ends a turn with `QUESTION:` when it is blocked, `DONE:` with the check's output when it thinks it is finished, and `RUNNING: <what>` when its own check or background job is still running. drover tells it so in every prompt.
 - Text in the `❯` input line of an idle Claude Code pane is often Claude Code's own prompt suggestion, not something anyone typed. Only a prompt that was sent counts.
-- What you answer to crew news is not posted anywhere. The desk hears from you only through `drover escalate --mate <name> --text "..."`, and when it writes to you first.
+- What you answer to crew news is not posted anywhere. The desk hears from you only through `drover escalate --mate <name> --text - <<'EOF'`, and when it writes to you first.
+- Pass long or multi-line text on stdin with a quoted heredoc: `--text -` (`send`, `escalate`) and `--prompt -` (`new`). In double quotes the shell expands `$5.65` and backticks.
 - Escalate only when:
   - a decision is the desk's, or a question is not answered by the goal, the brief, or the code
   - a node made no progress in three rounds
@@ -82,10 +83,11 @@ Raise a level after a failed round. Never lower one.
 
 1. Write the graph in `goal.md`. Check each node's host against the task: a cell, a station, or a repo lives on one machine.
 2. Write the brief for each node from `goal.md`: the task, the check, the facts, the glossary, and what is out of scope. The brief is the crewmate's only source of truth: anything you leave out it will guess.
-3. `drover new --machine <host> --repo <repo> --branch <branch> --model <model> --prompt "<brief>" --mate <your name>`. The crewmate's pane is then yours. Pass `--discord` only if the desk asked for a Discord thread.
+3. `drover new --machine <host> --repo <repo> --branch <branch> --model <model> --name crew:<repo>-<branch> --mate <your name> --prompt - <<'EOF'`, the brief on the lines after it. The crewmate's pane is then yours. Pass `--discord` only if the desk asked for a Discord thread.
 4. Keep the `pane` field it prints, and add it to its node in `goal.md`.
-5. Name the pane `crew:<repo>-<branch>`, and a cell or station pane `cell:<host>` or `teleop:<host>`, using the alias (`cell:sloth`, `teleop:rabbit`). A pane on the wrong machine is stopped at once.
-6. Start every node that has no edge waiting. Then end your turn: crew news wakes you.
+5. `--name` labels the pane. A cell or station pane is `cell:<host>` or `teleop:<host>`, using the alias (`cell:sloth`, `teleop:rabbit`). A pane on the wrong machine is stopped at once.
+6. A node that runs after another on the same branch reuses that pane: add `--fresh`, which clears the agent's context and sends the new brief there. The pane, worktree and owner stay. Without it, `drover new` answers `noop: already open, prompt not sent`.
+7. Start every node that has no edge waiting. Then end your turn: crew news wakes you.
 
 ### Loop
 
@@ -103,8 +105,8 @@ Each crew message is one round for its node.
 
 ### Review
 
-1. Review only what the level is about: the files that carry the contract or the risk, not the whole diff. Start a reviewer on the implementer's branch: `drover new` with the same repo and branch and `--mate <your name>`.
-2. Brief it: the goal, the node's task, out of scope, `git diff main...<branch> -- <those files>`, and the claims in the implementer's `DONE:`. It reads and runs, and edits nothing. Name what it reviews:
+1. Review only what the level is about: the files that carry the contract or the risk, not the whole diff. Start a reviewer on the implementer's commit: `drover new --at <implementer pane> --name review:<repo>-<branch> --mate <your name> --prompt -`. It gets a detached checkout at that pane's HEAD, on the same machine and repo, and `drover done` on the reviewer removes it. `drover new` on the implementer's own branch only answers `already open`.
+2. Brief it: the goal, the node's task, out of scope, `git diff main...HEAD -- <those files>`, and the claims in the implementer's `DONE:`. It reads and runs, and edits nothing. Name what it reviews:
    - `code`: the files that allocate, loop, hold state or move something. It reads for leaks, unbounded growth, a missing stop, and an unsafe state on an error path, and runs the long or worst case.
    - `adversarial`: both, in order. First it tries to break the claims: the files that write or define what others read, and the readers named. Old data through new code and new data through the old reader, a missing or extra field, a boundary value, two writers at once, a change mid-run. Then the `code` review of the same files.
 3. Its check: findings with `file:line` and a command that shows each, ending in `VERDICT: pass` or `VERDICT: fail`, and `git status --porcelain` empty.
@@ -129,5 +131,5 @@ Each crew message is one round for its node.
 - Small diffs: one concern per node. Split a node that grows.
 - The check decides: a node passes when its check passes, not when the crewmate says so.
 - Second look: read the diff before you mark a node passed. Ask for a change instead of making it yourself.
-- Bounded context: answer crew news in one short message. Read a transcript only when a reply is unclear.
+- Bounded context: answer crew news in one short message. Read the whole reply with `drover reply --pane <id>` only when the cut matters.
 - Ask, do not guess: what the brief does not settle, the desk does.
