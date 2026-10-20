@@ -74,7 +74,7 @@ Check `drover agents` and `drover worktrees` first, so you do not start a second
 drover new --machine <machine> --repo <repo> --branch <branch> --prompt "<instructions>"
 ```
 
-`--branch` takes a new name, an existing local or remote branch, or `#<pr>`. A branch whose workspace is open answers `noop: already open, prompt not sent`: use `drover send` for that pane, `--fresh` to clear that agent's context and send the prompt there (claude; the pane, worktree and owner stay), or `--at <pane>` for a second agent on its commit. `--name <label>` labels the new pane in herdr. drover appends the repo's recent journal entries and the best matches for the prompt (at most 2 KB), starts the agent, and sends the prompt once it is ready. Read the pane id from the reply.
+`--branch` takes a new name, an existing local or remote branch, or `#<pr>`. A branch whose workspace is open answers `noop: already open, prompt not sent`: use `drover send` for that pane, `--fresh` to restart that pane's agent with `--model` and send the prompt to the new one (claude; the pane, worktree and owner stay, a queued prompt is dropped and named in `dropped`), or `--at <pane>` for a second agent on its commit. `--name <label>` labels the new pane in herdr. drover appends the repo's recent journal entries and the best matches for the prompt (at most 2 KB), starts the agent, and sends the prompt once it is ready. Read the pane id from the reply.
 
 ```bash
 drover send --pane <pane> --text "<prompt>"     # queued while the agent works

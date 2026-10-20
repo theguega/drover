@@ -115,6 +115,7 @@ enum Teardown {
 #[serde(rename_all = "lowercase")]
 enum Phase {
     Starting { prompt: String }, // first prompt, sent once the agent is ready
+    Restarting { prompt: String }, // the old agent exits; pushes wait until its replacement starts
     Idle,
     Waiting,          // a prompt from Discord is waiting for its reply
     Ending(Teardown), // /done sent, next reply is the journal entry
@@ -1436,7 +1437,8 @@ impl App {
         let Ok(m) = self.machine(&t.machine) else {
             return Ok(Step::Keep);
         }; // a machine this host doesn't drive
-        if t.phase == Phase::Gone {
+        // the old agent's exit is no news, and its replacement is not started yet
+        if matches!(t.phase, Phase::Gone | Phase::Restarting { .. }) {
             return Ok(Step::Keep);
         }
         let th = t.thread;

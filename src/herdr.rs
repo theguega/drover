@@ -504,8 +504,8 @@ pub async fn close(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
         .map(drop)
 }
 
-// Through drover-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
-pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
+// The checkout a worktree workspace was opened on.
+pub async fn checkout_path(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
     #[derive(Deserialize)]
     struct List {
         workspaces: Vec<Ws>,
@@ -519,8 +519,7 @@ pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
     struct Tree {
         checkout_path: String,
     }
-    let path = m
-        .link
+    Ok(m.link
         .call::<List>("workspace.list", json!({}), SHORT)
         .await?
         .workspaces
@@ -528,8 +527,12 @@ pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
         .find(|w| &w.workspace_id == workspace)
         .and_then(|w| w.worktree)
         .ok_or_else(|| Error::failed("workspace has no worktree".into()))?
-        .checkout_path;
-    let path = Name::parse(&path)?;
+        .checkout_path)
+}
+
+// Through drover-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
+pub async fn remove(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
+    let path = Name::parse(&checkout_path(m, workspace).await?)?;
     let o = sh(m, &format!("drover-wt rm '{}'", path.as_str()), LONG).await?;
     if o.code != Some(0) {
         return Err(failure(&o));

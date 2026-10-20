@@ -143,7 +143,7 @@ const SPECS: &[Spec] = &[
             Arg(
                 "--fresh",
                 "off",
-                "if the branch is open already: clear its agent's context (claude) and send the prompt there, keeping the pane and its owner",
+                "if the branch is open already: restart its agent there with --model and send the prompt to the new one (claude), keeping the pane and its owner",
             ),
             DISCORD,
         ],

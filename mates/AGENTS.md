@@ -86,7 +86,7 @@ Raise a level after a failed round. Never lower one.
 3. `drover new --machine <host> --repo <repo> --branch <branch> --model <model> --name crew:<repo>-<branch> --mate <your name> --prompt - <<'EOF'`, the brief on the lines after it. The crewmate's pane is then yours. Pass `--discord` only if the desk asked for a Discord thread.
 4. Keep the `pane` field it prints, and add it to its node in `goal.md`.
 5. `--name` labels the pane. A cell or station pane is `cell:<host>` or `teleop:<host>`, using the alias (`cell:sloth`, `teleop:rabbit`). A pane on the wrong machine is stopped at once.
-6. A node that runs after another on the same branch reuses that pane: add `--fresh`, which clears the agent's context and sends the new brief there. The pane, worktree and owner stay. Without it, `drover new` answers `noop: already open, prompt not sent`.
+6. A node that runs after another on the same branch reuses that pane: add `--fresh` with the node's `--model`: the old agent exits, a new one starts in the same pane on that model, and the brief goes to it. The pane, worktree and owner stay. Without it, `drover new` answers `noop: already open, prompt not sent`.
 7. Start every node that has no edge waiting. Then end your turn: crew news wakes you.
 
 ### Loop

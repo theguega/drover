@@ -117,7 +117,7 @@ fn task_json(key: &str, t: &Task) -> Value {
 
 fn phase(p: &Phase) -> &'static str {
     match p {
-        Phase::Starting { .. } => "starting",
+        Phase::Starting { .. } | Phase::Restarting { .. } => "starting",
         Phase::Idle => "idle",
         Phase::Waiting => "waiting",
         Phase::Ending(_) => "ending",

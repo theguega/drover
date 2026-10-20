@@ -851,66 +851,100 @@ impl App {
         Ok(out)
     }
 
-    // A fresh conversation for the agent already in this pane: the context goes, the pane, its
-    // worktree and its owner stay, and the prompt goes out as a first prompt would.
+    // A fresh agent in place of the one in this pane: the old one exits and a new one starts there
+    // with this model, as `new` starts one. The pane, its worktree and its owner stay.
     async fn renew(&self, cell: &Cell, n: &New, prompt: &str) -> Result<Change> {
-        let mut t = cell.lock().await;
-        if t.role.crew_of_mate() != n.mate.as_ref() {
-            bail!(
-                "{} is not driven by {}",
-                t.pane.0,
-                n.mate.as_ref().map_or("the desk", MateName::as_str)
-            );
-        }
-        match t.phase {
-            Phase::Ending(_) => bail!("{} is ending: its journal entry is on the way", t.pane.0),
-            Phase::Starting { .. } => bail!("{} has not had its first prompt yet", t.pane.0),
-            Phase::Idle | Phase::Waiting | Phase::Gone => {}
-        }
-        let Some(clear) = harness::find(&t.kind).and_then(|h| h.clear) else {
-            bail!(
-                "{} cannot clear its context in place; close the task and start a new one",
-                t.kind
-            );
+        let model = n.model.as_deref().map(Name::parse).transpose()?;
+        let (m, pane, dropped) = {
+            let mut t = cell.lock().await;
+            if t.role.crew_of_mate() != n.mate.as_ref() {
+                bail!(
+                    "{} is not driven by {}",
+                    t.pane.0,
+                    n.mate.as_ref().map_or("the desk", MateName::as_str)
+                );
+            }
+            match t.phase {
+                Phase::Ending(_) => {
+                    bail!("{} is ending: its journal entry is on the way", t.pane.0)
+                }
+                Phase::Starting { .. } | Phase::Restarting { .. } => {
+                    bail!("{} has not had its first prompt yet", t.pane.0)
+                }
+                Phase::Idle | Phase::Waiting | Phase::Gone => {}
+            }
+            if let Some(agent) = &n.agent
+                && *agent != t.kind
+            {
+                bail!(
+                    "{} runs {}, and --fresh keeps the agent: close it and start {agent}",
+                    t.pane.0,
+                    t.kind
+                );
+            }
+            let Some(exit) = harness::find(&t.kind).and_then(|h| h.exit) else {
+                bail!(
+                    "drover cannot restart {} in place; close the task and start a new one",
+                    t.kind
+                );
+            };
+            let m = self.machine(&t.machine)?;
+            if let Err(e) = herdr::prompt(m, &t.pane, exit).await {
+                return Err(match e.is_busy() || e.is(&herdr::Code::AgentBlocked) {
+                    true => cli::Failure::new(
+                        "the agent is not idle; wait for its reply",
+                        format!("drover screen --pane {}", t.pane.0),
+                    )
+                    .into(),
+                    false => e.into(),
+                });
+            }
+            // no status or session until the new agent's first push, so the old transcript is never read as its own
+            t.status = None;
+            t.session = None;
+            t.reply = None;
+            t.phase = Phase::Restarting {
+                prompt: prompt.into(),
+            };
+            // a prompt queued for the old conversation means nothing to the new one
+            (m, t.pane.clone(), t.queued.take())
         };
-        let m = self.machine(&t.machine)?;
-        if let Err(e) = herdr::prompt(m, &t.pane, clear).await {
-            return Err(match e.is_busy() || e.is(&herdr::Code::AgentBlocked) {
-                true => cli::Failure::new(
-                    "the agent is not idle; wait for its reply",
-                    format!("drover screen --pane {}", t.pane.0),
-                )
-                .into(),
-                false => e.into(),
-            });
-        }
-        // the clear shows no status change to wait on, and the prompt must not land in the middle of it
-        let mut sent = Err(herdr::Error::failed("not sent".into()));
+        self.save().await;
+
+        // unlocked while the old agent exits, so this pane's pushes never wait on it
+        let mut gone = false;
         for _ in 0..20 {
             sleep(Duration::from_millis(500)).await;
-            sent = herdr::prompt(m, &t.pane, prompt).await;
-            if !sent.as_ref().is_err_and(herdr::Error::is_busy) {
+            gone = !herdr::agents(m).await?.iter().any(|a| a.pane_id == pane);
+            if gone {
                 break;
             }
         }
-        sent?;
-        // the new conversation has a new transcript, learned from agent.list on the next push;
-        // the old last reply stays, so the old transcript is never read as this turn's
-        t.session = None;
-        t.reply = None;
-        let dropped = t.queued.take();
-        t.phase = Phase::Waiting;
-        if let Some(label) = &n.name {
-            herdr::rename_pane(m, &t.pane, label).await?;
-        }
-        // a prompt queued for the old conversation means nothing to the new one
-        let out = Change::task(&t, None, format!("fresh agent in {}", t.pane.0))
-            .with("delivery", "sent")
-            .maybe("dropped", dropped)
-            .watch(&t.pane);
-        drop(t);
+        let (t, path) = {
+            let mut t = cell.lock().await;
+            if !gone {
+                t.phase = Phase::Idle;
+                drop(t);
+                self.save().await;
+                bail!("the agent in {} did not exit", pane.0);
+            }
+            // as for a new task: the prompt goes out on the new agent's first ready push
+            t.phase = Phase::Starting {
+                prompt: prompt.into(),
+            };
+            let path = herdr::checkout_path(m, &t.workspace).await?;
+            (t.clone(), path)
+        };
         self.save().await;
-        Ok(out)
+        let name = agent_name(t.branch.as_deref().unwrap_or(&t.kind));
+        herdr::start(m, &name, &t.kind, &pane, &path, model.as_ref()).await?;
+        if let Some(label) = &n.name {
+            herdr::rename_pane(m, &pane, label).await?;
+        }
+        Ok(Change::task(&t, None, format!("fresh agent in {}", pane.0))
+            .maybe("model", model.as_ref().map(Name::as_str))
+            .maybe("dropped", dropped)
+            .watch(&pane))
     }
 
     async fn cmd_attach(&self, http: &Http, at: &Attach) -> Result<Change> {

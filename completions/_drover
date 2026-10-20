@@ -49,7 +49,7 @@ _drover() {
       '--name=[pane label]:label:' \
       "--at=[a read-only checkout at this pane's commit]:pane:(${(f)"$(drover complete panes "$machine" 2>/dev/null)"})" \
       '--scout[report only, no changes]' \
-      '--fresh[if open already, clear its agent and send the prompt there]' \
+      '--fresh[if open already, restart its agent there with this model and send the prompt]' \
       '--discord[open a Discord thread]' \
       "--mate=[mate]:mate:(${(f)"$(drover complete mates 2>/dev/null)"})" ;;
     attach|link) _arguments \
