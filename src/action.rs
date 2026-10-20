@@ -26,6 +26,7 @@ pub enum Action {
     Snapshot,
     Watch,
     Screen(Look),
+    Reply(Target),
     Mate(Mate),
     Scout(Scout),
     Brief(Note),
@@ -680,6 +681,7 @@ impl App {
             Action::Worktrees => return Ok(Reply::Worktrees(self.cmd_worktrees().await?)),
             Action::Usage => return Ok(Reply::Usage(self.cmd_usage().await?)),
             Action::Screen(l) => return Ok(Reply::Screen(self.cmd_screen(&l).await?)),
+            Action::Reply(t) => return Ok(Reply::Screen(self.cmd_reply(&t.thread).await?)),
             Action::Recall(r) => return Ok(Reply::Recall(self.cmd_recall(&r).await?)),
             Action::JournalList(l) => return Ok(Reply::Journal(self.cmd_journal_list(&l).await?)),
             Action::Snapshot => self.snapshot().await,
@@ -1067,6 +1069,32 @@ impl App {
                 false => tail(&text, EXCERPT),
             },
             help,
+        })
+    }
+
+    // The agent's last reply in full, from the transcript a turn's end is read from.
+    async fn cmd_reply(&self, target: &str) -> Result<ScreenView> {
+        let (_, cell) = self.find_task(target).await?;
+        let t = cell.lock().await.clone();
+        let screen = format!("drover screen --pane {} --full", t.pane.0);
+        if !harness::find(&t.kind).is_some_and(|h| h.transcript) {
+            return Err(
+                cli::Failure::new(format!("{} keeps no transcript", t.kind), screen).into(),
+            );
+        }
+        let m = self.machine(&t.machine)?;
+        let reply = match &t.session {
+            Some(s) => herdr::reply(m, s).await?,
+            None => None,
+        };
+        let r = reply.ok_or_else(|| cli::Failure::new("no reply yet", screen))?;
+        Ok(ScreenView {
+            chars: r.text.chars().count(),
+            text: r.text,
+            help: vec![format!("drover send --pane {} --text <text>", t.pane.0)],
+            pane: t.pane.0,
+            machine: t.machine,
+            status: t.status.unwrap_or(Status::Unknown),
         })
     }
 

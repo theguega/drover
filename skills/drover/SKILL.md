@@ -78,6 +78,7 @@ drover new --machine <machine> --repo <repo> --branch <branch> --prompt "<instru
 ```bash
 drover send --pane <pane> --text "<prompt>"     # queued while the agent works
 drover screen --pane <pane>
+drover reply --pane <pane>                      # the last reply in full, from the transcript
 drover keys --pane <pane> --keys "esc enter"    # prints the screen after the keys
 drover done --pane <pane> --remove
 ```

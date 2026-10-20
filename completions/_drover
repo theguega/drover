@@ -13,6 +13,7 @@ _drover() {
     'worktrees:worktrees on every machine'
     'usage:usage of each agent'
     'screen:the terminal of a task agent'
+    'reply:the last reply of a task agent in full'
     'keys:send keys to a task agent'
     'scout:a short look with no repo'
     'mate:start a mate'
@@ -59,7 +60,7 @@ _drover() {
     screen) _arguments \
       "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" \
       '--full[the whole text]' ;;
-    take|release) _arguments \
+    take|release|reply) _arguments \
       "--thread=[task thread]:thread:(${(f)"$(drover complete threads 2>/dev/null)"})" ;;
     recall) _arguments '--full[the whole text]' ;;
     keys) _arguments \

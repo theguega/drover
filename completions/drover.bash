@@ -1,7 +1,7 @@
 # bash completion for drover; installed by install.sh into bash-completion's directory.
 _drover() {
   local cur prev cmd words i machine
-  local commands="new attach link escalate brief agents worktrees usage screen keys scout mate send take release done recall journal config help"
+  local commands="new attach link escalate brief agents worktrees usage screen reply keys scout mate send take release done recall journal config help"
   COMPREPLY=()
   cur=${COMP_WORDS[COMP_CWORD]}
   prev=${COMP_WORDS[COMP_CWORD-1]}
@@ -32,6 +32,7 @@ _drover() {
         escalate|brief) words="--mate --text" ;;
         screen) words="--pane --thread --full" ;;
         take|release) words="--thread" ;;
+        reply) words="--pane --thread" ;;
         keys) words="--thread --keys" ;;
         send) words="--thread --text" ;;
         scout) words="close --pane --discord" ;;

@@ -47,6 +47,7 @@ drover new --machine host --repo myrepo --branch feature-x --prompt "add retries
 drover agents                # agents on every machine, and the thread if bound to Discord
 drover snapshot              # the desk as JSON, for other tools; `drover watch` streams it, one line per change
 drover screen --pane ID      # an agent's terminal
+drover reply --pane ID       # an agent's last reply in full
 drover keys --pane ID --keys "esc enter"
 drover attach --pane ID --discord  # open a Discord thread for a running task to continue there
 drover done --pane ID        # journal entry, then close the workspace

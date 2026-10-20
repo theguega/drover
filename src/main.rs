@@ -1576,7 +1576,12 @@ impl App {
         self.drain_queue(http, &mut t, m).await?;
         // the end of a turn holds its question or result
         Ok(said.map_or(Step::Keep, |s| {
-            tell(format!("{who} replied:\n{}", tail(s.trim(), 800)))
+            let s = s.trim();
+            let more = match s.chars().count() > 800 {
+                true => format!("\n(cut: `drover reply --pane {}` has all of it)", t.pane.0),
+                false => String::new(),
+            };
+            tell(format!("{who} replied:\n{}{more}", tail(s, 800)))
         }))
     }
 

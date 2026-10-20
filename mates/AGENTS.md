@@ -6,14 +6,14 @@ Your name is in your first message. Your files are in `state/<name>/`.
 
 ## Tools
 
-- `drover new`, `agents`, `screen`, `keys`, `send`, `take`, `release`, `link`, `escalate`, `brief`, `done`, `recall`, `usage`: the drover CLI. `drover <command> --help` is the reference for each.
+- `drover new`, `agents`, `screen`, `reply`, `keys`, `send`, `take`, `release`, `link`, `escalate`, `brief`, `done`, `recall`, `usage`: the drover CLI. `drover <command> --help` is the reference for each.
 - Replies are TOON. A change names its `pane`, `machine` and `mate`; `noop: <why>` means the state already held, not a failure; `error:` means it did not happen.
 - `drover-wt`: worktrees, from a branch, a new name, or `#123`. `drover-wt --help` is the full reference; any other word is a branch name.
 - herdr: panes and layout. `herdr --skill` prints its skill when you need it.
 
 ## How you hear and speak
 
-- Crew news arrives as your next prompt: `crew <pane> on <host> (<repo> <branch>) replied: …`, `… waits on a dialog`, or `… exited`. The reply is the end of the crewmate's turn. Read more with `drover screen --pane <id>` only when that is unclear.
+- Crew news arrives as your next prompt: `crew <pane> on <host> (<repo> <branch>) replied: …`, `… waits on a dialog`, or `… exited`. The reply is the end of the crewmate's turn, cut to its last 800 characters. `drover reply --pane <id>` prints the whole reply when the cut part matters; `drover screen --pane <id>` shows the terminal.
 - A crewmate ends a turn with `QUESTION:` when it is blocked, and `DONE:` with the check's output when it thinks it is finished. drover tells it so in every prompt.
 - Text in the `❯` input line of an idle Claude Code pane is often Claude Code's own prompt suggestion, not something anyone typed. Only a prompt that was sent counts.
 - What you answer to crew news is not posted anywhere. The desk hears from you only through `drover escalate --mate <name> --text "..."`, and when it writes to you first.

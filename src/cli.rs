@@ -232,6 +232,15 @@ const SPECS: &[Spec] = &[
         ],
     },
     Spec {
+        name: "reply",
+        about: "Show the last reply of a task's agent in full, from its transcript",
+        args: &[PANE, THREAD],
+        examples: [
+            "drover reply --pane wAX:p1",
+            "drover reply --thread 1300000000000000000",
+        ],
+    },
+    Spec {
         name: "keys",
         about: "Send keys to a task's agent and show its terminal (Discord /keys)",
         args: &[
@@ -594,6 +603,7 @@ fn action(spec: &Spec, rest: &[String]) -> Result<Action> {
             full: flags.on("full"),
             discord: false,
         }),
+        "reply" => Action::Reply(target()?),
         "keys" => Action::Keys(Keys {
             thread: flags.target()?,
             keys: flags
