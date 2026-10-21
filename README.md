@@ -29,7 +29,7 @@ On each remote machine, install only the worktree tool and the client:
 curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh -s -- --remote
 ```
 
-The `drover` on a remote machine is a client: it runs the command on the host in `DROVER_HOST` over ssh. Set it in your shell, for example `export DROVER_HOST=meerkat`.
+The `drover` on a remote machine is a client: it runs the command on the host in `DROVER_HOST` over ssh. Set it in your shell, for example `export DROVER_HOST=amazing_vps`.
 
 ## Discord setup
 
