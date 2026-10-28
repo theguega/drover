@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{ChildStderr, ChildStdin, ChildStdout, Command},
-    sync::{Notify, broadcast, mpsc, oneshot},
+    sync::{Notify, broadcast, mpsc, oneshot, watch},
     time::sleep,
 };
 
@@ -27,7 +27,7 @@ use crate::{
     cli::{Cmd, Ls, Start},
     config::{Config, Paths},
     control::{self, Failure},
-    harness::{self, Abort, Answer, Decision, Harness, Out, Parse, StartSpec},
+    harness::{self, Abort, Answer, Decision, Harness, Ident, Out, Parse, StartSpec},
     herdr::{self, Code, Host, Name, PaneId, Reach, SessionId},
     http, migrate,
     run::{Machine, Mode, Owner, Phase, Profile, Role, Run, RunId, Usage, now},
@@ -39,6 +39,8 @@ use crate::{
 const ARCHIVE_AFTER: i64 = 30 * 86_400;
 // Characters of a reply its event keeps.
 const REPLY_EXCERPT: usize = 300;
+// A headless process gets this long between SIGTERM and SIGKILL.
+const GRACE: Duration = Duration::from_secs(5);
 // Text deltas of a headless turn go out at most this often.
 const TEXT_BATCH: Duration = Duration::from_millis(500);
 // What a tool call hears when you have not answered before its hook times out (SPIKE.md q2).
@@ -51,10 +53,14 @@ const READER_AGENTS: &str = "You are a reader. You can read files and run `brain
 // A headless process, while it is warm.
 struct Proc {
     id: u64,
+    machine: Machine,
     stdin: mpsc::UnboundedSender<String>,
     busy: bool, // a turn runs
     idle_since: Instant,
-    _child: tokio::process::Child, // dropping it kills the process
+    // its pid and start time, from its first stderr line
+    ident: watch::Receiver<Option<Ident>>,
+    // dropping it SIGKILLs the process: only once `stop` has ended it
+    _child: tokio::process::Child,
 }
 
 // A tool call waiting on an answer.
@@ -305,8 +311,19 @@ impl App {
         })
     }
 
-    // Headless processes die with the service; their runs wait for the next send, which resumes them.
+    // Headless processes end with the service, and their runs wait for the next send, which
+    // resumes them. One the service left running (it was killed) is ended now, and before a resume.
     fn orphans(&self) -> Result<()> {
+        if !self.store.procs(None)?.is_empty() {
+            let me = Weak::clone(&self.me);
+            tokio::spawn(async move {
+                if let Some(me) = me.upgrade()
+                    && let Err(e) = me.reap(None).await
+                {
+                    eprintln!("processes drover left: {e}");
+                }
+            });
+        }
         for mut r in self.store.list_open()? {
             if r.mode != Mode::Headless || !r.phase.live() || r.phase == Phase::Idle {
                 continue;
@@ -376,9 +393,50 @@ impl App {
         };
         self.emit(r, kind, data)?;
         self.save(r)?;
-        locked(&self.procs).remove(&r.id);
+        let proc = locked(&self.procs).remove(&r.id);
+        if let (Some(p), Some(me)) = (proc, self.me.upgrade()) {
+            let id = r.id.clone();
+            tokio::spawn(async move { me.stop(&id, p).await });
+        }
         self.wake.notify_waiters();
         Ok(())
+    }
+
+    // Takes the run's process out and ends it.
+    async fn retire(&self, id: &RunId) {
+        let proc = locked(&self.procs).remove(id);
+        if let Some(p) = proc {
+            self.stop(id, p).await;
+        }
+    }
+
+    // SIGTERM, then SIGKILL after GRACE. Dropping the child alone would SIGKILL claude and leave
+    // the tools it started running, in sessions of their own.
+    async fn stop(&self, id: &RunId, mut p: Proc) {
+        let ident = match tokio::time::timeout(GRACE, p.ident.wait_for(Option::is_some)).await {
+            Ok(Ok(i)) => i.clone(),
+            _ => None,
+        };
+        if let Some(i) = ident
+            && let Err(e) = self.end_proc(id, &p.machine, &i).await
+        {
+            eprintln!("run {id}: stop {}: {e}", i.pid);
+        }
+    }
+
+    // Ends the recorded processes of a run, or of all, that no warm Proc holds: the ones a
+    // service that was killed left running.
+    async fn reap(&self, run: Option<&RunId>) -> Result<()> {
+        for (id, machine, ident) in self.store.procs(run)? {
+            self.end_proc(&id, &machine, &ident).await?;
+        }
+        Ok(())
+    }
+
+    // Ends a recorded process if it still runs, and forgets it.
+    async fn end_proc(&self, id: &RunId, machine: &Machine, ident: &Ident) -> Result<()> {
+        harness::terminate(self.host(machine)?.ssh(), ident, GRACE).await?;
+        self.store.forget(id, ident)
     }
 
     fn hook_url(&self, run: &RunId) -> String {
@@ -750,6 +808,8 @@ impl App {
                     if resume.is_none() && self.store.last(&r.id, Kind::Started)?.is_some() {
                         bail!("{} has no session to resume", r.id);
                     }
+                    // a process of this session still running would be a second one on it
+                    self.reap(Some(&r.id)).await?;
                     self.spawn(r, resume.as_ref())?;
                 }
                 let mut procs = locked(&self.procs);
@@ -782,22 +842,25 @@ impl App {
         let id = self.next_proc.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(write_lines(sp.stdin, rx));
+        let (known, ident) = watch::channel(None);
         let me = self
             .me
             .upgrade()
             .ok_or_else(|| err!("drover is stopping"))?;
         tokio::spawn(read_proc(
             me,
-            r.id.clone(),
+            (r.id.clone(), r.machine.clone()),
             id,
             harness,
             sp.stdout,
-            sp.stderr,
+            (sp.stderr, known),
         ));
         locked(&self.procs).insert(
             r.id.clone(),
             Proc {
                 id,
+                machine: r.machine.clone(),
+                ident,
                 stdin: tx,
                 busy: false,
                 idle_since: Instant::now(),
@@ -818,6 +881,12 @@ impl App {
             }
         };
         let Some(p) = gone else { return };
+        let ident = p.ident.borrow().clone();
+        if let Some(i) = ident
+            && let Err(e) = self.store.forget(id, &i)
+        {
+            eprintln!("run {id}: {e}");
+        }
         let Ok(mut r) = self.get(id) else { return };
         if r.phase.live() && (p.busy || r.phase != Phase::Idle) {
             let error = format!("the process exited: {}", stderr.trim());
@@ -832,14 +901,17 @@ impl App {
         }
     }
 
-    // Kills a warm process that has had no turn since `since`.
-    fn kill_idle(&self, id: &RunId, proc: u64) {
-        let mut procs = locked(&self.procs);
-        if procs
-            .get(id)
-            .is_some_and(|p| p.id == proc && !p.busy && p.idle_since.elapsed() >= self.idle_kill)
-        {
-            procs.remove(id);
+    // Ends a warm process that has had no turn for idle_kill.
+    async fn kill_idle(&self, id: &RunId, proc: u64) {
+        let idle = {
+            let mut procs = locked(&self.procs);
+            let idle = procs.get(id).is_some_and(|p| {
+                p.id == proc && !p.busy && p.idle_since.elapsed() >= self.idle_kill
+            });
+            idle.then(|| procs.remove(id)).flatten()
+        };
+        if let Some(p) = idle {
+            self.stop(id, p).await;
         }
     }
 
@@ -905,7 +977,7 @@ impl App {
         tokio::spawn(async move {
             sleep(wait).await;
             if let Some(me) = me.upgrade() {
-                me.kill_idle(&id, proc);
+                me.kill_idle(&id, proc).await;
             }
         });
     }
@@ -1299,7 +1371,7 @@ impl App {
             }
             let h = self.host(&r.machine)?;
             let harness = Self::harness(&r)?;
-            locked(&self.procs).remove(id);
+            self.retire(id).await;
             let wt = self.worktree(h, &r).await?;
             let asked = self.asked(&r)?;
             let hooks = self.hook_url(id);
@@ -1348,7 +1420,7 @@ impl App {
         Self::owned(&r, from)?;
         match Self::harness(&r)?.abort() {
             // the next send resumes its session
-            Abort::Kill => drop(locked(&self.procs).remove(id)),
+            Abort::Kill => self.retire(id).await,
             Abort::Stdin(line) => {
                 if let Some(p) = locked(&self.procs).get(id) {
                     let _ = p.stdin.send(line);
@@ -1403,7 +1475,7 @@ impl App {
         let mut removed = false;
         match (self.host(&r.machine), r.mode.pane().cloned(), r.workspace()) {
             (Ok(h), _, _) if r.mode == Mode::Headless => {
-                locked(&self.procs).remove(id);
+                self.retire(id).await;
                 if remove && r.profile == Profile::Actor {
                     match herdr::remove_path(h, &r.cwd.to_string_lossy()).await {
                         Ok(said) => (removed, notes) = (true, vec![said]),
@@ -1561,16 +1633,28 @@ async fn write_lines(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<Stri
 // before any other event, so the stream keeps their order.
 async fn read_proc(
     app: Arc<App>,
-    id: RunId,
+    (id, machine): (RunId, Machine),
     proc: u64,
     harness: &'static dyn Harness,
     stdout: ChildStdout,
-    stderr: ChildStderr,
+    (stderr, known): (ChildStderr, watch::Sender<Option<Ident>>),
 ) {
+    // the first line names the process; the rest, its last 2000 bytes, says why it failed
+    let me = Arc::clone(&app);
+    let run = id.clone();
     let tail = tokio::spawn(async move {
         let mut tail = String::new();
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(l)) = lines.next_line().await {
+            if known.borrow().is_none()
+                && let Some(ident) = harness::Ident::parse(&l)
+            {
+                if let Err(e) = me.store.remember(&run, &machine, &ident) {
+                    eprintln!("run {run}: {e}");
+                }
+                known.send_replace(Some(ident));
+                continue;
+            }
             tail.push_str(&l);
             tail.push('\n');
             let cut = tail.len().saturating_sub(2000);
@@ -2279,6 +2363,37 @@ mod tests {
             (&json!("reply"), &json!(0), &Value::Null)
         );
         assert_eq!(at(&Value::from(crew.next(&app).await?), "/0/kind"), "done");
+        Ok(())
+    }
+
+    // A process a killed service left running is ended before its run resumes, and only its own.
+    #[tokio::test]
+    async fn a_leftover_process_is_ended_before_a_resume() -> Result<()> {
+        let app = app()?;
+        let left = |run: &str| -> Result<(harness::Spawned, Ident, RunId)> {
+            let argv = ["sleep".to_string(), "30".to_string()];
+            let sp = harness::spawn(&argv, Path::new("/"), &[], None)?;
+            let ident = Ident {
+                pid: sp.child.id().ok_or("no pid")?,
+                start: String::new(),
+            };
+            Ok((sp, ident, run.parse()?))
+        };
+        let (mut a, mut ia, ra) = left("r-0000c1")?;
+        let (mut b, mut ib, rb) = left("r-0000c2")?;
+        for (sp, ident) in [(&mut a, &mut ia), (&mut b, &mut ib)] {
+            let mut line = String::new();
+            BufReader::new(&mut sp.stderr).read_line(&mut line).await?;
+            *ident = Ident::parse(&line).ok_or("no ident")?;
+        }
+        app.store.remember(&ra, &app.local, &ia)?;
+        app.store.remember(&rb, &app.local, &ib)?;
+        app.reap(Some(&ra)).await?;
+        assert!(a.child.try_wait()?.is_some(), "the run's leftover is gone");
+        assert!(b.child.try_wait()?.is_none(), "another run's is not");
+        assert_eq!(app.store.procs(None)?.len(), 1);
+        app.reap(None).await?;
+        assert!(app.store.procs(None)?.is_empty());
         Ok(())
     }
 

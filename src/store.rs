@@ -13,8 +13,9 @@ use serde_json::{Value, json};
 
 use crate::{
     Result,
+    harness::Ident,
     herdr::{PaneId, SessionId},
-    run::{HarnessName, Mode, Owner, Phase, Profile, Role, Run, RunId, now, rfc3339},
+    run::{HarnessName, Machine, Mode, Owner, Phase, Profile, Role, Run, RunId, now, rfc3339},
 };
 
 const SCHEMA: &str = "
@@ -28,6 +29,7 @@ CREATE TABLE IF NOT EXISTS events(
     data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_run ON events(run, id);
 CREATE TABLE IF NOT EXISTS goals(run TEXT PRIMARY KEY, graph TEXT NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS procs(run TEXT PRIMARY KEY, machine TEXT NOT NULL, pid INTEGER NOT NULL, start TEXT NOT NULL);
 ";
 
 // What happened to a run: the C9 kinds, and `requested`, what a run was asked to do, which is
@@ -398,6 +400,47 @@ impl Store {
             )
             .optional()?;
         Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
+    }
+}
+
+impl Store {
+    // A headless process while it runs, so a restarted service can end one it left behind.
+    pub fn remember(&self, run: &RunId, machine: &Machine, p: &Ident) -> Result<()> {
+        self.db().execute(
+            "INSERT OR REPLACE INTO procs(run, machine, pid, start) VALUES (?1, ?2, ?3, ?4)",
+            params![run.as_str(), machine.as_str(), p.pid, p.start],
+        )?;
+        Ok(())
+    }
+
+    pub fn forget(&self, run: &RunId, p: &Ident) -> Result<()> {
+        self.db().execute(
+            "DELETE FROM procs WHERE run = ?1 AND pid = ?2 AND start = ?3",
+            params![run.as_str(), p.pid, p.start],
+        )?;
+        Ok(())
+    }
+
+    // Recorded processes, of one run or of all.
+    pub fn procs(&self, run: Option<&RunId>) -> Result<Vec<(RunId, Machine, Ident)>> {
+        let db = self.db();
+        let mut stmt =
+            db.prepare("SELECT run, machine, pid, start FROM procs WHERE ?1 IS NULL OR run = ?1")?;
+        let rows = stmt
+            .query_map([run.map(RunId::as_str)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, u32>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(run, machine, pid, start)| {
+                Ok((run.parse()?, machine.parse()?, Ident { pid, start }))
+            })
+            .collect()
     }
 }
 

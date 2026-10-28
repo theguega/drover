@@ -46,6 +46,8 @@ for _ in $(seq 50); do [[ -S $DROVER_STATE_DIR/drover.sock ]] && break; sleep 0.
 ok() { echo "ok   $*"; }
 fail() {
   echo "FAIL $*"
+  echo "--- events"
+  timeout 1 "$bin" watch --since 0 | jq -c 'select(.kind != "text") | {run, kind, data}' | tail -8 | cut -c1-300 || true
   echo "--- serve.log"
   tail -20 "$tmp/serve.log"
   exit 1
@@ -113,6 +115,48 @@ ok "usage summed on the run: cost_usd $cost"
 sse=$(curl -sN --max-time 3 "http://127.0.0.1:$port/events?run=$h&since=0" || true)
 [[ $(grep -c '^event: reply' <<<"$sse") -ge 4 ]] || fail "SSE: fewer than 4 replies"
 ok "GET /events streams the same events: $(grep -c '^event: ' <<<"$sse") of them"
+
+# ── a stopped process takes the tools it started with it ──
+leak=drvleak$$
+printf 'exec -a %s tail -f /dev/null\n' "$leak" >"$tmp/wait.sh"
+leaking() { pgrep -f "^$leak" >/dev/null; }
+# the run starts a tool that never ends; any call it asks for on the way is allowed
+tool() {
+  "$bin" send "$h" "Run this exact bash command with the Bash tool, in the foreground: bash $tmp/wait.sh. It waits on purpose until I stop you; that is expected, so run it as is." >/dev/null
+  for _ in 1 2 3; do
+    await "$h" 'needs|reply' '.kind == "reply" or .data.perm != null' || fail "headless $h: no tool call"
+    [[ $(jq -r .kind <<<"$event") == reply ]] && fail "headless $h replied instead of running wait.sh: $(text)"
+    "$bin" approve "$h" "$(jq -r .data.perm <<<"$event")" >/dev/null
+    if jq -e '.data.input.command | test("wait.sh") and (test("^cat|^head|^less") | not)' <<<"$event" >/dev/null; then
+      for _ in $(seq 60); do leaking && return 0; sleep 0.5; done
+    fi
+  done
+  fail "headless $h: wait.sh never ran"
+}
+tool
+"$bin" stop "$h" >/dev/null
+for _ in $(seq 20); do leaking || break; sleep 0.5; done
+if leaking; then
+  ps -o pid,ppid,sid,cmd -p "$(pgrep -f "^$leak" | paste -sd,)"
+  pkill -f "^$leak"
+  fail "stop $h left its tool running"
+fi
+ok "stop $h ended claude and the tool it ran"
+
+# ── a killed service leaves no second process on a session ──
+tool
+on_session() { pgrep -fc -- "$session" || true; }
+[[ $(on_session) == 1 ]] || fail "headless $h: $(on_session) processes on its session before the kill"
+kill -KILL "$serve"
+wait "$serve" 2>/dev/null || true
+"$bin" serve >>"$tmp/serve.log" 2>&1 &
+serve=$!
+for _ in $(seq 50); do "$bin" ls >/dev/null 2>&1 && break; sleep 0.1; done
+"$bin" send "$h" "Reply with exactly: AFTER-RESTART" >/dev/null
+await "$h" reply '.data.text | test("AFTER-RESTART")' || fail "headless $h: no reply after the restart"
+[[ $(on_session) == 1 ]] || fail "headless $h: $(on_session) processes on its session after the restart"
+! leaking || fail "the restarted service left the old process's tool running"
+ok "after kill -9 of serve, one process on the session, and the old one's tool is gone"
 
 # ── pane ──
 p=$("$bin" run --repo livetest --branch live-p --model haiku --prompt "Reply with exactly: PANE-PONG" | field run)
