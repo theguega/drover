@@ -31,7 +31,7 @@ drover done <run> [--remove] [--entry <text>]
 ## Who may do what
 
 - A run started by an agent carries `DROVER_RUN` (its own id). drover checks it.
-- `drover run --parent $DROVER_RUN …` asks for a crew run. It waits in `pending` until the user runs `drover approve-run <run>`, or `drover drop-run <run>`. Only the user approves.
+- A run that runs `drover run …` asks for a crew run, with itself as parent and owner (`--parent` may only name itself). It waits in `pending` until the user runs `drover approve-run <run>`, or `drover drop-run <run>`. Only the user approves.
 - The parent owns its crew: only the owner may `send`, `keys` or `stop`. Anyone may read. `drover attach <run>` gives the run to the user.
 
 ## Read the output

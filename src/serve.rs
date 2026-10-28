@@ -193,7 +193,7 @@ impl App {
     pub async fn act(&self, from: Option<RunId>, cmd: Cmd) -> Result<Value> {
         let from = from.as_ref();
         match cmd {
-            Cmd::Run(s) => self.cmd_run(s).await,
+            Cmd::Run(s) => self.cmd_run(from, s).await,
             Cmd::Ls(l) => self.cmd_ls(&l),
             Cmd::Show { run } => self.cmd_show(&run),
             Cmd::Send { run, text } => self.cmd_send(from, &run, &text).await,
@@ -217,7 +217,7 @@ impl App {
         }
     }
 
-    async fn cmd_run(&self, s: Start) -> Result<Value> {
+    async fn cmd_run(&self, from: Option<&RunId>, s: Start) -> Result<Value> {
         if s.headless
             || s.scratch
             || s.profile != Profile::Actor
@@ -229,10 +229,22 @@ impl App {
         self.host(&machine)?;
         let repo = Name::parse(s.repo.as_deref().unwrap_or_default())?;
         let branch = Name::parse(s.branch.as_deref().unwrap_or_default())?;
-        if let Some(p) = &s.parent {
+        // a run that asks for a run is its parent, and the new run waits for you
+        let parent = match (from, s.parent) {
+            (Some(f), Some(p)) if &p != f => {
+                return Err(Failure::new(
+                    format!("run {f} cannot ask for a run on behalf of {p}"),
+                    "drover run without --parent",
+                )
+                .into());
+            }
+            (Some(f), _) => Some(f.clone()),
+            (None, p) => p,
+        };
+        if let Some(p) = &parent {
             self.get(p)?;
         }
-        let pending = s.parent.is_some();
+        let pending = parent.is_some();
         let id = loop {
             let id = RunId::random();
             if self.store.get(&id)?.is_none() {
@@ -246,8 +258,8 @@ impl App {
             harness: s.harness,
             mode: Mode::Pane { pane: None },
             role: if pending { Role::Crew } else { Role::Task },
-            owner: s.parent.clone().map_or(Owner::User, Owner::Run),
-            parent: s.parent,
+            owner: parent.clone().map_or(Owner::User, Owner::Run),
+            parent,
             profile: s.profile,
             session: None,
             phase: if pending {
@@ -990,23 +1002,16 @@ mod tests {
         v.pointer(path).unwrap_or(&Value::Null)
     }
 
-    fn failure(r: Result<Value>) -> Option<String> {
-        r.err().map(|e| Failure::from(e).error)
-    }
-
-    // A run a mate asks for waits for you; dropping it leaves nothing.
-    #[tokio::test]
-    async fn a_requested_run_waits_for_you() -> Result<()> {
-        let app = app()?;
-        let mate = Run {
-            id: "r-00000a".parse()?,
+    fn run(id: &str, role: Role) -> Result<Run> {
+        Ok(Run {
+            id: id.parse()?,
             machine: "box".parse()?,
             cwd: "/w".into(),
             harness: HarnessName::Claude,
             mode: Mode::Pane {
                 pane: Some(PaneId("w1:p1".into())),
             },
-            role: Role::Mate,
+            role,
             parent: None,
             profile: Profile::Actor,
             owner: Owner::User,
@@ -1015,7 +1020,18 @@ mod tests {
             usage: Usage::default(),
             created_at: 1,
             ended_at: None,
-        };
+        })
+    }
+
+    fn failure(r: Result<Value>) -> Option<String> {
+        r.err().map(|e| Failure::from(e).error)
+    }
+
+    // A run a mate asks for waits for you; dropping it leaves nothing.
+    #[tokio::test]
+    async fn a_requested_run_waits_for_you() -> Result<()> {
+        let app = app()?;
+        let mate = run("r-00000a", Role::Mate)?;
         app.store.save(&mate)?;
         let out = request(
             &app,
@@ -1076,6 +1092,55 @@ mod tests {
             )
             .is_some_and(|e| e == "no run r-00000b")
         );
+        Ok(())
+    }
+
+    // A run asking for a run cannot skip approval by leaving out --parent, nor name another parent.
+    #[tokio::test]
+    async fn a_run_started_by_a_run_is_its_pending_crew() -> Result<()> {
+        let app = app()?;
+        let mut mate = run("r-00000a", Role::Mate)?;
+        app.store.save(&mate)?;
+        mate.id = "r-00000b".parse()?;
+        app.store.save(&mate)?;
+
+        let out = request(
+            &app,
+            Some("r-00000a"),
+            "run --repo drover --branch x --prompt go",
+        )
+        .await?;
+        assert_eq!(at(&out, "/phase"), "pending");
+        assert_eq!(at(&out, "/owner"), "r-00000a");
+        let id: RunId = at(&out, "/run").as_str().unwrap_or_default().parse()?;
+        let r = app.store.get(&id)?;
+        assert!(r.is_some_and(
+            |r| r.role == Role::Crew && r.parent.is_some_and(|p| p.as_str() == "r-00000a")
+        ));
+
+        let other = request(
+            &app,
+            Some("r-00000a"),
+            "run --repo drover --branch x --parent r-00000b --prompt go",
+        )
+        .await;
+        assert!(
+            failure(other)
+                .is_some_and(|e| e == "run r-00000a cannot ask for a run on behalf of r-00000b")
+        );
+        // a caller that is no run at all is refused too
+        assert!(
+            failure(
+                request(
+                    &app,
+                    Some("r-0000ff"),
+                    "run --repo drover --branch x --prompt go"
+                )
+                .await
+            )
+            .is_some_and(|e| e == "no run r-0000ff")
+        );
+        assert_eq!(app.store.list()?.len(), 3);
         Ok(())
     }
 

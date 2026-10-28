@@ -127,7 +127,7 @@ pub struct Start {
     pub harness: HarnessName,
     #[arg(long, value_enum, default_value_t = Profile::Actor)]
     pub profile: Profile,
-    /// The run that asks for this one, which then owns it; usually $DROVER_RUN
+    /// The run that asks for this one, which then owns it and waits for your approve-run. A run (with $DROVER_RUN) is always the parent of the runs it asks for
     #[arg(long)]
     pub parent: Option<RunId>,
     /// The first prompt; - reads it from stdin
