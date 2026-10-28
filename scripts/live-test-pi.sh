@@ -2,6 +2,8 @@
 # Live test of the pi adapter against a real `pi` (its configured provider and model) through its
 # own drover serve: a temp state dir, its own HTTP port, a throwaway repo. Cleans up after itself.
 #   scripts/live-test-pi.sh          LIVE_PORT (default 7382), WAIT seconds per event (default 180)
+#   PI_PROVIDER, PI_MODEL            pick the model, e.g. PI_PROVIDER=openai PI_MODEL=gpt-5-mini;
+#                                    unset, pi uses its own default. The provider's key is pi's business.
 # Each check prints `ok` or `FAIL`; exit 0 when all pass. Needs harness/pi.ts in pi's extensions:
 # it is linked there for the run when install.sh has not done it.
 set -euo pipefail
@@ -32,6 +34,8 @@ git -C "$repo" push -q origin main
 "$bin" serve >"$tmp/serve.log" 2>&1 &
 serve=$!
 runs=()
+model=()
+[[ -z ${PI_MODEL:-} ]] || model=(--model "${PI_PROVIDER:+$PI_PROVIDER/}$PI_MODEL")
 ext=~/.pi/agent/extensions/drover.ts
 if [[ ! -e $ext ]]; then
   mkdir -p "$(dirname "$ext")"
@@ -84,7 +88,7 @@ await() {
 text() { jq -r .data.text <<<"$event"; }
 
 # ── headless ──
-h=$("$bin" run --harness pi --repo livetest --branch live-h --headless --prompt "Reply with exactly: PONG-1" | field run)
+h=$("$bin" run --harness pi --repo livetest --branch live-h --headless "${model[@]}" --prompt "Reply with exactly: PONG-1" | field run)
 runs+=("$h")
 await "$h" reply '.data.text | test("PONG-1")' || fail "headless $h: first reply"
 ok "headless $h replied: $(text)"
@@ -118,3 +122,19 @@ await "$h" reply '.data.text | test("REASON-XYZZY")' || fail "headless $h: the r
 [[ ! -e $cwd/denied.txt ]] || fail "headless $h: denied.txt was created"
 ok "denied $perm, and the reply quotes the reason: $(text | tr '\n' ' ')"
 
+
+# ── pane ──
+p=$("$bin" run --harness pi --repo livetest --branch live-p "${model[@]}" --prompt "Reply with exactly: PANE-PONG" | field run)
+runs+=("$p")
+await "$p" 'needs|started' || fail "pane $p: neither started nor a startup dialog"
+if [[ $(jq -r .kind <<<"$event") == needs ]]; then
+  "$bin" keys "$p" enter >/dev/null
+  ok "pane $p: answered a startup dialog"
+  await "$p" started || fail "pane $p: not started after the dialog"
+fi
+ok "pane $p started"
+await "$p" reply '.data.text | test("PANE-PONG")' || fail "pane $p: no reply from the extension"
+[[ $("$bin" show "$p" | field session) =~ ^[0-9a-f-]{36}$ ]] || fail "pane $p: no session from the extension"
+ok "pane $p replied through the extension: $(text)"
+
+echo "all checks passed"

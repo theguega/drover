@@ -2,7 +2,7 @@
 
 drover runs coding agents. It starts them in git worktrees, on this machine or over ssh. It runs them either in a herdr pane, for you to pair with, or headless, for the dashboard and for other agents. It carries their approvals and streams their events. It calls no model and holds no knowledge: when a task ends, its journal entry goes to `brain log`.
 
-Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude adapter (pane and headless), events and SSE, approvals, profiles, per-run usage. Mates: `--role mate`, `goal`, `wait`, `escalate`. Not yet: cursor and pi, plan-window usage, the dashboard.
+Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude and pi adapters (pane and headless; pi's not yet run live), events and SSE, approvals, profiles, per-run usage. Mates: `--role mate`, `goal`, `wait`, `escalate`. Not yet: cursor, plan-window usage, the dashboard.
 
 ## What changes from v1
 
@@ -72,7 +72,7 @@ trait Harness {
 }
 ```
 
-The adapter is the protocol only, as pure functions. Spawning the process (here or over ssh), its pipes, idle kill, and what events do to a run are the same for every harness and live in drover once. Cursor's command hook reaches the same endpoint through `drover hook`; pi's rpc mode answers on stdin (`Answer::Stdin`).
+The adapter is the protocol only, as pure functions. Spawning the process (here or over ssh), its pipes, idle kill, and what events do to a run are the same for every harness and live in drover once. Cursor's command hook reaches the same endpoint through `drover hook`; pi's extension posts to the same endpoint, so it answers through the hook as Claude does (`Answer::Stdin` is for a harness with no hook).
 
 | Harness | Headless | Approvals | Pane observation | Ships |
 |---|---|---|---|---|
@@ -80,7 +80,7 @@ The adapter is the protocol only, as pure functions. Spawning the process (here 
 | Cursor | `cursor-agent -p --output-format stream-json --stream-partial-output` (`--mode ask` for the reader profile) | `-p` gets every tool with no prompt, so a `beforeShellExecution` / `beforeMCPExecution` command hook calls `drover hook` and blocks on drover's answer (verify) | the same hooks.json, `sessionStart`/`stop` | day one |
 | Codex | `codex app-server` (JSON-RPC over stdio) | `requestApproval` server→client requests | hooks.json | when used |
 | opencode | `opencode serve` + SSE `/event` | `POST /session/:id/permissions/:pid` | subscribe to the TUI's own server | when used |
-| pi | `pi --mode rpc` | `tool_call` extension | an extension inside the TUI | when used |
+| pi | `pi --mode rpc` | `tool_call` extension (`harness/pi.ts`) posting to drover | the same extension in the TUI | built |
 
 Login: Claude runs the unmodified `claude` binary with your own login (allowed, D6). Other harnesses use API keys or their own providers, never Claude OAuth.
 

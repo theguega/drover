@@ -11,7 +11,8 @@ src/control.rs  unix socket the service listens on, and the client side; `watch`
 src/http.rs     127.0.0.1 HTTP: hook endpoints, GET /events (SSE), POST /runs/:id/permissions/:perm
 src/serve.rs    the service: commands, headless processes, hooks and approvals, a herdr watcher per machine
 src/goal.rs     a mate's goal graph (C16): its shape, checked once when set
-src/harness/    the Harness trait (C12) and its adapters: claude.rs
+src/harness/    the Harness trait (C12) and its adapters: claude.rs, pi.rs
+harness/pi.ts   pi extension: posts events, holds tool calls for approval; linked into ~/.pi/agent/extensions
 src/run.rs      Run and its types: RunId, Machine, Mode, Role, Profile, Owner, Phase, Usage
 src/store.rs    drover.db: runs, events, goals, and each run's `wait` cursor
 src/migrate.rs  v1 state.json into runs, once
@@ -28,6 +29,7 @@ install.sh      host: config.toml, build, links, user service. --remote: links o
 bootstrap.sh    curl entry point: clones into ~/.local/share/drover, runs install.sh
 scripts/live-test.sh  headless, approvals, pane and attach against a real claude (haiku) and herdr
 scripts/live-test-mates.sh  a mate's crew, wait, goal and escalate against a real claude (haiku)
+scripts/live-test-pi.sh  the same for pi; PI_PROVIDER and PI_MODEL pick the model
 ```
 
 State lives in `~/.local/state/drover/` (`drover.db`, `drover.sock`), config in `~/.config/drover/config.toml`.
@@ -71,6 +73,12 @@ Claude (`claude.rs`, see SPIKE.md):
 - Headless: `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages`. `system/init` gives the session, `text_delta`s are text, `tool_use` and `tool_result` blocks are tool_start and tool_end, `result` is the reply with the turn's `usage`; `total_cost_usd` is the process's running total, so a turn's cost is the difference.
 - Both modes get `--settings` with `http` hooks to `127.0.0.1:<http_port>/hooks/<run>`: `PermissionRequest` always, and for a pane `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop` (`last_assistant_message` is the reply) and `SessionEnd`. An actor gets `--permission-mode default`, since your default may be auto.
 - A reader gets `--restricted --tools Bash,Read --permission-mode dontAsk` and allow rules for `brain find|get|pages|code` and `Read`: your own settings files (and allowlists) are not read, and anything else is denied without asking.
+
+Pi (`pi.rs`, `harness/pi.ts`):
+
+- Headless: `pi --mode rpc`. `message_update` `text_delta`s are text, `tool_execution_start`/`end` are tool_start and tool_end, and `agent_end` (unless `willRetry`) is the reply, its usage summed over the turn's assistant messages. A refused `prompt` response is a failed reply.
+- pi has no hooks or permissions of its own. `--drover-hook <url>` makes `harness/pi.ts` (a global extension, linked by `install.sh`, inert without the flag) post to the run's hook URL: `session_start` (the session id), and for each tool that is not read-only (`read`, `grep`, `find`, `ls`) a `permission` that blocks until drover answers `{allow, reason}`; a deny returns `{block, reason}` to the model, and an unreachable drover blocks. A pane also gets `agent_start`, tool events, `agent_settled` (the reply) and `session_shutdown`.
+- Resume is `--session <id>`. A reader gets `--drover-reader`: read-only tools and `brain find|get|pages|code` only.
 
 ## Event loop
 
