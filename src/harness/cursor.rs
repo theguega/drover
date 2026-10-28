@@ -141,15 +141,27 @@ impl Harness for Cursor {
     }
 
     fn hook_settings(&self, spec: &StartSpec) -> Value {
-        let hook = |timeout: u64| {
+        // a hook cursor times out, or that fails with anything but exit 2, lets the call run; so
+        // `drover hook` gives up first, a permission hook is closed, and `|| exit 2` covers the
+        // binary going missing
+        let hook = |timeout: u64, closed: bool| {
             // cursor silently skips a hook command with a URL in it, so no scheme
             let at = spec.hooks.trim_start_matches("http://");
-            let command = format!("{} hook {}", quote(spec.drover), quote(at));
+            let (exe, at, secs) = (
+                quote(spec.drover),
+                quote(at),
+                timeout.saturating_sub(1).max(1),
+            );
+            let command = if closed {
+                format!("{exe} hook --closed {at} {secs} || exit 2")
+            } else {
+                format!("{exe} hook {at} {secs}")
+            };
             json!([{"command": command, "timeout": timeout}])
         };
         let mut hooks = Map::new();
         for name in ["beforeShellExecution", "beforeMCPExecution"] {
-            hooks.insert(name.into(), hook(spec.hook_timeout));
+            hooks.insert(name.into(), hook(spec.hook_timeout, true));
         }
         if !spec.headless {
             for name in [
@@ -159,7 +171,7 @@ impl Harness for Cursor {
                 "stop",
                 "sessionEnd",
             ] {
-                hooks.insert(name.into(), hook(REPORT_TIMEOUT));
+                hooks.insert(name.into(), hook(REPORT_TIMEOUT, false));
             }
         }
         json!({"version": 1, "hooks": hooks})
@@ -303,7 +315,8 @@ mod tests {
     #[test]
     fn hooks_run_drover_with_the_runs_url() {
         let s = Cursor.hook_settings(&spec(true, Profile::Actor));
-        let command = "'/opt/drover/bin/drover' hook '127.0.0.1:7341/hooks/r-00000a'";
+        let command =
+            "'/opt/drover/bin/drover' hook --closed '127.0.0.1:7341/hooks/r-00000a' 599 || exit 2";
         for name in ["beforeShellExecution", "beforeMCPExecution"] {
             assert_eq!(
                 s.pointer(&format!("/hooks/{name}/0/command")),
@@ -316,6 +329,13 @@ mod tests {
         );
         assert!(s.pointer("/hooks/stop").is_none());
         let pane = Cursor.hook_settings(&spec(false, Profile::Actor));
+        // a report that fails lets the turn go on
+        assert_eq!(
+            pane.pointer("/hooks/stop/0/command"),
+            Some(&json!(
+                "'/opt/drover/bin/drover' hook '127.0.0.1:7341/hooks/r-00000a' 9"
+            ))
+        );
         assert_eq!(pane.pointer("/hooks/stop/0/timeout"), Some(&json!(10)));
     }
 

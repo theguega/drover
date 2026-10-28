@@ -21,7 +21,7 @@ export DROVER_STATE_DIR=$tmp/state DROVER_CONFIG=$tmp/config.toml
 # the test speaks as you
 unset DROVER_RUN
 mkdir -p "$DROVER_STATE_DIR" "$tmp/repos"
-printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 300\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
+printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 20\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
 
 repo=$tmp/repos/livetest
 git init -q --bare "$tmp/repos/origin.git"
@@ -117,6 +117,17 @@ perm=$(jq -r .data.perm <<<"$event")
 await "$h" reply '.data.text | test("REASON-XYZZY")' || fail "cursor $h: the reason did not reach the reply"
 [[ ! -e $cwd/denied.txt ]] || fail "cursor $h: denied.txt was created"
 ok "denied $perm, and the reply quotes the reason: $(text | tr '\n' ' ')"
+
+# a service that stops answering: cursor's hook timeout would let the call run, so the hook gives up
+# first with a deny
+"$bin" send "$h" "Run this exact shell command: touch stopped.txt. If it is denied, say DENIED-4." >/dev/null
+await "$h" needs '.data.perm != null' || fail "cursor $h: no needs for the stopped touch"
+kill -STOP "$serve"
+sleep 25
+kill -CONT "$serve"
+await "$h" reply || fail "cursor $h: no reply after the service came back"
+[[ ! -e $cwd/stopped.txt ]] || fail "cursor $h: stopped.txt was created while the service was stopped"
+ok "serve stopped past the hook timeout: stopped.txt was not created"
 
 "$bin" done "$h" >/dev/null
 runs=()

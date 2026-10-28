@@ -1,7 +1,7 @@
 // Terminal front end: clap turns argv into one Cmd, which goes to the service as it is. The reply
 // prints as TOON, errors too, as `error:` and `help:`. Exit 0 ok, 1 error, 2 usage error (clap's).
 
-use std::{io::Read, path::PathBuf};
+use std::{io::Read, path::PathBuf, time::Duration};
 
 use clap::{Args, Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -122,9 +122,15 @@ pub enum Cmd {
     },
     /// The service: the unix socket, HTTP on 127.0.0.1 for hooks and events, and one herdr watcher per machine
     Serve,
-    /// A harness's hook command: its JSON on stdin to the run's hook at host:port/path, the answer on stdout
+    /// A harness's hook command: its JSON on stdin to the run's hook at host:port/path, the answer on stdout. Gives up after secs
     #[command(hide = true)]
-    Hook { at: String },
+    Hook {
+        at: String,
+        secs: u64,
+        /// Exit 2, the harness's deny, when there is no answer; else `{}`
+        #[arg(long)]
+        closed: bool,
+    },
     #[command(hide = true)]
     Home,
 }
@@ -223,8 +229,8 @@ pub struct Request {
 }
 
 pub async fn main(cli: Cli) -> i32 {
-    if let Some(Cmd::Hook { at }) = &cli.cmd {
-        return hook(at);
+    if let Some(Cmd::Hook { at, secs, closed }) = &cli.cmd {
+        return hook(at, *secs, *closed);
     }
     let reply = run(cli).await;
     match reply {
@@ -299,39 +305,60 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
     Ok(reply)
 }
 
-// Blocks until drover answers. Exit 2 is a deny for the harness, so a hook that cannot reach
-// drover never lets a call through.
-fn hook(at: &str) -> i32 {
-    use std::io::Write;
-
-    let post = || -> std::io::Result<String> {
-        let (addr, path) = at
-            .split_once('/')
-            .ok_or_else(|| std::io::Error::other("not a host:port/path"))?;
+// Blocks until drover answers, for at most `secs`: the harness's own timeout is longer, and one
+// that fires lets the call run. A permission hook is `closed`: no answer, an error or a refusal
+// is exit 2, the harness's deny.
+fn hook(at: &str, secs: u64, closed: bool) -> i32 {
+    let at = at.to_string();
+    let answer = within(Duration::from_secs(secs), move || {
         let mut body = String::new();
         std::io::stdin().read_to_string(&mut body)?;
-        let mut sock = std::net::TcpStream::connect(addr)?;
-        write!(
-            sock,
-            "POST /{path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-            body.len()
-        )?;
-        let mut reply = String::new();
-        sock.read_to_string(&mut reply)?;
-        match reply.split_once("\r\n\r\n") {
-            Some((head, answer)) if head.contains(" 200 ") => Ok(answer.into()),
-            _ => Err(std::io::Error::other("drover refused the hook")),
-        }
-    };
-    match post() {
+        post(&at, &body)
+    });
+    match answer {
         Ok(answer) => {
             println!("{answer}");
             0
         }
         Err(e) => {
             eprintln!("drover hook: {e}");
-            2
+            if closed {
+                return 2;
+            }
+            println!("{{}}");
+            0
         }
+    }
+}
+
+// `f` on a thread, given up on after `limit`.
+fn within<T: Send + 'static>(
+    limit: Duration,
+    f: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || tx.send(f()));
+    rx.recv_timeout(limit)
+        .map_err(|_| std::io::Error::other("no answer in time"))?
+}
+
+fn post(at: &str, body: &str) -> std::io::Result<String> {
+    use std::io::Write;
+
+    let (addr, path) = at
+        .split_once('/')
+        .ok_or_else(|| std::io::Error::other("not a host:port/path"))?;
+    let mut sock = std::net::TcpStream::connect(addr)?;
+    write!(
+        sock,
+        "POST /{path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    let mut reply = String::new();
+    sock.read_to_string(&mut reply)?;
+    match reply.split_once("\r\n\r\n") {
+        Some((head, answer)) if head.contains(" 200 ") => Ok(answer.into()),
+        _ => Err(std::io::Error::other("drover refused the hook")),
     }
 }
 
@@ -376,6 +403,29 @@ mod tests {
             cmd: parse("approve-run r-00aa22")?,
         })?)?;
         assert!(matches!(back.cmd, Cmd::ApproveRun { run } if run.as_str() == "r-00aa22"));
+        Ok(())
+    }
+
+    // A server that takes the request and never answers (a stopped service) is given up on at
+    // the deadline, and so is one that answers with an error.
+    #[test]
+    fn a_hook_gives_up_at_its_deadline() -> std::io::Result<()> {
+        let silent = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let at = format!("{}/hooks/r-00000a", silent.local_addr()?);
+        let t = std::time::Instant::now();
+        let r = within(Duration::from_millis(500), move || post(&at, "{}"));
+        assert!(r.is_err());
+        assert!(t.elapsed() < Duration::from_secs(2));
+
+        let refusing = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let at = format!("{}/hooks/r-00000a", refusing.local_addr()?);
+        std::thread::spawn(move || {
+            use std::io::Write;
+            if let Ok((mut s, _)) = refusing.accept() {
+                let _ = s.write_all(b"HTTP/1.1 403 Forbidden\r\n\r\n{}");
+            }
+        });
+        assert!(post(&at, "{}").is_err());
         Ok(())
     }
 

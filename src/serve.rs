@@ -330,8 +330,15 @@ impl App {
             store,
             state,
             port: config.http_port,
-            exe: std::env::current_exe()
-                .map_or_else(|_| "drover".into(), |p| p.to_string_lossy().into_owned()),
+            // a rebuilt binary reads as "… (deleted)" while this one still runs
+            exe: std::env::current_exe().map_or_else(
+                |_| "drover".into(),
+                |p| {
+                    p.to_string_lossy()
+                        .trim_end_matches(" (deleted)")
+                        .to_owned()
+                },
+            ),
             hook_timeout: config.hook_timeout,
             idle_kill: Duration::from_secs(config.idle_kill),
             wake: Notify::new(),
@@ -1135,6 +1142,8 @@ impl App {
         let Some(harness) = harness::get(r.harness) else {
             return json!({});
         };
+        // the harness's own timeout runs from here, not from when the turns lock is ours
+        let arrived = Instant::now();
         let mut outs = harness.hook(body);
         let session = outs.iter().find_map(|o| match o {
             Out::Session(s) => Some(s),
@@ -1161,7 +1170,7 @@ impl App {
         self.apply(id, outs).await;
         match ask {
             Some(Out::Permission { tool, input }) => {
-                let d = self.permission(id, tool, input).await;
+                let d = self.permission(id, tool, input, arrived).await;
                 match harness.respond(&d) {
                     Answer::Hook(v) => v,
                     Answer::Stdin(_) => json!({}),
@@ -1184,7 +1193,13 @@ impl App {
 
     // A tool call that needs a permission: a `needs` event, then the owner's answer. Without one
     // shortly before the hook's timeout, drover denies it with AWAITING and keeps it approvable.
-    async fn permission(&self, id: &RunId, tool: String, input: Value) -> Decision {
+    async fn permission(
+        &self,
+        id: &RunId,
+        tool: String,
+        input: Value,
+        arrived: Instant,
+    ) -> Decision {
         let allow = Decision {
             allow: true,
             reason: None,
@@ -1241,7 +1256,8 @@ impl App {
             key
         };
         let margin = 10.min(self.hook_timeout / 2);
-        let wait = Duration::from_secs(self.hook_timeout - margin);
+        let wait =
+            Duration::from_secs(self.hook_timeout - margin).saturating_sub(arrived.elapsed());
         if let Ok(Ok(d)) = tokio::time::timeout(wait, &mut rx).await {
             return d;
         }
@@ -2828,6 +2844,39 @@ pub(crate) mod tests {
             .iter()
             .filter(|(r, ..)| r == id)
             .count()
+    }
+
+    // The harness's timeout runs from the hook's arrival: a turns lock held meanwhile (an attach,
+    // a reap and spawn) eats the wait, not the margin before it.
+    #[tokio::test]
+    async fn the_deny_deadline_starts_when_the_hook_arrives() -> Result<()> {
+        let app = app_with("hook_timeout = 4")?;
+        let mut r = run("r-00000f", Role::Task)?;
+        r.mode = Mode::Headless;
+        r.phase = Phase::Working;
+        app.store.save(&r)?;
+        let _stdin = warm(&app, &r.id)?;
+        let held = Arc::clone(&app);
+        let holder = tokio::spawn(async move {
+            let _turn = held.turns.lock().await;
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        });
+        tokio::task::yield_now().await;
+        let t = Instant::now();
+        let answer = app.hook(&r.id, &touch("z")).await;
+        // 4 s timeout, 2 s margin: denied about 2 s after arrival, not 1.5 s lock + 2 s wait
+        assert!(
+            t.elapsed() < Duration::from_millis(2800),
+            "{:?}",
+            t.elapsed()
+        );
+        assert!(
+            at(&answer, "/hookSpecificOutput/decision/message")
+                .as_str()
+                .is_some_and(|m| m.starts_with("awaiting approval"))
+        );
+        holder.await?;
+        Ok(())
     }
 
     // Unanswered before the hook's timeout, a call is denied with "awaiting approval" and the run
