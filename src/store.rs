@@ -97,6 +97,10 @@ fn c9_row(
     mut data: Value,
 ) -> Value {
     let usage = data.as_object_mut().and_then(|d| d.remove("usage"));
+    // the whole reply is for `drover reply`, not for the stream
+    if let Some(d) = data.as_object_mut() {
+        d.remove("full");
+    }
     json!({
         "id": id, "run": run, "mode": mode, "role": role, "parent": parent,
         "at": rfc3339(at), "kind": kind, "data": data, "usage": usage,
