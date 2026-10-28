@@ -12,7 +12,7 @@ The answer body used (Claude): `{"hookSpecificOutput":{"hookEventName":"Permissi
 | # | Answer |
 |---|---|
 | 1 | Yes. `PermissionRequest` fires in `-p` stream-json, right after `PreToolUse`, but **only when the call needs a permission** (a read-only `echo` fires `PreToolUse` alone) |
-| 2 | No cap found: 99999 accepted, a 650 s hold honored (3700 s: see below). On timeout the hook is skipped and the normal flow continues: headless has no prompt, so the call is **denied** with Claude's own "needs approval" text, not "awaiting approval" |
+| 2 | No cap found: 99999 accepted, a 650 s hold honored (3700 s: pending). On timeout the hook is skipped and the normal flow continues: headless has no prompt, so the call is **denied** with Claude's own "needs approval" text, not "awaiting approval" |
 | 3 | Yes. The turn continues and the model quotes the reason verbatim (`is_error: true` tool_result) |
 | 4 | `allow` + `updatedPermissions` (`destination: session`) persists for identical calls **within one process**. A plain `allow` does not. **Not across `--resume`**: the hook fires again |
 | 5 | Yes. An interactive pane session started with `--settings` fires the same hook, and a deny shows `Denied by PermissionRequest hook` |
@@ -49,7 +49,7 @@ timeout=99999 elapsed=79s  file=spike-file.txt   reply_after 75.0  -> allow hono
 hold=650 timeout=100000 elapsed=654s file=spike-file.txt   reply_after 650.0 -> allow honored
 ```
 - Timeout 5 s: the run moved on after about 5 s (total 10 s), the hook's answer is ignored, the tool call is denied by the default no-prompt flow.
-- Units are seconds. Values from 5 to 99999 were accepted without a schema error. The longest hold honored is 650 s; the 3700 s result is in the last section.
+- Units are seconds. Values from 5 to 99999 were accepted without a schema error. The longest hold honored is 650 s; the 3700 s run is still going and its result is not yet in this file.
 - Consequence for the design: a hook that times out is a deny, but with Claude's generic message. If drover wants "awaiting approval", it has to answer before the timeout, not after.
 
 ## 3. Deny with a reason
@@ -105,7 +105,7 @@ end   1793165694.01
 file:                                   # not created
 {"type":"assistant",...,"text":"The command was denied with the following message:\n\n```text\nRejected: Command execution was blocked by a hook: blocked by drover spike ..."}
 ```
-With HOLD=20: `start ...707.64`, `end ...727.64`, total run 30 s (10 to 15 s without the hold), so the call waits for the hook. Run with `--force --trust`: the hook still denies, so a hook outranks `--force`. The `agent_message` text was not what the model quoted; it quoted the `user_message`.
+With HOLD=20: `start ...707.64`, `end ...727.64`, total run 30.1 s, against 15.7 s with the 3 s hold, so the call waits for the hook. Run with `--force --trust`: the hook still denies, so a hook outranks `--force`. The `agent_message` text was not what the model quoted; it quoted the `user_message`.
 
 ## Not tested
 
