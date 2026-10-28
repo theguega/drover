@@ -14,6 +14,7 @@ use crate::{
 };
 
 pub mod claude;
+pub mod pi;
 
 // What a harness can do, declared and never guessed.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -71,7 +72,7 @@ pub struct Decision {
 // Where an answer to a permission goes: back to the waiting hook, or onto the process's stdin.
 pub enum Answer {
     Hook(Value),
-    #[expect(dead_code, reason = "pi answers on stdin, a later adapter")]
+    #[expect(dead_code, reason = "a harness that answers on stdin, a later adapter")]
     Stdin(String),
 }
 
@@ -111,6 +112,7 @@ pub trait Harness: Sync {
 pub fn get(name: HarnessName) -> Option<&'static dyn Harness> {
     match name {
         HarnessName::Claude => Some(&claude::Claude),
+        HarnessName::Pi => Some(&pi::Pi),
         _ => None,
     }
 }
