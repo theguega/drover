@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, path::Path, process::Stdio, time::Duration};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::{
@@ -15,6 +15,7 @@ use crate::{
 
 pub mod claude;
 pub mod pi;
+pub mod cursor;
 
 // What a harness can do, declared and never guessed.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -24,6 +25,8 @@ pub struct Caps {
     pub approvals: bool,
     pub usage: bool,
     pub hooks: bool,
+    // one process serves every turn; otherwise each turn is a process, resumed by session
+    pub warm: bool,
 }
 
 pub struct StartSpec<'a> {
@@ -35,6 +38,8 @@ pub struct StartSpec<'a> {
     pub hooks: &'a str,
     // seconds a permission hook may wait for drover's answer
     pub hook_timeout: u64,
+    // this binary, for a harness whose hooks run a command
+    pub drover: &'a str,
 }
 
 // A harness's output or hook, as drover reads it.
@@ -90,6 +95,7 @@ pub enum Abort {
 pub struct Parse {
     pub tools: HashMap<String, String>, // tool call id to tool name
     pub cost: f64,                      // the process's running total
+    pub last: String,                   // the final message of the turn so far
 }
 
 pub trait Harness: Sync {
@@ -102,8 +108,12 @@ pub trait Harness: Sync {
     fn abort(&self) -> Abort;
     // One stdout line of a headless process.
     fn events(&self, line: &str, p: &mut Parse) -> Vec<Out>;
-    // The settings that make the harness post its hooks to drover.
+    // The settings that make the harness post its hooks to drover: --settings, or the file below.
     fn hook_settings(&self, spec: &StartSpec) -> Value;
+    // Where a harness reads them from in the run's cwd, relative, instead of from its command line.
+    fn hook_file(&self, _profile: Profile) -> Option<&'static str> {
+        None
+    }
     // One hook the harness posted.
     fn hook(&self, body: &Value) -> Vec<Out>;
 }
@@ -113,7 +123,79 @@ pub fn get(name: HarnessName) -> Option<&'static dyn Harness> {
     match name {
         HarnessName::Claude => Some(&claude::Claude),
         HarnessName::Pi => Some(&pi::Pi),
+        HarnessName::Cursor => Some(&cursor::Cursor),
         _ => None,
+    }
+}
+
+fn backup(path: &Path) -> std::path::PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".drover");
+    name.into()
+}
+
+// Puts our hooks in `cwd/rel` next to the repo's own, which keep running. The repo's file waits
+// beside it as `rel.drover` until `restore`; installing again replaces only ours.
+pub fn install(cwd: &Path, rel: &str, ours: &Value) -> std::io::Result<()> {
+    let bad = |what: &str| std::io::Error::other(format!("{rel}: {what}"));
+    let path = cwd.join(rel);
+    let kept = backup(&path);
+    if !kept.exists() && path.exists() {
+        std::fs::rename(&path, &kept)?;
+    }
+    let mut merged: Value = match std::fs::read_to_string(&kept) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| bad(&e.to_string()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(e) => return Err(e),
+    };
+    let file = merged.as_object_mut().ok_or_else(|| bad("not an object"))?;
+    if let Some(version) = ours.get("version") {
+        file.entry("version").or_insert_with(|| version.clone());
+    }
+    let hooks = file
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| bad("hooks is not an object"))?;
+    for (event, entries) in ours
+        .get("hooks")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flatten()
+    {
+        let list = hooks
+            .entry(event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| bad(&format!("{event} is not a list")))?;
+        list.extend(entries.as_array().cloned().unwrap_or_default());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&merged)?)
+}
+
+// The repo's file back, or none if it had none. A file without `url` in it is not ours: an
+// install that failed first leaves the repo's own where it was.
+pub fn restore(cwd: &Path, rel: &str, url: &str) -> std::io::Result<()> {
+    let path = cwd.join(rel);
+    let kept = backup(&path);
+    if kept.exists() {
+        return std::fs::rename(&kept, &path);
+    }
+    match std::fs::read_to_string(&path) {
+        Ok(text) if text.contains(url) => {
+            std::fs::remove_file(&path)?;
+            // only an empty .cursor goes
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::remove_dir(dir);
+            }
+            Ok(())
+        }
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
     }
 }
 
@@ -291,6 +373,46 @@ mod tests {
         assert!(t.elapsed() >= Duration::from_secs(1));
         assert!(!signal(None, &ident, "0").await?);
         Ok(())
+    }
+
+    // A repo's own hooks keep running beside ours, and the run's end gives its file back as it was.
+    #[test]
+    fn install_keeps_the_repos_hooks_and_restore_returns_them() -> std::io::Result<()> {
+        let dir = std::env::temp_dir().join(format!("drover-install-{}", std::process::id()));
+        let file = dir.join(".cursor/hooks.json");
+        let ours = |cmd: &str| json!({"version": 1, "hooks": {"beforeShellExecution": [{"command": cmd}]}});
+        let url = "http://127.0.0.1:7341/hooks/r-00000a";
+        let commands = || -> std::io::Result<Vec<String>> {
+            let v: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
+            Ok(v.pointer("/hooks/beforeShellExecution")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|h| h.get("command")?.as_str().map(String::from))
+                .collect())
+        };
+
+        // no file of its own: ours alone, and gone again with the empty .cursor
+        install(&dir, ".cursor/hooks.json", &ours(url))?;
+        assert_eq!(commands()?, [url]);
+        restore(&dir, ".cursor/hooks.json", url)?;
+        assert!(!dir.join(".cursor").exists());
+
+        // the repo's own: kept, ours added, installing twice adds ours once, then the original byte for byte
+        let theirs =
+            "{\"version\":1,\"hooks\":{\"beforeShellExecution\":[{\"command\":\"./lint.sh\"}]}}";
+        std::fs::create_dir_all(dir.join(".cursor"))?;
+        std::fs::write(&file, theirs)?;
+        install(&dir, ".cursor/hooks.json", &ours("one"))?;
+        install(&dir, ".cursor/hooks.json", &ours(url))?;
+        assert_eq!(commands()?, ["./lint.sh", url]);
+        restore(&dir, ".cursor/hooks.json", url)?;
+        assert_eq!(std::fs::read_to_string(&file)?, theirs);
+
+        // a file that is not ours is left alone when nothing was installed
+        restore(&dir, ".cursor/hooks.json", url)?;
+        assert_eq!(std::fs::read_to_string(&file)?, theirs);
+        std::fs::remove_dir_all(&dir)
     }
 
     #[test]

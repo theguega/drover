@@ -90,6 +90,8 @@ pub struct App {
     // exported to local agents, so their drover calls reach this service
     state: PathBuf,
     port: u16,
+    // this binary, which a harness's hook commands run
+    exe: String,
     hook_timeout: u64,
     idle_kill: Duration,
     // the pane set changed: watchers wake
@@ -328,6 +330,8 @@ impl App {
             store,
             state,
             port: config.http_port,
+            exe: std::env::current_exe()
+                .map_or_else(|_| "drover".into(), |p| p.to_string_lossy().into_owned()),
             hook_timeout: config.hook_timeout,
             idle_kill: Duration::from_secs(config.idle_kill),
             wake: Notify::new(),
@@ -431,6 +435,7 @@ impl App {
         self.emit(r, kind, data)?;
         self.save(r)?;
         self.forget_calls(&r.id);
+        self.restore_hooks(r);
         let proc = locked(&self.procs).remove(&r.id);
         if let (Some(p), Some(me)) = (proc, self.me.upgrade()) {
             let id = r.id.clone();
@@ -564,7 +569,7 @@ impl App {
             } => self.cmd_wait(from, parent, timeout).await,
             Cmd::Goal { op } => self.cmd_goal(from, op),
             Cmd::Escalate { text } => self.cmd_escalate(from, &text).await,
-            Cmd::Watch { .. } | Cmd::Serve => bail!("not a request"),
+            Cmd::Watch { .. } | Cmd::Serve | Cmd::Hook { .. } => bail!("not a request"),
         }
     }
 
@@ -748,7 +753,7 @@ impl App {
     }
 
     fn spec<'a>(
-        &self,
+        &'a self,
         r: &'a Run,
         asked: &'a Value,
         hooks: &'a str,
@@ -761,6 +766,33 @@ impl App {
             resume,
             hooks,
             hook_timeout: self.hook_timeout,
+            drover: &self.exe,
+        }
+    }
+
+    // For a harness that reads its hooks from a file in the cwd: ours, until the run ends.
+    fn install_hooks(&self, r: &Run) -> Result<()> {
+        let harness = Self::harness(r)?;
+        let Some(rel) = harness.hook_file(r.profile) else {
+            return Ok(());
+        };
+        if self.host(&r.machine)?.ssh().is_some() {
+            bail!(
+                "{} reads its hooks from a file: not on a remote yet",
+                r.harness.as_str()
+            );
+        }
+        let (asked, hooks) = (self.asked(r)?, self.hook_url(&r.id));
+        let ours = harness.hook_settings(&self.spec(r, &asked, &hooks, None));
+        harness::install(&r.cwd, rel, &ours).map_err(|e| err!("{}: {e}", r.cwd.join(rel).display()))
+    }
+
+    fn restore_hooks(&self, r: &Run) {
+        let Some(rel) = Self::harness(r).ok().and_then(|h| h.hook_file(r.profile)) else {
+            return;
+        };
+        if let Err(e) = harness::restore(&r.cwd, rel, &self.hook_url(&r.id)) {
+            eprintln!("run {}: {e}", r.id);
         }
     }
 
@@ -773,6 +805,7 @@ impl App {
         };
         run.cwd = PathBuf::from(&wt.path);
         self.save(run)?;
+        self.install_hooks(run)?;
         self.wake.notify_waiters();
         let (asked, hooks) = (self.asked(run)?, self.hook_url(&run.id));
         let argv = harness.start(&self.spec(run, &asked, &hooks, None));
@@ -874,6 +907,7 @@ impl App {
             }
         };
         self.save(run)?;
+        self.install_hooks(run)?;
         let prompt = self
             .asked(run)?
             .get("prompt")
@@ -900,7 +934,8 @@ impl App {
         let harness = Self::harness(r)?;
         match &r.mode {
             Mode::Headless => {
-                let warm = locked(&self.procs).contains_key(&r.id);
+                // a process that took one prompt and ended may not have been seen to yet
+                let warm = harness.caps().warm && locked(&self.procs).contains_key(&r.id);
                 if !warm && r.session.is_some() && !harness.caps().resume {
                     bail!(
                         "{} cannot resume its session: start a new run",
@@ -945,7 +980,7 @@ impl App {
             .map_err(|e| err!("{}: {e}", argv.first().map_or("", String::as_str)))?;
         let id = self.next_proc.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(write_lines(sp.stdin, rx));
+        tokio::spawn(write_lines(sp.stdin, rx, !harness.caps().warm));
         let (known, ident) = watch::channel(None);
         let me = self
             .me
@@ -1745,6 +1780,7 @@ impl App {
                 pane: Some(wt.pane_id.clone()),
             };
             let argv = harness.start(&self.spec(&r, &asked, &hooks, Some(&session)));
+            self.install_hooks(&r)?;
             r.phase = Phase::Idle;
             r.owner = Owner::User;
             self.save(&r)?;
@@ -2000,10 +2036,11 @@ fn keep_tail(s: &mut String, max: usize) {
     s.drain(..cut);
 }
 
-async fn write_lines(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
+// `once`: one prompt per process, which reads its stdin to EOF, so the stream closes after it.
+async fn write_lines(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>, once: bool) {
     while let Some(mut line) = rx.recv().await {
         line.push('\n');
-        if stdin.write_all(line.as_bytes()).await.is_err() {
+        if stdin.write_all(line.as_bytes()).await.is_err() || once {
             return;
         }
     }
@@ -3071,7 +3108,7 @@ pub(crate) mod tests {
         let app = app()?;
         for line in [
             "run --scratch --prompt go",
-            "run --harness cursor --repo r --branch b --prompt go",
+            "run --harness codex --repo r --branch b --prompt go",
         ] {
             assert_eq!(
                 failure(request(&app, None, line).await).as_deref(),
