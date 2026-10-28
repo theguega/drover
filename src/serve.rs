@@ -214,8 +214,8 @@ impl App {
             Cmd::Show { run } => self.cmd_show(&run),
             Cmd::Send { run, text } => self.cmd_send(from, &run, &text).await,
             Cmd::ApproveRun { run } => self.cmd_approve_run(from, &run).await,
-            Cmd::DropRun { run } => self.cmd_drop_run(from, &run),
-            Cmd::Attach { run } => self.cmd_attach(from, &run),
+            Cmd::DropRun { run } => self.cmd_drop_run(from, &run).await,
+            Cmd::Attach { run } => self.cmd_attach(from, &run).await,
             Cmd::Screen { run, lines } => self.cmd_screen(&run, lines).await,
             Cmd::Keys { run, keys } => self.cmd_keys(from, &run, &keys).await,
             Cmd::Stop { run } => self.cmd_keys(from, &run, &["esc".into()]).await,
@@ -308,6 +308,8 @@ impl App {
         run.phase = Phase::Starting;
         self.save(run)?;
         if let Err(e) = self.open(run, repo, branch).await {
+            // the watcher may have moved it on once its pane was known
+            let _turn = self.turns.lock().await;
             self.end(
                 run,
                 Phase::Failed,
@@ -518,6 +520,8 @@ impl App {
 
     async fn cmd_approve_run(&self, from: Option<&RunId>, id: &RunId) -> Result<Value> {
         Self::by_you(from, "approve runs")?;
+        // pending to starting under the lock, so a second approve finds it started
+        let turn = self.turns.lock().await;
         let mut r = self.get(id)?;
         if r.phase != Phase::Pending {
             return Err(Failure::new(
@@ -528,12 +532,17 @@ impl App {
         }
         let asked = self.store.last(id, Kind::Requested)?.unwrap_or_default();
         let name = |k: &str| Name::parse(asked.get(k).and_then(Value::as_str).unwrap_or_default());
-        self.start(&mut r, &name("repo")?, &name("branch")?).await?;
+        let (repo, branch) = (name("repo")?, name("branch")?);
+        r.phase = Phase::Starting;
+        self.save(&r)?;
+        drop(turn);
+        self.start(&mut r, &repo, &branch).await?;
         Ok(self.brief(&r))
     }
 
-    fn cmd_drop_run(&self, from: Option<&RunId>, id: &RunId) -> Result<Value> {
+    async fn cmd_drop_run(&self, from: Option<&RunId>, id: &RunId) -> Result<Value> {
         Self::by_you(from, "drop runs")?;
+        let _turn = self.turns.lock().await;
         let r = self.get(id)?;
         if r.phase != Phase::Pending {
             return Err(Failure::new(
@@ -547,8 +556,9 @@ impl App {
         Ok(json!({ "run": id, "dropped": true }))
     }
 
-    fn cmd_attach(&self, from: Option<&RunId>, id: &RunId) -> Result<Value> {
+    async fn cmd_attach(&self, from: Option<&RunId>, id: &RunId) -> Result<Value> {
         Self::by_you(from, "attach")?;
+        let _turn = self.turns.lock().await;
         let mut r = self.get(id)?;
         let (h, pane) = self.pane_of(&r)?;
         let noop = (r.owner == Owner::User).then_some("yours already");
@@ -580,6 +590,7 @@ impl App {
         remove: bool,
         entry: Option<&str>,
     ) -> Result<Value> {
+        let _turn = self.turns.lock().await;
         let mut r = self.get(id)?;
         // closing is not typing: you may close any run
         if from.is_some() {
@@ -1170,6 +1181,56 @@ mod tests {
         let again = lock(&dir);
         std::fs::remove_dir_all(&dir)?;
         assert!(again.is_ok());
+        Ok(())
+    }
+
+    // The watcher saves its copy of a run while it holds the turns lock. attach and done wait for
+    // it, so their change lands after and is the one that stays.
+    #[tokio::test]
+    async fn a_command_waits_for_the_watcher_and_wins() -> Result<()> {
+        let app = Arc::new(app()?);
+        let mut crew = run("r-00000c", Role::Crew)?;
+        crew.owner = Owner::Run("r-00000a".parse()?);
+        app.store.save(&crew)?;
+        // on a machine this service does not drive, so done touches no herdr
+        let mut task = run("r-00000d", Role::Task)?;
+        task.machine = "elsewhere".parse()?;
+        app.store.save(&task)?;
+
+        let turn = app.turns.lock().await;
+        let (a, b) = (Arc::clone(&app), Arc::clone(&app));
+        let attach = tokio::spawn(async move {
+            a.act(
+                None,
+                Cmd::Attach {
+                    run: "r-00000c".parse()?,
+                },
+            )
+            .await
+        });
+        let done = tokio::spawn(async move {
+            let cmd = Cmd::Done {
+                run: "r-00000d".parse()?,
+                remove: false,
+                entry: None,
+            };
+            b.act(None, cmd).await
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!attach.is_finished() && !done.is_finished());
+        // the watcher's stale copies: still the mate's, still working
+        crew.phase = Phase::Working;
+        task.phase = Phase::Working;
+        app.store.save(&crew)?;
+        app.store.save(&task)?;
+        drop(turn);
+
+        attach.await??;
+        done.await??;
+        let crew = app.store.get(&crew.id)?;
+        let task = app.store.get(&task.id)?;
+        assert!(crew.is_some_and(|r| r.owner == Owner::User));
+        assert!(task.is_some_and(|r| r.phase == Phase::Done && r.ended_at.is_some()));
         Ok(())
     }
 
