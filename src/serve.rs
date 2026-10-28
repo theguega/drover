@@ -590,29 +590,32 @@ impl App {
         remove: bool,
         entry: Option<&str>,
     ) -> Result<Value> {
-        let _turn = self.turns.lock().await;
-        let mut r = self.get(id)?;
-        // closing is not typing: you may close any run
-        if from.is_some() {
-            Self::owned(&r, from)?;
-        }
-        match r.phase {
-            Phase::Pending => {
-                return Err(Failure::new(
-                    format!("{id} is pending"),
-                    format!("drover drop-run {id}"),
-                )
-                .into());
+        // checked under the lock, closed without it: an unreachable remote holds up no watcher
+        let r = {
+            let _turn = self.turns.lock().await;
+            let r = self.get(id)?;
+            // closing is not typing: you may close any run
+            if from.is_some() {
+                Self::owned(&r, from)?;
             }
-            p if p.ended() => {
-                return Err(Failure::new(
-                    format!("{id} is {} already", p.as_str()),
-                    format!("drover show {id}"),
-                )
-                .into());
+            match r.phase {
+                Phase::Pending => {
+                    return Err(Failure::new(
+                        format!("{id} is pending"),
+                        format!("drover drop-run {id}"),
+                    )
+                    .into());
+                }
+                p if p.ended() => {
+                    return Err(Failure::new(
+                        format!("{id} is {} already", p.as_str()),
+                        format!("drover show {id}"),
+                    )
+                    .into());
+                }
+                _ => r,
             }
-            _ => {}
-        }
+        };
         // the entry is logged before anything closes, so a failed log loses nothing
         if let Some(entry) = entry {
             brain_log(entry).await?;
@@ -633,13 +636,29 @@ impl App {
                     (false, Role::Mate) => herdr::close_pane(h, &pane).await,
                     (false, _) => herdr::close(h, &ws).await,
                 };
-                if let Err(e) = closed {
-                    notes.push(format!("close failed: {e}"));
+                // a pane that is gone already needs no closing; any other failure keeps the run,
+                // or its agent would go on in a pane nobody follows
+                if let Err(e) = closed
+                    && !herdr::panes(h).await.is_ok_and(|p| !p.contains(&pane))
+                {
+                    let logged = match entry {
+                        Some(_) => "; its entry is logged already",
+                        None => "",
+                    };
+                    return Err(Failure::new(
+                        format!("{id} is not closed: {e}{logged}"),
+                        format!("drover done {id}, once {} answers", h.name),
+                    )
+                    .into());
                 }
             }
-            (Err(e), ..) => notes.push(e.to_string()),
+            // a machine this service does not drive has nothing it could close
+            (Err(e), ..) => notes.push(format!("{e}: nothing closed")),
             _ => {}
         }
+        let _turn = self.turns.lock().await;
+        // the watcher may have seen the pane go meanwhile; this end, with its entry, is the record
+        let mut r = self.get(id)?;
         self.end(
             &mut r,
             Phase::Done,
@@ -1231,6 +1250,86 @@ mod tests {
         let task = app.store.get(&task.id)?;
         assert!(crew.is_some_and(|r| r.owner == Owner::User));
         assert!(task.is_some_and(|r| r.phase == Phase::Done && r.ended_at.is_some()));
+        Ok(())
+    }
+
+    // A fake herdr: every close fails, and pane.list names `panes`.
+    fn fake_herdr(path: &Path, panes: &'static [&'static str]) -> Result<()> {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let listener = tokio::net::UnixListener::bind(path)?;
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (read, mut write) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(read).read_line(&mut line).await.is_err() {
+                    continue;
+                }
+                let req: Value = serde_json::from_str(&line).unwrap_or_default();
+                let reply = match req.get("method").and_then(Value::as_str) {
+                    Some("pane.list") => {
+                        let panes: Vec<Value> =
+                            panes.iter().map(|p| json!({ "pane_id": p })).collect();
+                        json!({ "id": req.get("id"), "result": { "panes": panes } })
+                    }
+                    _ => {
+                        json!({ "id": req.get("id"), "error": { "code": "boom", "message": "close refused" } })
+                    }
+                };
+                let _ = write.write_all(format!("{reply}\n").as_bytes()).await;
+            }
+        });
+        Ok(())
+    }
+
+    // done ends a run only once its pane is closed, or gone already.
+    #[tokio::test]
+    async fn done_keeps_a_run_whose_pane_did_not_close() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("drover-done-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let cases: [(&str, Option<&'static [&'static str]>, bool); 3] = [
+            ("r-0000a1", Some(&["w1:p1"]), false), // herdr refuses, the pane is still there
+            ("r-0000a2", None, false),             // herdr does not answer
+            ("r-0000a3", Some(&[]), true),         // the pane is gone already
+        ];
+        for (n, (id, panes, closes)) in cases.into_iter().enumerate() {
+            let socket = dir.join(format!("h{n}.sock"));
+            if let Some(panes) = panes {
+                fake_herdr(&socket, panes)?;
+            }
+            let mut app = app()?;
+            app.hosts = vec![Host {
+                link: Arc::new(socket::Link::at(socket)),
+                ..Host::new("box".into(), Reach::Local, None)
+            }];
+            app.store.save(&run(id, Role::Task)?)?;
+            let out = app
+                .act(
+                    None,
+                    Cmd::Done {
+                        run: id.parse()?,
+                        remove: true,
+                        entry: None,
+                    },
+                )
+                .await;
+            let r = app.store.get(&id.parse()?)?;
+            if closes {
+                assert!(
+                    out.is_ok() && r.is_some_and(|r| r.phase == Phase::Done),
+                    "{id}"
+                );
+            } else {
+                assert!(
+                    failure(out).is_some_and(|e| e.starts_with(&format!("{id} is not closed:"))),
+                    "{id}"
+                );
+                assert!(
+                    r.is_some_and(|r| r.phase == Phase::Idle && r.ended_at.is_none()),
+                    "{id}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir)?;
         Ok(())
     }
 

@@ -128,6 +128,7 @@ struct Relay {
 /// Requests to one machine's herdr server.
 pub struct Link {
     host: Option<String>, // ssh name of a remote, none for this machine
+    socket: PathBuf,      // this machine's herdr socket
     relay: Mutex<Option<Arc<Relay>>>,
     next: AtomicU64,
 }
@@ -137,8 +138,18 @@ impl Link {
     pub fn new(host: Option<String>) -> Self {
         Self {
             host,
+            socket: socket_path(),
             relay: Mutex::new(None),
             next: AtomicU64::new(1),
+        }
+    }
+
+    // A local link to another socket, such as a fake herdr in a test.
+    #[cfg(test)]
+    pub fn at(socket: PathBuf) -> Self {
+        Self {
+            socket,
+            ..Self::new(None)
         }
     }
 
@@ -173,7 +184,7 @@ impl Link {
 
     async fn send(&self, id: &str, line: &str) -> Result<Wire> {
         let Some(host) = &self.host else {
-            let mut s = UnixStream::connect(socket_path()).await?;
+            let mut s = UnixStream::connect(&self.socket).await?;
             s.write_all(line.as_bytes()).await?;
             let mut lines = BufReader::new(s).lines();
             return Ok(serde_json::from_str(
