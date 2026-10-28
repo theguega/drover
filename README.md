@@ -9,9 +9,10 @@ drover calls no model itself. The agents are the CLIs you already use.
 - **Runs:** `drover run` opens a worktree and starts the agent in a herdr pane, or `--headless` over its stream. drover follows it through the agent's own hooks and stream, and keeps its phase, owner, usage and last reply in `~/.local/state/drover/drover.db`.
 - **Approvals:** a tool call that needs a permission waits for `drover approve` or `drover deny --reason`, in both modes.
 - **Nothing runs without you:** a run another agent asks for (`--parent`) waits as `pending` until you `drover approve-run` it.
+- **Mates:** a mate is a run that follows the `mates` skill: it plans a goal graph, requests crew, hears them through `drover wait`, approves their tool calls, and asks you only through `drover escalate`.
 - **`drover-wt`:** worktrees for herdr, from a branch, a new name, or a GitHub pull request (`#123`).
 - **Remotes:** drive herdr servers on other machines over ssh from the same desk.
-- **A skill:** `skills/drover` teaches agents to use all of this. See [Skill](#skill).
+- **Skills:** `skills/drover` teaches agents to use all of this, `skills/mates` is the dispatch playbook for a mate. See [Skill](#skill).
 
 The design, with what is built and what is still planned, is in [`DESIGN.md`](DESIGN.md).
 
@@ -48,6 +49,8 @@ drover approve r-1a2b3c p1   # allow the tool call it waits on; deny r-1a2b3c p1
 drover attach r-1a2b3c       # a headless run reopens in a pane, as yours
 drover approve-run r-4d5e6f  # start a run an agent asked for; drop-run removes it
 drover done r-1a2b3c --remove --entry "what, why, outcome"   # brain log, close, remove the worktree
+drover run --role mate --repo myrepo --branch mate-x --headless --prompt "the goal"   # a mate, see Mates
+drover send r-7a8b9c "the answer"   # to a mate that escalated: `drover` and `ls --phase needs` show its question
 drover snapshot              # open runs as JSON (--all for every run)
 drover watch --run r-1a2b3c  # its events as JSON lines; the same stream is GET http://127.0.0.1:7341/events
 ```
@@ -66,14 +69,26 @@ drover-wt --help             # full usage
 
 A new checkout is ready to work in. Untracked files of the main clone that match `.worktreeinclude` (gitignore syntax, e.g. `.env`, `target/`, `node_modules/`) are copied over, whole directories as copy-on-write clones where the filesystem supports it (APFS, Btrfs, XFS). Then an executable `.worktree-setup` in the repo runs in the new checkout, with the main clone's path as `$1`, for steps like `uv sync` or `direnv allow`.
 
-## Skill
+## Mates
 
-`skills/drover` is an [Agent Skills](https://agentskills.io) folder: a `SKILL.md` with a name and a description, and nothing else. It documents this CLI for agents, and it points at `drover help` for the full reference, so it doesn't go stale.
-
-To use it, copy the folder into the skills directory of your agent, the same way you'd install any skill:
+A mate dispatches crew instead of writing code. You start it as a run with its role and a goal:
 
 ```sh
-cp -r skills/drover ~/.agents/skills/
+drover run --role mate --repo myrepo --branch mate-x --headless --model sonnet --prompt "ship retries in the client, docs included"
+```
+
+The mate follows `skills/mates`, which must be installed for its agent (see [Skill](#skill)), and runs `drover` commands from its Bash tool with `DROVER_RUN` set to its id: allow `Bash(drover:*)` in that agent's permissions, or each call asks you. It writes a goal graph (`drover goal set --file goal.json`: nodes with a check each, edges, and per-node status, round, crew and review), and starts crew with `drover run --parent $DROVER_RUN …`. Those wait in `pending` until you `drover approve-run` them. It hears them with `drover wait --any --parent $DROVER_RUN`, and answers their tool calls itself: a crew run's approvals go to its mate, not to you. The graph is stored with the mate's run (`drover show <mate>`) and streamed as `goal` events.
+
+The mate speaks to you only with `drover escalate`. The question shows in `drover` and in `drover ls --phase needs`, and the mate stays in `needs` until you answer with `drover send <mate> <text>`. `drover attach <run>` takes any run over.
+
+## Skill
+
+`skills/drover` and `skills/mates` are [Agent Skills](https://agentskills.io) folders: a `SKILL.md` with a name and a description, and nothing else. `drover` documents this CLI for agents, and points at `drover help` for the full reference, so it doesn't go stale. `mates` is the mate's dispatch playbook.
+
+To use them, copy the folders into the skills directory of your agent, the same way you'd install any skill:
+
+```sh
+cp -r skills/drover skills/mates ~/.agents/skills/
 ```
 
 Keep your copy in your own dotfiles if you want it on every machine. The installer doesn't touch the skills directory.
@@ -113,6 +128,8 @@ Your desk is yours: keybindings, shell aliases, `REPOS_ROOT` and `HERDR_WORKTREE
 
 ```sh
 cargo test && cargo clippy --all-targets
+scripts/live-test.sh         # headless, approvals, pane and attach, against a real claude (haiku) and herdr
+scripts/live-test-mates.sh   # a mate's crew, wait, goal and escalate, the same way
 ```
 
 The design, with what is built and what is planned, is in [`DESIGN.md`](DESIGN.md). The code's rules and layout are in [`AGENTS.md`](AGENTS.md).

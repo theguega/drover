@@ -2,7 +2,7 @@
 
 drover runs coding agents. It starts them in git worktrees, on this machine or over ssh. It runs them either in a herdr pane, for you to pair with, or headless, for the dashboard and for other agents. It carries their approvals and streams their events. It calls no model and holds no knowledge: when a task ends, its journal entry goes to `brain log`.
 
-Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude adapter (pane and headless), events and SSE, approvals, profiles, per-run usage. Not yet: cursor and pi, mates (`goal`, `wait`, `escalate`), plan-window usage, the dashboard.
+Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude adapter (pane and headless), events and SSE, approvals, profiles, per-run usage. Mates: `--role mate`, `goal`, `wait`, `escalate`. Not yet: cursor and pi, plan-window usage, the dashboard.
 
 ## What changes from v1
 
@@ -155,7 +155,7 @@ drover wait --any --parent $DROVER_RUN
 drover escalate --text "need a decision on X"   # becomes a needs event to you
 ```
 
-The goal graph is stored with the mate's run and streamed as `goal` events. That's what the dashboard's drover monitor draws (U6). drover doesn't interpret the graph. It stores it and carries it.
+The goal graph is stored with the mate's run and streamed as `goal` events. That's what the dashboard's drover monitor draws (U6). drover doesn't interpret the graph. It stores it and carries it. Shape: `{goal, done_when?, nodes: [{id, check, task?, model?, review: none|code|adversarial, status: todo|working|review|pass|blocked, round, crew}], edges: [[before, after]]}`, checked once by `goal set`. A mate is started by you with `drover run --role mate`; its first prompt names the skill. `wait` keeps a cursor per calling run; `escalate` puts the run in `needs` with the question until you `send` the answer.
 
 ## Usage (D12)
 

@@ -24,9 +24,10 @@ use tokio::{
 
 use crate::{
     Result,
-    cli::{Cmd, Ls, Start},
+    cli::{Cmd, GoalOp, Ls, Start},
     config::{Config, Paths},
     control::{self, Failure},
+    goal::{Graph, Update},
     harness::{self, Abort, Answer, Decision, Harness, Ident, Out, Parse, StartSpec},
     herdr::{self, Code, Host, Name, PaneId, Reach, SessionId},
     http, migrate,
@@ -54,6 +55,8 @@ const EXPIRED_FOR: Duration = Duration::from_secs(86_400);
 const EXPIRED_MAX: usize = 16;
 // Appended to a crewmate's first prompt: the end of each turn is what its mate reads.
 const CREW: &str = "You are a crewmate. Your mate reads the end of each of your turns. The brief above is your only source of facts: do not assume what it does not say. When blocked or unsure, stop and end your turn with a line starting QUESTION:. When the check in the brief passes, end your turn with DONE: and its output. Do not change the check. Do not end your turn while a check or background job you started still runs: wait for it, or end with a line starting RUNNING: and what runs.";
+// Appended to a mate's first prompt, where the dispatch playbook is the mates skill.
+const MATE: &str = "You are a mate: you dispatch crew and write no code. Follow the `mates` skill. Your run id is $DROVER_RUN.";
 // The reader profile's cwd holds only this.
 const READER_AGENTS: &str = "You are a reader. You can read files and run `brain find`, `brain get`, `brain pages` and `brain code`. You cannot change anything, and you have no network. Answer from what you read.\n";
 
@@ -194,6 +197,25 @@ fn not_implemented() -> crate::Error {
 #[must_use]
 fn head(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
+}
+
+// An event as `wait` prints it, one flat row: what the run said or asked.
+fn wait_row(e: &Value) -> Value {
+    let text = |k: &str| {
+        e.pointer(&format!("/data/{k}"))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let said = ["text", "escalation", "error", "by"]
+        .iter()
+        .map(|k| text(k))
+        .find(|v| !v.is_null())
+        .unwrap_or_default();
+    json!({
+        "run": e.get("run"), "kind": e.get("kind"), "text": said,
+        "perm": text("perm"), "tool": text("tool"),
+        "input": e.pointer("/data/input").map_or(Value::Null, |i| call(i).to_string().into()),
+    })
 }
 
 // A run as `ls` lists it.
@@ -381,6 +403,11 @@ impl App {
         self.store.save(r)
     }
 
+    // A tool call of the run waits on an answer.
+    fn has_waiting(&self, id: &RunId) -> bool {
+        locked(&self.waiting).keys().any(|(run, _)| run == id)
+    }
+
     // Stores the event and streams it; `requested` is only stored.
     fn emit(&self, r: &Run, kind: Kind, data: Value) -> Result<()> {
         let _order = locked(&self.emitting);
@@ -530,7 +557,13 @@ impl App {
             }
             Cmd::Snapshot { all } => self.snapshot(all),
             Cmd::Home => self.home(),
-            Cmd::Wait { .. } | Cmd::Goal { .. } | Cmd::Escalate { .. } => Err(not_implemented()),
+            Cmd::Wait {
+                any: _,
+                parent,
+                timeout,
+            } => self.cmd_wait(from, parent, timeout).await,
+            Cmd::Goal { op } => self.cmd_goal(from, op),
+            Cmd::Escalate { text } => self.cmd_escalate(from, &text).await,
             Cmd::Watch { .. } | Cmd::Serve => bail!("not a request"),
         }
     }
@@ -582,6 +615,25 @@ impl App {
             self.get(p)?;
         }
         let pending = parent.is_some();
+        let role = match (parent.is_some(), s.role) {
+            (true, None | Some(Role::Crew)) => Role::Crew,
+            (true, Some(r)) => {
+                return Err(Failure::new(
+                    format!("a run asked for by a run is crew, not {}", r.as_str()),
+                    "drover run without --role",
+                )
+                .into());
+            }
+            (false, None | Some(Role::Task)) => Role::Task,
+            (false, Some(Role::Mate)) => Role::Mate,
+            (false, Some(r)) => {
+                return Err(Failure::new(
+                    format!("--role {} is not something you start", r.as_str()),
+                    "drover run --role mate, or without --role",
+                )
+                .into());
+            }
+        };
         let id = loop {
             let id = RunId::random();
             if self.store.get(&id)?.is_none() {
@@ -598,7 +650,7 @@ impl App {
             } else {
                 Mode::Pane { pane: None }
             },
-            role: if pending { Role::Crew } else { Role::Task },
+            role,
             owner: parent.clone().map_or(Owner::User, Owner::Run),
             parent,
             profile: s.profile,
@@ -614,6 +666,7 @@ impl App {
         };
         let prompt = match run.role {
             Role::Crew => format!("{}\n\n{CREW}", s.prompt),
+            Role::Mate => format!("{}\n\n{MATE}", s.prompt),
             _ => s.prompt,
         };
         self.save(&run)?;
@@ -1003,7 +1056,10 @@ impl App {
                     if error && let Value::Object(d) = &mut data {
                         d.insert("error".into(), true.into());
                     }
-                    r.phase = Phase::Idle;
+                    // an escalation still waits for your answer after the turn that asked it
+                    if !(r.phase == Phase::Needs && !self.has_waiting(&r.id)) {
+                        r.phase = Phase::Idle;
+                    }
                     self.emit(&r, Kind::Reply, data)?;
                     self.idle(&r.id);
                     // a late approval holds for the turn it started, and this one has ended
@@ -1266,6 +1322,20 @@ impl App {
                     format!("drover keys {id} <keys>"),
                 ]
             }
+            Phase::Needs
+                if self
+                    .store
+                    .last(id, Kind::Needs)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|d| d.get("escalation").is_some())
+                    && !self.has_waiting(id) =>
+            {
+                vec![
+                    format!("drover show {id}"),
+                    format!("drover send {id} <your answer>"),
+                ]
+            }
             Phase::Needs => vec![
                 format!("drover show {id}"),
                 format!("drover approve {id} <perm>"),
@@ -1312,6 +1382,16 @@ impl App {
         )
     }
 
+    // What an escalating run asked you.
+    fn ask(&self, id: &RunId) -> Option<Value> {
+        self.store
+            .last(id, Kind::Needs)
+            .ok()
+            .flatten()?
+            .get("escalation")
+            .cloned()
+    }
+
     fn cmd_show(&self, id: &RunId) -> Result<Value> {
         let r = self.get(id)?;
         let children: Vec<RunId> = self.store.children(id)?.into_iter().map(|c| c.id).collect();
@@ -1338,6 +1418,8 @@ impl App {
             "caps": harness::get(r.harness).map(|h| h.caps()),
             "usage": r.usage, "created_at": r.created_at, "ended_at": r.ended_at,
             "children": children, "perms": perms, "reply": reply,
+            "ask": (r.phase == Phase::Needs).then(|| self.ask(&r.id)).flatten(),
+            "goal": self.store.goal(id)?,
         });
         if let (Value::Object(out), Value::Object(fields)) = (&mut out, fields) {
             // help stays last
@@ -1400,10 +1482,14 @@ impl App {
         if r.mode != Mode::Headless {
             self.pane_of(&r)?;
         }
-        // Claude queues a prompt sent mid-turn, so a turn still running refuses it
+        // Claude queues a prompt sent mid-turn, so a turn still running refuses it. A run that
+        // escalated and ended its turn is in needs, with no call waiting: your answer is its prompt.
+        let escalated = r.phase == Phase::Needs && !self.has_waiting(id);
+        let turn_runs = locked(&self.procs).get(id).is_some_and(|p| p.busy);
         match r.phase {
             Phase::Idle => {}
-            Phase::Working => {
+            Phase::Needs if escalated && !turn_runs => {}
+            Phase::Working | Phase::Needs if escalated || r.phase == Phase::Working => {
                 return Err(Failure::new(
                     format!("{id} is working: wait for its reply"),
                     format!("drover watch --run {id}"),
@@ -1461,6 +1547,166 @@ impl App {
         }
         self.store.delete(id)?;
         Ok(json!({ "run": id, "dropped": true }))
+    }
+
+    // The mate's goal graph: replaced, or one node changed. The event carries the whole graph.
+    fn cmd_goal(&self, from: Option<&RunId>, op: GoalOp) -> Result<Value> {
+        let Some(id) = from else {
+            return Err(Failure::new(
+                "a goal belongs to a run: you have none",
+                "run it from a mate, with $DROVER_RUN set",
+            )
+            .into());
+        };
+        let r = self.get(id)?;
+        let (node, graph) = match op {
+            GoalOp::Set {
+                graph: Some(text), ..
+            } => (None, Graph::parse(&text)?),
+            GoalOp::Set { graph: None, .. } => bail!("goal set: no file text"),
+            GoalOp::Node {
+                id: node,
+                status,
+                round,
+                crew,
+                review,
+            } => {
+                let mut graph = self
+                    .store
+                    .goal(id)?
+                    .map(serde_json::from_value::<Graph>)
+                    .transpose()?
+                    .ok_or_else(|| {
+                        Failure::new(
+                            format!("{id} has no goal"),
+                            "drover goal set --file goal.json",
+                        )
+                    })?;
+                graph.update(
+                    &node,
+                    Update {
+                        status,
+                        round,
+                        crew,
+                        review,
+                    },
+                )?;
+                (Some(node), graph)
+            }
+        };
+        let graph = serde_json::to_value(&graph)?;
+        self.store.set_goal(id, &graph)?;
+        self.emit(&r, Kind::Goal, json!({ "node": node, "graph": graph }))?;
+        let nodes = graph.get("nodes").and_then(Value::as_array);
+        let changed = node.as_deref().and_then(|n| {
+            nodes?
+                .iter()
+                .find(|x| x.get("id").and_then(Value::as_str) == Some(n))
+        });
+        Ok(match changed {
+            Some(n) => json!({ "run": id, "node": n, "help": [format!("drover show {id}")] }),
+            None => {
+                json!({ "run": id, "nodes": nodes.map_or(0, Vec::len), "help": [format!("drover show {id}")] })
+            }
+        })
+    }
+
+    // A question for you, from the calling run. It stays in needs until you answer with `send`.
+    async fn cmd_escalate(&self, from: Option<&RunId>, text: &str) -> Result<Value> {
+        let Some(id) = from else {
+            return Err(Failure::new(
+                "you are who escalations are for",
+                "drover send <run> <text>",
+            )
+            .into());
+        };
+        let _turn = self.turns.lock().await;
+        let mut r = self.get(id)?;
+        if !r.phase.live() {
+            return Err(Failure::new(
+                format!("{id} is {}: it cannot escalate", r.phase.as_str()),
+                format!("drover show {id}"),
+            )
+            .into());
+        }
+        r.phase = Phase::Needs;
+        self.emit(&r, Kind::Needs, json!({ "escalation": text }))?;
+        self.save(&r)?;
+        Ok(json!({
+            "run": id, "escalated": true,
+            "help": ["end your turn: the answer arrives as your next prompt"],
+        }))
+    }
+
+    // The next reply, needs, done or failed of the caller's crew, after the last one it was given.
+    // A run's cursor is kept here, so a wait that timed out or was cut loses nothing; a
+    // call from you reads what comes after now.
+    async fn cmd_wait(
+        &self,
+        from: Option<&RunId>,
+        parent: Option<RunId>,
+        timeout: u64,
+    ) -> Result<Value> {
+        let parent = match (from, parent) {
+            (Some(f), Some(p)) if &p != f => {
+                return Err(Failure::new(
+                    format!("run {f} cannot wait on the crew of {p}"),
+                    "drover wait --any, or with --parent $DROVER_RUN",
+                )
+                .into());
+            }
+            (Some(f), _) => Some(f.clone()),
+            (None, p) => p,
+        };
+        let since = from.map(|f| self.store.wait_cursor(f)).transpose()?;
+        let mut feed = Feed::new(
+            self,
+            Filter {
+                since,
+                ..Filter::default()
+            },
+        )?;
+        let hits = async {
+            loop {
+                let hits: Vec<Value> = feed
+                    .next(self)
+                    .await?
+                    .into_iter()
+                    .filter(|e| {
+                        matches!(
+                            e.get("kind").and_then(Value::as_str),
+                            Some("reply" | "needs" | "done" | "failed")
+                        ) && parent.as_ref().is_none_or(|p| {
+                            e.get("parent").and_then(Value::as_str) == Some(p.as_str())
+                        })
+                    })
+                    .collect();
+                if !hits.is_empty() {
+                    return Ok::<_, crate::Error>(hits);
+                }
+            }
+        };
+        let hits = tokio::time::timeout(Duration::from_secs(timeout), hits)
+            .await
+            .unwrap_or_else(|_| Ok(Vec::new()))?;
+        if let (Some(f), Some(last)) = (from, hits.last().and_then(|e| e.get("id")?.as_i64())) {
+            self.store.set_wait_cursor(f, last)?;
+        }
+        let mut help = vec![];
+        for e in &hits {
+            let run = e
+                .pointer("/run")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Some(perm) = e.pointer("/data/perm").and_then(Value::as_str) {
+                help.push(format!(
+                    "drover approve {run} {perm} | drover deny {run} {perm} --reason <why>"
+                ));
+            }
+        }
+        help.push("drover wait --any".to_string());
+        let events: Vec<Value> = hits.iter().map(wait_row).collect();
+        Ok(json!({ "events": events, "help": help }))
     }
 
     // A pane run becomes yours. A headless run's process stops, so two never share its session,
@@ -1697,7 +1943,13 @@ impl App {
         let needs: Vec<Value> = runs
             .iter()
             .filter(|r| matches!(r.phase, Phase::Pending | Phase::Needs))
-            .map(row)
+            .map(|r| {
+                let mut v = row(r);
+                if let (Value::Object(m), Some(ask)) = (&mut v, self.ask(&r.id)) {
+                    m.insert("ask".into(), ask);
+                }
+                v
+            })
             .collect();
         let mut help = Vec::new();
         if runs.iter().any(|r| r.phase == Phase::Pending) {
@@ -2074,6 +2326,88 @@ pub(crate) mod tests {
 
     fn phase(app: &App, id: &str) -> Option<Phase> {
         app.store.get(&id.parse().ok()?).ok()?.map(|r| r.phase)
+    }
+
+    // A mate's wait returns its crew's replies in order, each once; its goal and escalation are carried.
+    #[tokio::test]
+    async fn a_mate_hears_its_crew_and_asks_you() -> Result<()> {
+        let app = app()?;
+        let mate = run("r-00000a", Role::Mate)?;
+        app.store.save(&mate)?;
+        let mut crew = run("r-00000b", Role::Crew)?;
+        crew.parent = Some(mate.id.clone());
+        crew.owner = Owner::Run(mate.id.clone());
+        app.store.save(&crew)?;
+        let wait = || {
+            request(
+                &app,
+                Some("r-00000a"),
+                "wait --any --parent r-00000a --timeout 1",
+            )
+        };
+        let reply = |text: &str| app.emit(&crew, Kind::Reply, json!({ "text": text }));
+        reply("DONE: one")?;
+        reply("QUESTION: two")?;
+        app.emit(&mate, Kind::Reply, json!({ "text": "not its crew" }))?;
+        let got = wait().await?;
+        assert_eq!(
+            (
+                at(&got, "/events/0/text"),
+                at(&got, "/events/1/text"),
+                at(&got, "/events").as_array().map(Vec::len)
+            ),
+            (&json!("DONE: one"), &json!("QUESTION: two"), Some(2))
+        );
+        // nothing twice, and a reply that lands while it waits is not lost
+        let late = async {
+            sleep(Duration::from_millis(100)).await;
+            reply("DONE: three")
+        };
+        let (got, late) = tokio::join!(wait(), late);
+        late?;
+        assert_eq!(at(&got?, "/events/0/text"), "DONE: three");
+        let got = wait().await?;
+        assert_eq!(at(&got, "/events").as_array().map(Vec::len), Some(0));
+        let theirs = request(&app, Some("r-00000b"), "wait --parent r-00000a").await;
+        assert!(failure(theirs).is_some_and(|e| e.contains("cannot wait on the crew of")));
+
+        let file = r#"{"goal":"g","nodes":[{"id":"docs","check":"ls"}]}"#;
+        let set = crate::cli::Cmd::Goal {
+            op: crate::cli::GoalOp::Set {
+                file: String::new(),
+                graph: Some(file.into()),
+            },
+        };
+        app.act(Some(mate.id.clone()), set).await?;
+        request(
+            &app,
+            Some("r-00000a"),
+            "goal node docs --status pass --round 2 --crew r-00000b",
+        )
+        .await?;
+        let shown = request(&app, None, "show r-00000a").await?;
+        assert_eq!(
+            (
+                at(&shown, "/goal/nodes/0/status"),
+                at(&shown, "/goal/nodes/0/round"),
+                at(&shown, "/goal/nodes/0/crew")
+            ),
+            (&json!("pass"), &json!(2), &json!("r-00000b"))
+        );
+        assert!(failure(request(&app, None, "goal node docs --round 1").await).is_some());
+        assert!(
+            failure(request(&app, Some("r-00000a"), "goal node gone --round 1").await).is_some()
+        );
+
+        request(&app, Some("r-00000a"), "escalate --text branch").await?;
+        let home = request(&app, None, "").await?;
+        assert_eq!(
+            (at(&home, "/needs/0/run"), at(&home, "/needs/0/ask")),
+            (&json!("r-00000a"), &json!("branch"))
+        );
+        // its turn ends, and the question still stands; your answer is its next prompt
+        assert_eq!(phase(&app, "r-00000a"), Some(Phase::Needs));
+        Ok(())
     }
 
     // A run a mate asks for waits for you; dropping it leaves nothing.
@@ -2736,9 +3070,6 @@ pub(crate) mod tests {
     async fn later_nodes_are_stubs() -> Result<()> {
         let app = app()?;
         for line in [
-            "wait --any",
-            "goal set --file g.json",
-            "escalate --text why",
             "run --scratch --prompt go",
             "run --harness cursor --repo r --branch b --prompt go",
         ] {

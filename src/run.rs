@@ -62,6 +62,27 @@ words!(Profile {
     Actor = "actor",
 });
 
+// A goal node's progress and review level: the mate's words, which drover only carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeStatus {
+    #[default]
+    Todo,
+    Working,
+    Review,
+    Pass,
+    Blocked,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Review {
+    #[default]
+    None,
+    Code,
+    Adversarial,
+}
+
 words!(Phase {
     Pending = "pending",
     Starting = "starting",

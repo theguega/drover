@@ -10,9 +10,10 @@ src/cli.rs      clap: argv to one Cmd, which is also the socket request; prints 
 src/control.rs  unix socket the service listens on, and the client side; `watch` holds it open
 src/http.rs     127.0.0.1 HTTP: hook endpoints, GET /events (SSE), POST /runs/:id/permissions/:perm
 src/serve.rs    the service: commands, headless processes, hooks and approvals, a herdr watcher per machine
+src/goal.rs     a mate's goal graph (C16): its shape, checked once when set
 src/harness/    the Harness trait (C12) and its adapters: claude.rs
 src/run.rs      Run and its types: RunId, Machine, Mode, Role, Profile, Owner, Phase, Usage
-src/store.rs    drover.db: runs, events, goals
+src/store.rs    drover.db: runs, events, goals, and each run's `wait` cursor
 src/migrate.rs  v1 state.json into runs, once
 src/config.rs   state dir, config.toml (a flat TOML subset)
 src/socket.rs   herdr socket: requests and `events.subscribe` (direct locally, one ssh relay per remote)
@@ -22,10 +23,11 @@ fixtures/       v1-state.json, the live v1 state with reply text scrubbed, for t
 bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not from dotfiles)
 bin/drover-ssh  the client on a non-host machine: runs drover on DROVER_HOST
 skills/drover/  the drover skill, copied by hand into ~/.agents/skills
+skills/mates/   the mates skill: a mate's dispatch playbook, copied the same way
 install.sh      host: config.toml, build, links, user service. --remote: links only
 bootstrap.sh    curl entry point: clones into ~/.local/share/drover, runs install.sh
 scripts/live-test.sh  headless, approvals, pane and attach against a real claude (haiku) and herdr
-mates/          v1 mate instructions (v2 mates are a later node, see DESIGN.md)
+scripts/live-test-mates.sh  a mate's crew, wait, goal and escalate against a real claude (haiku)
 ```
 
 State lives in `~/.local/state/drover/` (`drover.db`, `drover.sock`), config in `~/.config/drover/config.toml`.
@@ -72,7 +74,7 @@ Claude (`claude.rs`, see SPIKE.md):
 
 ## Event loop
 
-Events are C9: `started`, `text`, `tool_start`, `tool_end`, `needs`, `reply`, `done`, `failed`. Each is stored and sent on a broadcast channel under one lock, so ids reach readers in order. `drover watch` and `GET /events` read through a `Feed`: stored events after `since`, then live ones; a reader that lags reads the store again. `requested` is stored and never streamed.
+Events are C9: `started`, `text`, `tool_start`, `tool_end`, `needs`, `goal`, `reply`, `done`, `failed`. Each is stored and sent on a broadcast channel under one lock, so ids reach readers in order. `drover watch` and `GET /events` read through a `Feed`: stored events after `since`, then live ones; a reader that lags reads the store again. `requested` is stored and never streamed.
 
 ```
 pending ──approve-run──▶ starting ──first prompt──▶ working ──reply──▶ idle ──send──▶ working
@@ -87,6 +89,15 @@ pending ──approve-run──▶ starting ──first prompt──▶ working 
 - Approvals: a `PermissionRequest` hook is a `needs` event with a perm id (`p1`, `p2`, …) and blocks until the owner's `approve` or `deny`. With no answer `min(10, hook_timeout/2)` s before `hook_timeout`, drover denies it with "awaiting approval" and the run goes back to working; the call stays approvable for a day (at most 16 per run, in memory). A late approve follows `send`'s rule: refused while a turn runs, else it is the run's next prompt, and that turn may make the same call (same tool and input, Bash description aside) once without asking, since session allows do not survive `--resume`; the allowance ends with the turn. An ended run takes no hooks and no approvals: its waiting calls hear "the run has ended" and nothing of it stays approvable.
 - Sessions: a hook must carry the run's session. A new one is taken when the run has none yet (a pane's first hook), and once after a resume drover started in a pane (attach: claude may resume under a copy's id) or after `SessionEnd` with reason `clear`. Any other hook is ignored and its permission request denied. A headless run's session comes from its own stream (`system/init`), which is drover's child, so it is always taken.
 - Remote: a headless run is `ssh <machine> 'cd … && exec claude …'`, and each remote has one `ssh -N -R` tunnel carrying its hooks back to the host's port.
+
+## Mates
+
+A mate is a run with `role: mate`, started by you with `drover run --role mate` (a run that asks for a run is always crew, so a mate cannot start one). Its first prompt gets a line naming the `mates` skill, as a crew run's gets the crew rules; drover loads nothing else, and has no mate logic. A mate is an ordinary actor run with `DROVER_RUN` set, and its crew and approvals follow from `parent` and `owner`.
+
+- Goal: `goal set --file` reads the file in the client (the service may be remote) and the service checks its shape (`Graph::parse`, deny unknown fields, ids unique, edges name nodes) and stores it in `goals`, one per run. `goal node` changes `status`, `round`, `crew` or `review` of one node. Each is a `goal` event carrying the whole graph. drover does not read edges or statuses. `show` prints the graph.
+- `wait [--any] [--parent R]`: a run's own crew (a run may only name itself), or any run's for you. It reads `reply`, `needs`, `done` and `failed` through a `Feed` and returns what came after the cursor kept for the calling run in `waits`, advanced only on a return, so a timeout or a killed client loses nothing. From you it starts at now. `--timeout` (90 s) returns no events, under a shell tool's own timeout.
+- `escalate --text`: a `needs` event with `escalation`, from any run, and the run goes to `needs`. A reply keeps `needs` while no tool call waits, so the question outlives the turn that asked it; `send` answers it, and is refused only while the turn still runs. `home` and `show` carry the question as `ask`.
+- Crew approvals follow the owner: `approve` and `deny` need the run's owner, which is the mate that asked for it. You cannot, unless you `attach` it.
 
 ## Memory
 

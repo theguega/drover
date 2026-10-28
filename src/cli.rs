@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::{
     config::Paths,
     control::{self, Failure},
-    run::{HarnessName, Machine, Phase, Profile, Role, RunId},
+    run::{HarnessName, Machine, NodeStatus, Phase, Profile, Review, Role, RunId},
     serve, toon,
 };
 
@@ -56,12 +56,18 @@ pub enum Cmd {
     ApproveRun { run: RunId },
     /// Remove a pending run
     DropRun { run: RunId },
-    /// Block until the next reply, needs, done or failed [not implemented]
+    /// Block until the next reply, needs, done or failed of your crew, or of --parent's. Each call
+    /// returns what came after the last one, so nothing is lost between two
     Wait {
+        /// The first event from any run in scope; the only mode
         #[arg(long)]
         any: bool,
+        /// A run's children [default: your own, for a run; every run, for you]
         #[arg(long)]
         parent: Option<RunId>,
+        /// Seconds to wait, then return no events
+        #[arg(long, default_value_t = 90)]
+        timeout: u64,
     },
     /// Take a run over: you type into it, its owner can only read. A headless run reopens in a pane
     Attach { run: RunId },
@@ -88,17 +94,17 @@ pub enum Cmd {
         #[arg(long)]
         entry: Option<String>,
     },
-    /// A mate's goal graph [not implemented]
+    /// A mate's goal graph: stored with the run, streamed as `goal` events
     Goal {
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
+        #[command(subcommand)]
+        op: GoalOp,
     },
-    /// A question from a mate to you [not implemented]
+    /// A question from a mate to you: a `needs` event, and the run waits for your `send`; - reads it from stdin
     Escalate {
         #[arg(long)]
         text: String,
     },
-    /// Events as JSON lines (C9), as they happen: started, text, tool_start, tool_end, needs, reply, done, failed
+    /// Events as JSON lines (C9), as they happen: started, text, tool_start, tool_end, needs, goal, reply, done, failed
     Watch {
         #[arg(long)]
         run: Option<RunId>,
@@ -118,6 +124,32 @@ pub enum Cmd {
     Serve,
     #[command(hide = true)]
     Home,
+}
+
+#[derive(Subcommand, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GoalOp {
+    /// Replace the graph with a goal.json; - reads it from stdin
+    Set {
+        #[arg(long)]
+        file: String,
+        // the file's text, read here: the service may be on another machine
+        #[arg(skip)]
+        graph: Option<String>,
+    },
+    /// Change one node: only the fields given
+    Node {
+        id: String,
+        #[arg(long, value_enum)]
+        status: Option<NodeStatus>,
+        #[arg(long)]
+        round: Option<u32>,
+        /// The crew run on this node
+        #[arg(long)]
+        crew: Option<RunId>,
+        #[arg(long, value_enum)]
+        review: Option<Review>,
+    },
 }
 
 #[derive(Args, Serialize, Deserialize)]
@@ -151,6 +183,9 @@ pub struct Start {
     /// The run that asks for this one, which then owns it and waits for your approve-run. A run (with $DROVER_RUN) is always the parent of the runs it asks for
     #[arg(long)]
     pub parent: Option<RunId>,
+    /// task [default], or mate: a dispatcher that follows the mates skill. Only you start a mate
+    #[arg(long, value_enum)]
+    pub role: Option<Role>,
     /// The first prompt; - reads it from stdin
     #[arg(long)]
     pub prompt: String,
@@ -219,7 +254,21 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
         }
         | Cmd::Done {
             entry: Some(text), ..
-        } => stdin_dash(text)?,
+        }
+        | Cmd::Escalate { text } => stdin_dash(text)?,
+        Cmd::Goal {
+            op: GoalOp::Set { file, graph },
+        } => {
+            let mut text = file.clone();
+            if text == "-" {
+                stdin_dash(&mut text)?;
+            } else {
+                text = std::fs::read_to_string(&*file).map_err(|e| {
+                    Failure::new(format!("{file}: {e}"), "drover goal set --file <goal.json>")
+                })?;
+            }
+            *graph = Some(text);
+        }
         _ => {}
     }
     let from = match std::env::var("DROVER_RUN") {

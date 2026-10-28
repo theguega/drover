@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS events(
     data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS events_run ON events(run, id);
 CREATE TABLE IF NOT EXISTS goals(run TEXT PRIMARY KEY, graph TEXT NOT NULL, updated_at INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS waits(run TEXT PRIMARY KEY, since INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS procs(run TEXT PRIMARY KEY, machine TEXT NOT NULL, pid INTEGER NOT NULL, start TEXT NOT NULL);
 ";
 
@@ -42,6 +43,7 @@ pub enum Kind {
     ToolStart,
     ToolEnd,
     Needs,
+    Goal,
     Reply,
     Done,
     Failed,
@@ -57,6 +59,7 @@ impl Kind {
             Self::ToolStart => "tool_start",
             Self::ToolEnd => "tool_end",
             Self::Needs => "needs",
+            Self::Goal => "goal",
             Self::Reply => "reply",
             Self::Done => "done",
             Self::Failed => "failed",
@@ -315,7 +318,50 @@ impl Store {
     pub fn delete(&self, id: &RunId) -> Result<()> {
         let db = self.db();
         db.execute("DELETE FROM events WHERE run = ?1", [id.as_str()])?;
+        db.execute("DELETE FROM goals WHERE run = ?1", [id.as_str()])?;
+        db.execute("DELETE FROM waits WHERE run = ?1", [id.as_str()])?;
         db.execute("DELETE FROM runs WHERE id = ?1", [id.as_str()])?;
+        Ok(())
+    }
+
+    pub fn goal(&self, run: &RunId) -> Result<Option<Value>> {
+        let graph: Option<String> = self
+            .db()
+            .query_row(
+                "SELECT graph FROM goals WHERE run = ?1",
+                [run.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(graph.map(|g| serde_json::from_str(&g)).transpose()?)
+    }
+
+    pub fn set_goal(&self, run: &RunId, graph: &Value) -> Result<()> {
+        self.db().execute(
+            "INSERT OR REPLACE INTO goals(run, graph, updated_at) VALUES (?1, ?2, ?3)",
+            params![run.as_str(), graph.to_string(), now()],
+        )?;
+        Ok(())
+    }
+
+    // The last event id a run's `wait` returned: the next one reads after it.
+    pub fn wait_cursor(&self, run: &RunId) -> Result<i64> {
+        Ok(self
+            .db()
+            .query_row(
+                "SELECT since FROM waits WHERE run = ?1",
+                [run.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    pub fn set_wait_cursor(&self, run: &RunId, since: i64) -> Result<()> {
+        self.db().execute(
+            "INSERT OR REPLACE INTO waits(run, since) VALUES (?1, ?2)",
+            params![run.as_str(), since],
+        )?;
         Ok(())
     }
 
