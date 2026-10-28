@@ -21,6 +21,7 @@ impl Harness for Pi {
             approvals: true,
             usage: true,
             hooks: true,
+            warm: true,
         }
     }
 
@@ -261,6 +262,7 @@ mod tests {
             resume: None,
             hooks: "http://127.0.0.1:7341/hooks/r-00000a",
             hook_timeout: 600,
+            drover: "drover",
         }
     }
 

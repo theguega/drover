@@ -14,8 +14,8 @@ use crate::{
 };
 
 pub mod claude;
-pub mod pi;
 pub mod cursor;
+pub mod pi;
 
 // What a harness can do, declared and never guessed.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
