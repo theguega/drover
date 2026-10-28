@@ -1,0 +1,617 @@
+{
+  "chicken:w32:p1": {
+    "machine": "chicken",
+    "pane": "w32:p1",
+    "workspace": "w32",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "theo/client-test-tmp",
+    "origin": "opened",
+    "role": "task",
+    "phase": "gone",
+    "status": "done",
+    "session": "24a00f9f-37f2-4ea8-8dd3-f1c8219035cb",
+    "lastReply": "71d7c10e-b2df-4a42-8564-71fc142d9561"
+  },
+  "meerkat:w9G:p1": {
+    "thread": "1559713577747750922",
+    "machine": "meerkat",
+    "pane": "w9G:p1",
+    "workspace": "w9G",
+    "kind": "claude",
+    "repo": "opalin.theo-kinematics-dedup",
+    "origin": "attached",
+    "role": "task",
+    "phase": "gone",
+    "status": "idle",
+    "session": "594140a5-2bff-4faf-b96a-4813a57136c9"
+  },
+  "meerkat:wAN:p4": {
+    "thread": "1560550891810066505",
+    "machine": "meerkat",
+    "pane": "wAN:p4",
+    "workspace": "wAN",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "test"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "f8f8788e-4d15-43cb-9afe-dbc99ce6d1f2",
+    "lastReply": "7ddae1ed-7eaa-4268-b769-f214a52feaff",
+    "promptMsg": "1560550893764616203"
+  },
+  "meerkat:wAN:p5": {
+    "thread": "1560551035351728148",
+    "machine": "meerkat",
+    "pane": "wAN:p5",
+    "workspace": "wAN",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "test"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "0eac2802-fe86-4589-af93-a7e026c161aa",
+    "lastReply": "9cfc727a-74b1-4abf-8882-3503f6f7413b",
+    "promptMsg": "1560551036614082643"
+  },
+  "meerkat:wAQ:p1": {
+    "thread": "1560509295680815259",
+    "machine": "meerkat",
+    "pane": "wAQ:p1",
+    "workspace": "wAQ",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "theo/model-selection",
+    "origin": "opened",
+    "role": "task",
+    "phase": "gone",
+    "status": "working",
+    "session": "6837c6eb-0f15-4a8c-bb8e-68d582e22ba8",
+    "lastReply": "308c6c35-3218-4d7b-94e2-4a7f23270633",
+    "promptMsg": "1560511552606703670"
+  },
+  "meerkat:wB2:p1": {
+    "machine": "meerkat",
+    "pane": "wB2:p1",
+    "workspace": "wB2",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "df21-review"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "f1254e99-9aec-48a5-9b23-9d3b9dcaf9b8",
+    "lastReply": "290be155-ef49-4788-8d38-19981c860c79",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 717
+    }
+  },
+  "meerkat:wB3:p1": {
+    "machine": "meerkat",
+    "pane": "wB3:p1",
+    "workspace": "wB3",
+    "kind": "claude",
+    "repo": "opalin",
+    "branch": "theo/df21-00-remove-flip",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "df21-review",
+        "owner": "mate"
+      }
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "bbf3899f-2381-456c-9127-518affdded93",
+    "lastReply": "222216c9-f92c-4bc8-86af-0c0b4719397a",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 2721
+    }
+  },
+  "meerkat:wB4:p4": {
+    "machine": "meerkat",
+    "pane": "wB4:p4",
+    "workspace": "wB4",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "merge-conflict"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "0ea86767-1467-457a-b4a0-06e6c1ecd0bd",
+    "lastReply": "e119fb0c-7cfa-4299-ac37-af19d6ef3432"
+  },
+  "meerkat:wB4:p5": {
+    "machine": "meerkat",
+    "pane": "wB4:p5",
+    "workspace": "wB4",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "test-mit-control"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "9395f316-fcd5-495b-adce-f675491676f8",
+    "lastReply": "ebcb19bc-80ca-4fc9-8dfb-a645a8868c76"
+  },
+  "meerkat:wB4:pC": {
+    "machine": "meerkat",
+    "pane": "wB4:pC",
+    "workspace": "wB4",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "alpha"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "70a12692-e594-4706-b2f0-47bd688787a8",
+    "lastReply": "5c3d0d31-ecc1-4759-a053-ff0d55ef5c17"
+  },
+  "meerkat:wB4:pD": {
+    "machine": "meerkat",
+    "pane": "wB4:pD",
+    "workspace": "wB4",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "bravo"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "4b410f70-5275-4c8a-831f-a4cc2a833ff2",
+    "lastReply": "edbcc4d8-14b4-48e7-b619-3bb420b2826a"
+  },
+  "meerkat:wB4:pE": {
+    "machine": "meerkat",
+    "pane": "wB4:pE",
+    "workspace": "wB4",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "dash"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "75f77beb-2591-498d-be3e-a38565e91d5a",
+    "lastReply": "bd61270e-bb68-411e-9b5c-93263af5cacf",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 784
+    }
+  },
+  "meerkat:wB5:p1": {
+    "machine": "meerkat",
+    "pane": "wB5:p1",
+    "workspace": "wB5",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "theo/dashboard",
+    "origin": "opened",
+    "role": "task",
+    "phase": "gone",
+    "status": "idle",
+    "session": "a32c38e2-02e9-4b88-b8e4-69997f8f2080",
+    "lastReply": "62134d7a-4184-48ec-8ef9-079604f862b6"
+  },
+  "meerkat:wB7:p1": {
+    "machine": "meerkat",
+    "pane": "wB7:p1",
+    "workspace": "wB7",
+    "kind": "claude",
+    "repo": "opalin",
+    "branch": "pr/1581",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "merge-conflict",
+        "owner": "mate"
+      }
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "40f6dff2-887e-4259-9d1f-7046f6276544",
+    "lastReply": "b66077ea-4c04-4db0-a91b-bbac5ef0e5ab"
+  },
+  "meerkat:wBD:p1": {
+    "machine": "meerkat",
+    "pane": "wBD:p1",
+    "workspace": "wBD",
+    "kind": "claude",
+    "repo": "opalin",
+    "branch": "theo/df21-fixes",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "df21-review",
+        "owner": "mate"
+      }
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "2ca35a2a-8ad0-4cb5-b5b4-933d00cfcfcd",
+    "lastReply": "711e2419-70cf-43b8-92e3-61b652737456",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 2052
+    }
+  },
+  "meerkat:wBD:p6": {
+    "machine": "meerkat",
+    "pane": "wBD:p6",
+    "workspace": "wBD",
+    "kind": "claude",
+    "repo": "opalin.theo-df21-fixes",
+    "origin": "attached",
+    "role": {
+      "crew": {
+        "mate": "df21-review",
+        "owner": "user"
+      }
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "7a8e9932-71a7-4c50-9a6f-e43802680ee1",
+    "lastReply": "01c54a55-1335-4872-a203-c86e3b3d7316",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 3023
+    }
+  },
+  "meerkat:wBJ:p1": {
+    "machine": "meerkat",
+    "pane": "wBJ:p1",
+    "workspace": "wBJ",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "dash/reach",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "dash",
+        "owner": "mate"
+      }
+    },
+    "phase": "gone",
+    "status": "working",
+    "session": "67e8055c-a2c3-499d-b08c-03df2d49d4ce",
+    "lastReply": "c1b5ec75-b23d-452c-ad3a-ef2643cf8abc"
+  },
+  "meerkat:wBK:p1": {
+    "machine": "meerkat",
+    "pane": "wBK:p1",
+    "workspace": "wBK",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "dash/server-tests",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "dash",
+        "owner": "mate"
+      }
+    },
+    "phase": "gone",
+    "status": "working",
+    "session": "c29e8ac9-1f57-4f8c-a51d-4c5cab2f474c",
+    "lastReply": "9fa02c60-82f8-4838-9ade-cede204baa6a"
+  },
+  "meerkat:wBM:p1": {
+    "machine": "meerkat",
+    "pane": "wBM:p1",
+    "workspace": "wBM",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "dash/https-docs",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "dash",
+        "owner": "mate"
+      }
+    },
+    "phase": "gone",
+    "status": "working",
+    "session": "e6bfa5ca-361b-49a8-be06-67329ac64b7b",
+    "lastReply": "18f76633-ec34-4f59-b3f5-0c3c2eb1c246"
+  },
+  "meerkat:wBN:p1": {
+    "machine": "meerkat",
+    "pane": "wBN:p1",
+    "workspace": "wBN",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "dash/stale",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "dash",
+        "owner": "mate"
+      }
+    },
+    "phase": "gone",
+    "status": "working",
+    "session": "d07e69b1-80ef-459f-9609-b318c606c0bb",
+    "lastReply": "25fb5db1-c112-4454-85dc-8881d8c29c95"
+  },
+  "meerkat:wBQ:p1": {
+    "machine": "meerkat",
+    "pane": "wBQ:p1",
+    "workspace": "wBQ",
+    "kind": "claude",
+    "repo": "opalin",
+    "branch": "theo/failure-detection",
+    "origin": "opened",
+    "role": "task",
+    "phase": "idle",
+    "status": "done",
+    "session": "e0fabb16-5f60-4141-a29b-45fac9dfdbb4",
+    "lastReply": "08f3c461-e979-4042-9d77-d3cdf95315da",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 8578
+    }
+  },
+  "meerkat:wBR:p1": {
+    "machine": "meerkat",
+    "pane": "wBR:p1",
+    "workspace": "wBR",
+    "kind": "claude",
+    "repo": "opalin",
+    "branch": "theo/actuacore-refactor",
+    "origin": "opened",
+    "role": "task",
+    "phase": "gone",
+    "status": "idle",
+    "session": "afc59417-c630-439a-b8bf-df923d74d017",
+    "lastReply": "9f114662-2a60-4976-b8dc-98f88dc64813",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 1277
+    }
+  },
+  "meerkat:wBS:p1": {
+    "machine": "meerkat",
+    "pane": "wBS:p1",
+    "workspace": "wBS",
+    "kind": "claude",
+    "repo": "opalin",
+    "branch": "theo/viser-audit",
+    "origin": "opened",
+    "role": "task",
+    "phase": "gone",
+    "status": "idle",
+    "session": "7d131cfe-8968-4f70-9ab5-94793c0c25b0",
+    "lastReply": "e6377785-72a8-4788-91bb-87f3ff1b878a",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 1770
+    }
+  },
+  "meerkat:wBW:p2": {
+    "machine": "meerkat",
+    "pane": "wBW:p2",
+    "workspace": "wBW",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "inspect-issues"
+    },
+    "phase": "gone",
+    "status": "idle",
+    "session": "08a47bae-3a43-489d-8dd9-c5950d8e2630",
+    "lastReply": "33ffd9f2-fcf0-42ac-ab66-b497ed91242f",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 620
+    }
+  },
+  "meerkat:wBX:p1": {
+    "machine": "meerkat",
+    "pane": "wBX:p1",
+    "workspace": "wBX",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "actuacore"
+    },
+    "phase": "idle",
+    "status": "idle",
+    "session": "51e6e54d-5224-4bd8-979d-9cd0435f3b08",
+    "lastReply": "bbb0c71a-952b-4df2-a8aa-592e46bc9949",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 692
+    }
+  },
+  "meerkat:wBX:p7": {
+    "machine": "meerkat",
+    "pane": "wBX:p7",
+    "workspace": "wBX",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "drover-v2"
+    },
+    "phase": "idle",
+    "status": "idle",
+    "session": "f91b704a-f880-4c9f-aa56-15283d099a2c",
+    "lastReply": "59f4fcea-dfdf-4b57-8400-245ba1056ff5",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 1454
+    }
+  },
+  "meerkat:wBX:p8": {
+    "machine": "meerkat",
+    "pane": "wBX:p8",
+    "workspace": "wBX",
+    "kind": "claude",
+    "repo": "mates",
+    "origin": "attached",
+    "role": {
+      "mate": "brain"
+    },
+    "phase": "idle",
+    "status": "idle",
+    "session": "117d78d9-07c7-4e9f-b1d1-a6f4f0c6ec10",
+    "lastReply": "a96fa5e7-8f48-4dc4-849b-9668d321e6b2",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 1667
+    }
+  },
+  "meerkat:wBY:p1": {
+    "machine": "meerkat",
+    "pane": "wBY:p1",
+    "workspace": "wBY",
+    "kind": "claude",
+    "repo": "opalin",
+    "branch": "theo/bench/actuacore-tick",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "actuacore",
+        "owner": "mate"
+      }
+    },
+    "phase": "idle",
+    "status": "idle",
+    "session": "139c6a38-b540-4aea-a028-0f91e0ced77d",
+    "lastReply": "e3b0d97f-e123-450a-a6fb-ebc706282296",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 5474
+    }
+  },
+  "meerkat:wC6:p1": {
+    "machine": "meerkat",
+    "pane": "wC6:p1",
+    "workspace": "wC6",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "theo/v2-spike",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "drover-v2",
+        "owner": "mate"
+      }
+    },
+    "phase": "idle",
+    "status": "idle",
+    "session": "93f157a8-0f4c-4900-b2cd-2ff056de4236",
+    "lastReply": "8082b3b9-411a-4eb4-a431-b0c3ac045d1d",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 5
+    }
+  },
+  "meerkat:wCG:p1": {
+    "machine": "meerkat",
+    "pane": "wCG:p1",
+    "workspace": "wCG",
+    "kind": "claude",
+    "repo": "paperdb",
+    "branch": "brain-migrate",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "brain",
+        "owner": "mate"
+      }
+    },
+    "phase": "idle",
+    "status": "done",
+    "session": "ec948152-cb35-412a-9993-e1cf623325fd",
+    "lastReply": "21e94e89-8f9c-429a-ae5d-03d64da028e8",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 5509
+    }
+  },
+  "meerkat:wCM:p1": {
+    "machine": "meerkat",
+    "pane": "wCM:p1",
+    "workspace": "wCM",
+    "kind": "claude",
+    "repo": "paperdb",
+    "branch": "brain-conform",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "brain",
+        "owner": "mate"
+      }
+    },
+    "phase": "idle",
+    "status": "done",
+    "session": "52cb1f68-33f0-432f-983d-feb6d2973f69",
+    "lastReply": "4c70b0dd-c5d4-4229-b993-42601cdac6f0",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 3535
+    }
+  },
+  "meerkat:wCN:p1": {
+    "machine": "meerkat",
+    "pane": "wCN:p1",
+    "workspace": "wCN",
+    "kind": "claude",
+    "repo": "paperdb",
+    "commit": "06eaa17",
+    "origin": "detached",
+    "role": {
+      "crew": {
+        "mate": "brain",
+        "owner": "mate"
+      }
+    },
+    "phase": "idle",
+    "status": "done",
+    "session": "46d04a6a-7c69-4412-9295-ddcd39d03f6f",
+    "lastReply": "299e44e0-1763-4a62-a350-87dee1eec182",
+    "reply": {
+      "text": "(scrubbed)",
+      "chars": 5291
+    }
+  },
+  "meerkat:wCP:p1": {
+    "machine": "meerkat",
+    "pane": "wCP:p1",
+    "workspace": "wCP",
+    "kind": "claude",
+    "repo": "drover",
+    "branch": "theo/v2-base",
+    "origin": "opened",
+    "role": {
+      "crew": {
+        "mate": "drover-v2",
+        "owner": "mate"
+      }
+    },
+    "phase": "waiting",
+    "status": "working",
+    "session": "2fe9573f-daf3-44c5-ae84-4bc0ed79f19a"
+  }
+}

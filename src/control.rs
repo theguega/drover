@@ -1,9 +1,10 @@
-// Terminal control: one JSON line in, one JSON line out, over a unix socket owned by the service.
-// `watch` keeps the connection open and writes a line per change.
+// The service's unix socket: one JSON line in, one JSON line out. `watch` keeps the connection
+// open and writes a line per change.
 
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, sync::Arc};
+use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
 
-use serenity::all::Http;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{
@@ -12,46 +13,83 @@ use tokio::{
     },
 };
 
-use serde::Serialize;
-use serde_json::Value;
+use crate::{
+    Error, Result,
+    cli::{Cmd, Request},
+    config::Paths,
+    serve::App,
+};
 
-use super::*;
-use crate::{action::Action, cli::Failure};
-
-// Under the home directory, so the CLI finds the service from any folder.
-pub fn path() -> Result<PathBuf> {
-    Ok(PathBuf::from(env("HOME", None)?).join(".local/state/drover/drover.sock"))
+// An error as the terminal prints it: what went wrong and the command that fixes it.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Failure {
+    pub error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
 }
 
-pub async fn serve(app: Arc<App>, http: Arc<Http>) -> Result<()> {
-    let path = path()?;
-    if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir).await.context("socket dir")?;
+impl Failure {
+    pub fn new(error: impl Into<String>, help: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            help: Some(help.into()),
+        }
     }
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.error)
+    }
+}
+
+impl std::error::Error for Failure {}
+
+// A Failure raised in the service keeps its help; any other error has none.
+impl From<Error> for Failure {
+    fn from(e: Error) -> Self {
+        match e.downcast::<Self>() {
+            Ok(f) => *f,
+            Err(e) => Self {
+                error: e.to_string(),
+                help: None,
+            },
+        }
+    }
+}
+
+impl From<std::io::Error> for Failure {
+    fn from(e: std::io::Error) -> Self {
+        Error::from(e).into()
+    }
+}
+
+pub async fn serve(app: Arc<App>, path: &Path) -> Result<()> {
     // a socket left by a crash would make bind fail
-    let _ = tokio::fs::remove_file(&path).await;
-    let listener = UnixListener::bind(&path).context(format!("bind {}", path.display()))?;
-    tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).await?;
+    let _ = tokio::fs::remove_file(path).await;
+    let listener = UnixListener::bind(path).map_err(|e| err!("bind {}: {e}", path.display()))?;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
     loop {
         let (stream, _) = listener.accept().await?;
-        let (app, http) = (Arc::clone(&app), Arc::clone(&http));
+        let app = Arc::clone(&app);
         tokio::spawn(async move {
-            if let Err(e) = handle(&app, &http, stream).await {
+            if let Err(e) = handle(&app, stream).await {
                 eprintln!("control: {e}");
             }
         });
     }
 }
 
-async fn handle(app: &App, http: &Http, stream: UnixStream) -> Result<()> {
+async fn handle(app: &App, stream: UnixStream) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
     let mut line = String::new();
     read.read_line(&mut line).await?;
-    // the reply is the action's data, or the error it failed with
-    let reply = match serde_json::from_str::<Action>(&line) {
-        Ok(Action::Watch) => return watch(app, read, write).await,
-        Ok(action) => app.act(http, action).await.map_err(Failure::from),
+    let reply = match serde_json::from_str::<Request>(&line) {
+        Ok(Request {
+            cmd: Cmd::Watch, ..
+        }) => return watch_loop(app, read, write).await,
+        Ok(r) => app.act(r.from, r.cmd).await.map_err(Failure::from),
         Err(e) => Err(Failure::from(err!("bad request: {e}"))),
     };
     write_reply(&mut write, &reply).await
@@ -64,19 +102,19 @@ async fn write_reply(write: &mut OwnedWriteHalf, reply: &impl Serialize) -> Resu
     Ok(())
 }
 
-// A snapshot now, then one per change, until the client closes its end. Saves that land
-// while a snapshot is built or written coalesce into the next line.
-async fn watch(
+// A snapshot now, then one per change, until the client closes its end. Changes that land while
+// a snapshot is built or written coalesce into the next line.
+async fn watch_loop(
     app: &App,
     mut read: BufReader<OwnedReadHalf>,
     mut write: OwnedWriteHalf,
 ) -> Result<()> {
     loop {
-        // enabled before the snapshot is built, so a save during it still wakes the wait
+        // enabled before the snapshot is built, so a change during it still wakes the wait
         let changed = app.changed.notified();
         tokio::pin!(changed);
         changed.as_mut().enable();
-        let reply = app.snapshot().await.map_err(Failure::from);
+        let reply = app.snapshot().map_err(Failure::from);
         write_reply(&mut write, &reply).await?;
         let mut gone = String::new();
         tokio::select! {
@@ -87,48 +125,36 @@ async fn watch(
     }
 }
 
-// A JSON string is text to print as it is; anything else is data to print as TOON.
-pub async fn send(action: &Action) -> Result<Value, Failure> {
-    let read = request(action).await?;
+pub async fn send(paths: &Paths, request: &Request) -> Result<Value, Failure> {
+    let read = connect(paths, request).await?;
     let mut reply = String::new();
     BufReader::new(read).read_line(&mut reply).await?;
-    parse(&reply)
+    serde_json::from_str::<Result<Value, Failure>>(&reply)
+        .map_err(|e| Failure::from(err!("reply from drover: {e}")))?
 }
 
-// Prints each snapshot line as it arrives, until the service or this terminal closes.
-pub async fn watch_client() -> Result<(), Failure> {
-    let mut lines = BufReader::new(request(&Action::Watch).await?).lines();
+// Prints each snapshot as one JSON line, until the service or this terminal closes.
+pub async fn watch(paths: &Paths, request: &Request) -> Result<(), Failure> {
+    let mut lines = BufReader::new(connect(paths, request).await?).lines();
     while let Some(reply) = lines.next_line().await? {
-        if let Value::String(s) = parse(&reply)? {
-            println!("{s}");
-        }
+        let snapshot = serde_json::from_str::<Result<Value, Failure>>(&reply)
+            .map_err(|e| Failure::from(err!("reply from drover: {e}")))??;
+        println!("{snapshot}");
     }
     Ok(())
 }
 
-async fn request(action: &Action) -> Result<OwnedReadHalf, Failure> {
-    let path = path()?;
+async fn connect(paths: &Paths, request: &Request) -> Result<OwnedReadHalf, Failure> {
+    let path = paths.socket();
     let Ok(stream) = UnixStream::connect(&path).await else {
-        let start = if cfg!(target_os = "macos") {
-            "launchctl kickstart gui/$(id -u)/dev.drover"
-        } else {
-            "systemctl --user start drover"
-        };
-        return Err(Failure::new("drover is not running here", start));
+        return Err(Failure::new(
+            format!("drover is not running at {}", path.display()),
+            "drover serve, with the same --state-dir",
+        ));
     };
     let (read, mut write) = stream.into_split();
-    let mut line = serde_json::to_string(action).map_err(Error::from)?;
+    let mut line = serde_json::to_string(request).map_err(Error::from)?;
     line.push('\n');
     write.write_all(line.as_bytes()).await?;
     Ok(read)
-}
-
-fn parse(reply: &str) -> Result<Value, Failure> {
-    if let Ok(r) = serde_json::from_str::<Result<Value, Failure>>(reply) {
-        return r;
-    }
-    // a service not restarted since the update still sends its error as text
-    let r: Result<Value, String> =
-        serde_json::from_str(reply).map_err(|e| err!("reply from drover: {e}"))?;
-    r.map_err(|e| err!("{e}").into())
 }

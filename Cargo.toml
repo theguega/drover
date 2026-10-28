@@ -5,10 +5,10 @@ edition = "2024"
 publish = false
 
 [dependencies]
+clap = { version = "4", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-serenity = { version = "0.12", default-features = false, features = ["builder", "cache", "client", "gateway", "http", "model", "rustls_backend"] }
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "sync", "time", "fs", "net", "io-util"] }
 
 [profile.release]

@@ -24,21 +24,24 @@ pub enum Reach {
     Ssh,
 }
 
+// A machine as drover reaches it. Only the host's own shell gets `repos_root`; a remote's comes from its dotfiles.
 #[derive(Clone)]
-pub struct Machine {
+pub struct Host {
     pub name: String,
     pub reach: Reach,
     pub link: Arc<Link>,
+    pub repos_root: Option<PathBuf>,
 }
 
-impl Machine {
+impl Host {
     #[must_use]
-    pub fn new(name: String, reach: Reach) -> Self {
+    pub fn new(name: String, reach: Reach, repos_root: Option<PathBuf>) -> Self {
         let host = (reach == Reach::Ssh).then(|| name.clone());
         Self {
             name,
             reach,
             link: Arc::new(Link::new(host)),
+            repos_root: repos_root.filter(|_| reach == Reach::Local),
         }
     }
 
@@ -64,28 +67,6 @@ impl Status {
     pub fn ready(self) -> bool {
         matches!(self, Self::Idle | Self::Done)
     }
-
-    #[must_use]
-    pub fn icon(self) -> &'static str {
-        match self {
-            Self::Working => "●",
-            Self::Blocked => "◆",
-            Self::Done => "✓",
-            Self::Idle => "○",
-            Self::Unknown => "?",
-        }
-    }
-
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Working => "working",
-            Self::Blocked => "blocked",
-            Self::Done => "done",
-            Self::Unknown => "unknown",
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -105,6 +86,11 @@ pub struct WorkspaceId(pub String);
 pub struct SessionId(String);
 
 impl SessionId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         let ok = s.len() == 36 && s.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f' | '-'));
@@ -153,8 +139,6 @@ impl Name {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Agent {
     pub pane_id: PaneId,
-    pub workspace_id: WorkspaceId,
-    pub agent: String,
     pub agent_status: Status,
     pub cwd: String,
     #[serde(default)]
@@ -176,27 +160,8 @@ impl Agent {
 }
 
 pub struct Worktree {
-    pub workspace_id: WorkspaceId,
     pub pane_id: PaneId,
     pub path: String,
-    pub head: Head,
-}
-
-// What a checkout is on: a branch, or a commit for a detached one.
-pub enum Head {
-    Branch(String),
-    Commit(String),
-}
-
-impl Head {
-    // How a person reads it: the branch, or `at-<sha>` as drover-wt names the folder.
-    #[must_use]
-    pub fn label(&self) -> String {
-        match self {
-            Self::Branch(b) => b.clone(),
-            Self::Commit(c) => format!("at-{c}"),
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -294,7 +259,7 @@ struct Out {
 }
 
 // Shell work herdr has no method for: git via drover-wt, transcripts. ssh runs the login shell, so the dotfiles' env applies.
-async fn sh(m: &Machine, script: &str, timeout: Duration) -> Result<Out> {
+async fn sh(m: &Host, script: &str, timeout: Duration) -> Result<Out> {
     let mut cmd = match m.reach {
         Reach::Ssh => {
             let mut c = Command::new("ssh");
@@ -304,6 +269,9 @@ async fn sh(m: &Machine, script: &str, timeout: Duration) -> Result<Out> {
         Reach::Local => {
             let mut c = Command::new("sh");
             c.args(["-c", script]);
+            if let Some(root) = &m.repos_root {
+                c.env("REPOS_ROOT", root);
+            }
             c
         }
     };
@@ -336,7 +304,7 @@ fn failure(o: &Out) -> Error {
     })
 }
 
-pub async fn agents(m: &Machine) -> Result<Vec<Agent>> {
+pub async fn agents(m: &Host) -> Result<Vec<Agent>> {
     #[derive(Deserialize)]
     struct List {
         agents: Vec<serde_json::Value>,
@@ -351,7 +319,7 @@ pub async fn agents(m: &Machine) -> Result<Vec<Agent>> {
         .collect())
 }
 
-pub async fn panes(m: &Machine) -> Result<Vec<PaneId>> {
+pub async fn panes(m: &Host) -> Result<Vec<PaneId>> {
     #[derive(Deserialize)]
     struct List {
         panes: Vec<Pane>,
@@ -369,22 +337,16 @@ pub async fn panes(m: &Machine) -> Result<Vec<PaneId>> {
         .collect())
 }
 
-// Same entry point as the desk popup: a new name, an existing branch, or #pr. `detach` opens a
-// checkout at the ref's commit instead, on no branch.
-pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name, detach: bool) -> Result<Worktree> {
+// Same entry point as the desk popup: a new name, an existing branch, or #pr.
+pub async fn worktree(m: &Host, repo: &Name, branch: &Name) -> Result<Worktree> {
     #[derive(Deserialize)]
     struct Done {
         result: Created,
     }
     #[derive(Deserialize)]
     struct Created {
-        workspace: Workspace,
         root_pane: Pane,
         worktree: Tree,
-    }
-    #[derive(Deserialize)]
-    struct Workspace {
-        workspace_id: WorkspaceId,
     }
     #[derive(Deserialize)]
     struct Pane {
@@ -393,60 +355,45 @@ pub async fn worktree(m: &Machine, repo: &Name, r#ref: &Name, detach: bool) -> R
     #[derive(Deserialize)]
     struct Tree {
         path: String,
-        #[serde(default)]
-        branch: Option<String>,
     }
 
     let script = format!(
-        "cd {ROOT}/{} && drover-wt {}'{}' --no-focus",
+        "cd {ROOT}/{} && drover-wt '{}' --no-focus",
         repo.as_str(),
-        if detach { "--at " } else { "" },
-        r#ref.as_str()
+        branch.as_str()
     );
     let o = sh(m, &script, LONG).await?;
     if o.code != Some(0) {
         return Err(failure(&o));
     }
     let c = serde_json::from_str::<Done>(&o.out)?.result;
-    // drover-wt names a detached checkout `<repo>.at-<sha>`, the commit it was opened at
-    let folder = c.worktree.path.rsplit('/').next().unwrap_or_default();
-    let head = match (detach, c.worktree.branch) {
-        (false, Some(b)) => Head::Branch(b),
-        (false, None) => return Err(Error::failed(format!("{folder} is on no branch"))),
-        (true, _) => Head::Commit(
-            folder
-                .strip_prefix(&format!("{}.at-", repo.as_str()))
-                .ok_or_else(|| Error::failed(format!("{folder} is not a detached checkout")))?
-                .into(),
-        ),
-    };
     Ok(Worktree {
-        workspace_id: c.workspace.workspace_id,
         pane_id: c.root_pane.pane_id,
         path: c.worktree.path,
-        head,
     })
 }
 
 // Resolves once the agent is ready or blocked at startup (folder trust and similar dialogs).
-// A reopened workspace keeps its shell wherever it was left, so cd to the checkout first.
+// A reopened workspace keeps its shell wherever it was left, so cd to the checkout first. `env`
+// is exported in the pane's shell, so the agent's own drover calls carry it.
 pub async fn start(
-    m: &Machine,
+    m: &Host,
     name: &str,
     kind: &str,
     pane: &PaneId,
     path: &str,
-    model: Option<&Name>,
+    env: &[(&str, &str)],
 ) -> Result<()> {
-    let cd = json!({"pane_id": pane.0, "text": format!("cd {}", quote(path)), "keys": ["Enter"]});
+    let exports: String = env
+        .iter()
+        .map(|(k, v)| format!(" && export {k}={}", quote(v)))
+        .collect();
+    let cd = json!({"pane_id": pane.0, "text": format!("cd {}{exports}", quote(path)), "keys": ["Enter"]});
     m.link
         .call::<IgnoredAny>("pane.send_input", cd, SHORT)
         .await?;
-    let args: Vec<&str> = model
-        .map(|model| vec!["--model", model.as_str()])
-        .unwrap_or_default();
     let params =
-        json!({"name": name, "kind": kind, "pane_id": pane.0, "args": args, "timeout_ms": 90_000});
+        json!({"name": name, "kind": kind, "pane_id": pane.0, "args": [], "timeout_ms": 90_000});
     // A new pane's shell may still be starting, and agent.start refuses until it prompts.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -464,7 +411,7 @@ pub async fn start(
     }
 }
 
-pub async fn prompt(m: &Machine, pane: &PaneId, text: &str) -> Result<()> {
+pub async fn prompt(m: &Host, pane: &PaneId, text: &str) -> Result<()> {
     m.link
         .call::<IgnoredAny>(
             "agent.prompt",
@@ -475,7 +422,7 @@ pub async fn prompt(m: &Machine, pane: &PaneId, text: &str) -> Result<()> {
         .map(drop)
 }
 
-pub async fn keys(m: &Machine, pane: &PaneId, keys: &[&str]) -> Result<()> {
+pub async fn keys(m: &Host, pane: &PaneId, keys: &[&str]) -> Result<()> {
     m.link
         .call::<IgnoredAny>(
             "agent.send_keys",
@@ -486,7 +433,7 @@ pub async fn keys(m: &Machine, pane: &PaneId, keys: &[&str]) -> Result<()> {
         .map(drop)
 }
 
-pub async fn screen(m: &Machine, pane: &PaneId, lines: u32) -> Result<String> {
+pub async fn screen(m: &Host, pane: &PaneId, lines: u32) -> Result<String> {
     #[derive(Deserialize)]
     struct Read {
         read: Text,
@@ -503,18 +450,7 @@ pub async fn screen(m: &Machine, pane: &PaneId, lines: u32) -> Result<String> {
         .text)
 }
 
-pub async fn rename_pane(m: &Machine, pane: &PaneId, label: &str) -> Result<()> {
-    m.link
-        .call::<IgnoredAny>(
-            "pane.rename",
-            json!({"pane_id": pane.0, "label": label}),
-            SHORT,
-        )
-        .await
-        .map(drop)
-}
-
-pub async fn close(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
+pub async fn close(m: &Host, workspace: &WorkspaceId) -> Result<()> {
     m.link
         .call::<IgnoredAny>(
             "workspace.close",
@@ -526,7 +462,7 @@ pub async fn close(m: &Machine, workspace: &WorkspaceId) -> Result<()> {
 }
 
 // The checkout a worktree workspace was opened on.
-pub async fn checkout_path(m: &Machine, workspace: &WorkspaceId) -> Result<String> {
+pub async fn checkout_path(m: &Host, workspace: &WorkspaceId) -> Result<String> {
     #[derive(Deserialize)]
     struct List {
         workspaces: Vec<Ws>,
@@ -552,160 +488,13 @@ pub async fn checkout_path(m: &Machine, workspace: &WorkspaceId) -> Result<Strin
 }
 
 // Through drover-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
-// `force` removes a dirty one too, for a checkout on no branch that holds nothing to keep.
-pub async fn remove(m: &Machine, workspace: &WorkspaceId, force: bool) -> Result<String> {
+pub async fn remove(m: &Host, workspace: &WorkspaceId) -> Result<String> {
     let path = Name::parse(&checkout_path(m, workspace).await?)?;
-    let flag = if force { "-f " } else { "" };
-    let o = sh(m, &format!("drover-wt rm {flag}'{}'", path.as_str()), LONG).await?;
+    let o = sh(m, &format!("drover-wt rm '{}'", path.as_str()), LONG).await?;
     if o.code != Some(0) {
         return Err(failure(&o));
     }
     Ok(o.out.trim().into())
-}
-
-// Same view as `wt ls` at the desk: every repo's worktrees with their herdr state.
-pub async fn worktrees(m: &Machine) -> Result<String> {
-    let o = sh(m, "cd ~ && drover-wt ls", Duration::from_secs(30)).await?;
-    let text = if o.out.trim().is_empty() {
-        o.err
-    } else {
-        o.out
-    };
-    Ok(text.trim_end().into())
-}
-
-// A pane in the named tab of the drover workspace. The first pane creates both, later ones split from a pane in it.
-#[derive(Deserialize)]
-struct PaneRef {
-    pane_id: PaneId,
-    tab_id: String,
-}
-
-#[derive(Deserialize)]
-struct Created {
-    root_pane: PaneRef,
-}
-
-#[derive(Deserialize)]
-struct CreatedWorkspace {
-    root_pane: PaneRef,
-    workspace: WorkspaceRef,
-}
-
-#[derive(Deserialize)]
-struct WorkspaceRef {
-    workspace_id: WorkspaceId,
-}
-
-pub async fn tab_pane(m: &Machine, tab: &str, cwd: &str) -> Result<(WorkspaceId, PaneId)> {
-    #[derive(Deserialize)]
-    struct Workspaces {
-        workspaces: Vec<Ws>,
-    }
-    #[derive(Deserialize)]
-    struct Ws {
-        workspace_id: WorkspaceId,
-        label: String,
-    }
-    #[derive(Deserialize)]
-    struct Tabs {
-        tabs: Vec<Tab>,
-    }
-    #[derive(Deserialize)]
-    struct Tab {
-        tab_id: String,
-        label: String,
-    }
-    #[derive(Deserialize)]
-    struct Panes {
-        panes: Vec<PaneRef>,
-    }
-    #[derive(Deserialize)]
-    struct Split {
-        pane: PaneRef,
-    }
-
-    let found = m
-        .link
-        .call::<Workspaces>("workspace.list", json!({}), SHORT)
-        .await?
-        .workspaces
-        .into_iter()
-        .find(|w| w.label == "drover");
-    let Some(ws) = found else {
-        let made = m
-            .link
-            .call::<CreatedWorkspace>(
-                "workspace.create",
-                json!({"label": "drover", "cwd": cwd, "focus": false}),
-                SHORT,
-            )
-            .await?;
-        m.link
-            .call::<IgnoredAny>(
-                "tab.rename",
-                json!({"tab_id": made.root_pane.tab_id, "label": tab}),
-                SHORT,
-            )
-            .await?;
-        return Ok((made.workspace.workspace_id, made.root_pane.pane_id));
-    };
-    let workspace = ws.workspace_id.clone();
-    let tabs = m
-        .link
-        .call::<Tabs>("tab.list", json!({"workspace_id": workspace.0}), SHORT)
-        .await?
-        .tabs;
-    let Some(tab) = tabs.into_iter().find(|t| t.label == tab) else {
-        let made = m
-            .link
-            .call::<Created>(
-                "tab.create",
-                json!({"workspace_id": workspace.0, "label": tab, "cwd": cwd, "focus": false}),
-                SHORT,
-            )
-            .await?;
-        return Ok((workspace, made.root_pane.pane_id));
-    };
-    let panes = m
-        .link
-        .call::<Panes>("pane.list", json!({}), SHORT)
-        .await?
-        .panes;
-    let first = panes
-        .into_iter()
-        .find(|p| p.tab_id == tab.tab_id)
-        .ok_or_else(|| Error::failed("the mates tab has no pane".into()))?;
-    let split = m
-        .link
-        .call::<Split>(
-            "pane.split",
-            json!({"target_pane_id": first.pane_id.0, "direction": "right", "cwd": cwd, "focus": false}),
-            SHORT,
-        )
-        .await?;
-    Ok((workspace, split.pane.pane_id))
-}
-
-// The repo and branch of a folder, for pane awareness. None when the folder is not a git checkout.
-pub async fn checkout(m: &Machine, cwd: &str) -> Result<Option<(String, String)>> {
-    let dir = quote(cwd);
-    let script = format!(
-        "git -C {dir} rev-parse --path-format=absolute --git-common-dir && git -C {dir} rev-parse --abbrev-ref HEAD"
-    );
-    let o = sh(m, &script, Duration::from_secs(10)).await?;
-    if o.code != Some(0) {
-        return Ok(None);
-    }
-    let mut lines = o.out.lines();
-    let common = lines.next().unwrap_or_default();
-    let branch = lines.next().unwrap_or_default();
-    let repo = Path::new(common)
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
-    Ok(Some((repo.into(), branch.into())))
 }
 
 // Quotes one argument for the shell, for a folder that came from herdr or drover-wt.
@@ -713,168 +502,11 @@ fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-pub async fn close_pane(m: &Machine, pane: &PaneId) -> Result<()> {
+pub async fn close_pane(m: &Host, pane: &PaneId) -> Result<()> {
     m.link
         .call::<IgnoredAny>("pane.close", json!({"pane_id": pane.0}), SHORT)
         .await
         .map(drop)
-}
-
-#[derive(Deserialize)]
-pub struct Usage {
-    pub five_hour: Option<Window>,
-    pub seven_day: Option<Window>,
-    pub seven_day_opus: Option<Window>,
-    pub seven_day_sonnet: Option<Window>,
-    pub extra_usage: Option<Extra>,
-}
-
-#[derive(Deserialize)]
-pub struct Window {
-    pub utilization: f64,
-    pub resets_at: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub struct Extra {
-    pub is_enabled: bool,
-    pub used_credits: f64,
-    pub monthly_limit: f64,
-}
-
-// Plan limits, as Claude Code's /usage reads them, after a line with the login's account. The token stays on the machine and goes to curl on stdin.
-// macOS keeps the token in the keychain, locked over ssh; the file there is a leftover that only counts while it hasn't expired.
-const USAGE: &str = r#"jq -er .oauthAccount.accountUuid ~/.claude.json 2>/dev/null || exit 3
-c=$(security find-generic-password -s 'Claude Code-credentials' -w 2>/dev/null || cat ~/.claude/.credentials.json 2>/dev/null) || exit 4
-t=$(printf %s "$c" | jq -er '.claudeAiOauth | select(.expiresAt > now * 1000) | .accessToken') || exit 4
-printf 'Authorization: Bearer %s' "$t" |
-curl -sSf -m 10 -H @- -H 'anthropic-beta: oauth-2025-04-20' https://api.anthropic.com/api/oauth/usage"#;
-
-// Exit code of the claude script when the login is there but its token can't be read or has expired.
-const UNREAD: i32 = 4;
-
-// A claude login. Plan limits are per account, so one machine's read covers every machine on that account.
-pub struct Claude {
-    pub account: String,
-    pub usage: Option<Usage>,
-}
-
-/// Cursor's current billing period, as the editor's own usage view reads it.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Cursor {
-    pub billing_cycle_end: Option<Num>, // ms
-    pub plan_usage: Option<CursorPlan>,
-    pub spend_limit_usage: Option<CursorOnDemand>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CursorPlan {
-    pub total_percent_used: Option<Num>,
-    pub auto_percent_used: Option<Num>,
-    pub api_percent_used: Option<Num>,
-    pub total_spend: Option<Num>, // cents, included plus bonus
-    pub limit: Option<Num>,       // cents
-    pub bonus_spend: Option<Num>, // cents Cursor gives on top of the plan
-}
-
-/// On-demand spend past the plan: a team pool or a personal limit, in cents.
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CursorOnDemand {
-    pub limit_type: Option<String>,
-    pub pooled_used: Option<Num>,
-    pub pooled_limit: Option<Num>,
-    pub individual_used: Option<Num>,
-    pub individual_limit: Option<Num>,
-}
-
-// The cursor-agent login: ~/.config/cursor/auth.json on Linux, the keychain on macOS.
-const CURSOR_USAGE: &str = r#"t=$(jq -er .accessToken ~/.config/cursor/auth.json 2>/dev/null || security find-generic-password -s cursor-access-token -w 2>/dev/null) || exit 3
-printf 'Authorization: Bearer %s' "$t" |
-curl -sSf -m 10 -H @- -H 'Content-Type: application/json' -H 'Connect-Protocol-Version: 1' -d '{}' https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"#;
-
-/// A number that proto JSON may send as a string (int64).
-#[derive(Clone, Copy, Deserialize)]
-#[serde(try_from = "NumOrString")]
-pub struct Num(pub f64);
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum NumOrString {
-    Num(f64),
-    String(String),
-}
-
-impl TryFrom<NumOrString> for Num {
-    type Error = std::num::ParseFloatError;
-    fn try_from(v: NumOrString) -> std::result::Result<Self, Self::Error> {
-        match v {
-            NumOrString::Num(n) => Ok(Self(n)),
-            NumOrString::String(s) => s.parse().map(Self),
-        }
-    }
-}
-
-// Exit code of a usage script when that agent isn't logged in on the machine.
-const ABSENT: i32 = 3;
-
-async fn usage_of<T: serde::de::DeserializeOwned>(m: &Machine, script: &str) -> Result<Option<T>> {
-    let o = sh(m, script, SHORT).await?;
-    match o.code {
-        Some(0) => Ok(Some(serde_json::from_str(&o.out)?)),
-        Some(ABSENT) => Ok(None),
-        _ => Err(failure(&o)),
-    }
-}
-
-pub async fn usage(m: &Machine) -> Result<Option<Claude>> {
-    let o = sh(m, USAGE, SHORT).await?;
-    let (account, body) = o.out.split_once('\n').unwrap_or((&o.out, ""));
-    let usage = match o.code {
-        Some(0) => Some(serde_json::from_str(body)?),
-        Some(UNREAD) => None,
-        Some(ABSENT) => return Ok(None),
-        _ => return Err(failure(&o)),
-    };
-    Ok(Some(Claude {
-        account: account.trim().into(),
-        usage,
-    }))
-}
-
-pub async fn cursor_usage(m: &Machine) -> Result<Option<Cursor>> {
-    usage_of(m, CURSOR_USAGE).await
-}
-
-// claude takes these aliases; cursor-agent lists its own as "id - Name" lines.
-pub async fn models(m: &Machine, kind: &str) -> Result<Vec<String>> {
-    if kind == "cursor" {
-        let o = sh(m, "cursor-agent models", SHORT).await?;
-        return Ok(o
-            .out
-            .lines()
-            .filter_map(|l| l.split_once(" - ").map(|(id, _)| id.to_string()))
-            .filter(|id| Name::parse(id).is_ok())
-            .collect());
-    }
-    Ok(["opus", "sonnet", "haiku"].map(String::from).into())
-}
-
-// Main clones only: a worktree has a .git file, a clone a .git directory.
-pub async fn repos(m: &Machine) -> Result<Vec<String>> {
-    let o = sh(
-        m,
-        &format!(r#"for d in {ROOT}/*/; do [ -d "$d.git" ] && basename "$d"; done"#),
-        SHORT,
-    )
-    .await?;
-    Ok(o.out
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect())
 }
 
 // ── transcript ──────────────────────────────────────────────
@@ -962,7 +594,7 @@ pub struct Turn {
     pub open: bool,
 }
 
-pub async fn reply(m: &Machine, session: &SessionId) -> Result<Turn> {
+pub async fn reply(m: &Host, session: &SessionId) -> Result<Turn> {
     let turn = read_back(m, session, |text| match last_reply(text) {
         Scan::Turn(t) => Some(t),
         Scan::NoPrompt => None,
@@ -970,16 +602,10 @@ pub async fn reply(m: &Machine, session: &SessionId) -> Result<Turn> {
     Ok(turn.await?.unwrap_or_default())
 }
 
-// The newest assistant text in the transcript, in whichever turn: one still being written, or
-// the last before an interrupt.
-pub async fn last_text(m: &Machine, session: &SessionId) -> Result<Option<Reply>> {
-    read_back(m, session, newest_text).await
-}
-
 // Reads the transcript from the end and doubles the window until `scan` finds what it looks for,
 // so a long session crosses ssh only as far as it needs. None when the file has none.
 async fn read_back<T>(
-    m: &Machine,
+    m: &Host,
     session: &SessionId,
     scan: impl Fn(&str) -> Option<T>,
 ) -> Result<Option<T>> {
@@ -1038,7 +664,7 @@ async fn tail(path: &Path, window: u64) -> Result<(String, bool)> {
 }
 
 // None when the file is not there.
-async fn ssh_tail(m: &Machine, file: &str, window: u64) -> Result<Option<(String, bool)>> {
+async fn ssh_tail(m: &Host, file: &str, window: u64) -> Result<Option<(String, bool)>> {
     let o = sh(
         m,
         &format!("tail -c {window} ~/.claude/projects/*/{file}"),
@@ -1056,18 +682,6 @@ async fn ssh_tail(m: &Machine, file: &str, window: u64) -> Result<Option<(String
 enum Scan {
     NoPrompt,
     Turn(Turn),
-}
-
-#[must_use]
-fn newest_text(jsonl: &str) -> Option<Reply> {
-    jsonl.lines().rev().find_map(|line| {
-        let e = serde_json::from_str::<Line>(line).ok()?;
-        let text = e.texts().filter(|t| !t.is_empty()).last()?;
-        (e.kind == "assistant").then(|| Reply {
-            id: e.uuid.clone(),
-            text: text.into(),
-        })
-    })
 }
 
 // Walks back from the end, so only the latest turn is parsed. An interrupt or a local command
@@ -1109,27 +723,6 @@ fn last_reply(jsonl: &str) -> Scan {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cursor_usage_parses() -> Result<()> {
-        let c: Cursor = serde_json::from_str(
-            r#"{"billingCycleEnd":"1793156163000","planUsage":{"totalSpend":2701,"includedSpend":2000,"bonusSpend":701,"limit":2000,
-            "autoPercentUsed":0,"apiPercentUsed":33.7625,"totalPercentUsed":33.7625},
-            "spendLimitUsage":{"totalSpend":28903,"pooledLimit":"450000","pooledUsed":28903,"pooledRemaining":"421097","limitType":"team"}}"#,
-        )?;
-        assert_eq!(c.billing_cycle_end.map(|n| n.0), Some(1_793_156_163_000.0));
-        assert_eq!(
-            c.plan_usage.and_then(|p| p.total_percent_used).map(|n| n.0),
-            Some(33.7625)
-        );
-        assert_eq!(
-            c.spend_limit_usage
-                .and_then(|o| o.pooled_limit)
-                .map(|n| n.0),
-            Some(450_000.0)
-        );
-        Ok(())
-    }
 
     #[test]
     fn reply_after_latest_prompt() {
@@ -1197,21 +790,6 @@ mod tests {
         assert_eq!(resuming, Some((None, true)));
         let resumed = turn(&[PROMPT, MID, END, NOTIFY, TOOL, RESULT, LAST, END]);
         assert_eq!(resumed, Some((Some("l".into()), false)));
-    }
-
-    // drover reply: the agent is at work, or was interrupted, and still has a last reply to show.
-    #[test]
-    fn the_newest_text_crosses_turns() {
-        let last = |lines: &[&str]| newest_text(&lines.join("\n")).map(|r| r.id);
-        assert_eq!(
-            last(&[PROMPT, LAST, END, PROMPT, TOOL, RESULT]),
-            Some("l".into())
-        );
-        assert_eq!(
-            last(&[PROMPT, MID, TOOL, RESULT, INTERRUPT]),
-            Some("m".into())
-        );
-        assert_eq!(last(&[PROMPT, TOOL]), None);
     }
 
     // Turns that never get an end line: there is nothing to wait for.
