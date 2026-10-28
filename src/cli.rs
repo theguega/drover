@@ -311,8 +311,7 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
 fn hook(at: &str, secs: u64, closed: bool) -> i32 {
     let at = at.to_string();
     let answer = within(Duration::from_secs(secs), move || {
-        let mut body = String::new();
-        std::io::stdin().read_to_string(&mut body)?;
+        let body = read_capped(std::io::stdin())?;
         post(&at, &body)
     });
     match answer {
@@ -329,6 +328,18 @@ fn hook(at: &str, secs: u64, closed: bool) -> i32 {
             0
         }
     }
+}
+
+// What a hook sends or hears is a tool call or a decision, never this much.
+const HOOK_MAX: u64 = 1 << 20;
+
+fn read_capped(from: impl Read) -> std::io::Result<String> {
+    let mut text = String::new();
+    from.take(HOOK_MAX + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > HOOK_MAX {
+        return Err(std::io::Error::other("a hook's message is over 1 MiB"));
+    }
+    Ok(text)
 }
 
 // `f` on a thread, given up on after `limit`.
@@ -354,8 +365,7 @@ fn post(at: &str, body: &str) -> std::io::Result<String> {
         "POST /{path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     )?;
-    let mut reply = String::new();
-    sock.read_to_string(&mut reply)?;
+    let reply = read_capped(sock)?;
     match reply.split_once("\r\n\r\n") {
         Some((head, answer)) if head.contains(" 200 ") => Ok(answer.into()),
         _ => Err(std::io::Error::other("drover refused the hook")),
@@ -427,6 +437,17 @@ mod tests {
         });
         assert!(post(&at, "{}").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn a_hook_reads_no_more_than_its_cap() {
+        let ok = vec![b'x'; HOOK_MAX as usize];
+        assert_eq!(
+            read_capped(ok.as_slice()).map(|t| t.len()).ok(),
+            Some(ok.len())
+        );
+        let big = vec![b'x'; HOOK_MAX as usize + 1];
+        assert!(read_capped(big.as_slice()).is_err());
     }
 
     #[test]

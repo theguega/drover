@@ -129,9 +129,57 @@ await "$h" reply || fail "cursor $h: no reply after the service came back"
 [[ ! -e $cwd/stopped.txt ]] || fail "cursor $h: stopped.txt was created while the service was stopped"
 ok "serve stopped past the hook timeout: stopped.txt was not created"
 
+# the file is checked before every process: put back as the repo has it (git checkout .), ours is
+# merged again and holds the call
+git -C "$cwd" show HEAD:.cursor/hooks.json >"$cwd/.cursor/hooks.json"
+"$bin" send "$h" "Run this exact shell command: touch reinstalled.txt. If it is denied, say DENIED-5." >/dev/null
+await "$h" needs '.data.perm != null' || fail "cursor $h: the hooks were not put back for the next turn"
+perm=$(jq -r .data.perm <<<"$event")
+"$bin" deny "$h" "$perm" --reason "not now" >/dev/null
+await "$h" reply || fail "cursor $h: no reply after the reinstalled deny"
+[[ ! -e $cwd/reinstalled.txt ]] || fail "cursor $h: reinstalled.txt was created unheld"
+ok "hooks.json reset mid-run: the next turn held its call"
+
+# drover's file is out of `git add -A`
+git -C "$cwd" add -A
+[[ -z $(git -C "$cwd" diff --cached --name-only | grep -F .cursor) ]] || fail "cursor $h: git add -A took .cursor/hooks.json"
+git -C "$cwd" reset -q
+ok "git add -A leaves the hooks file out"
+
+# a tool the agent started is gone with it
+"$bin" send "$h" "Run this exact shell command in the foreground: sleep 2717. It waits on purpose; that is expected." >/dev/null
+await "$h" needs '.data.perm != null' || fail "cursor $h: no needs for sleep"
+"$bin" approve "$h" "$(jq -r .data.perm <<<"$event")" >/dev/null
+for _ in $(seq 60); do pgrep -f '^sleep 2717$' >/dev/null && break; sleep 0.5; done
+pgrep -f '^sleep 2717$' >/dev/null || fail "cursor $h: sleep never ran"
+"$bin" stop "$h" >/dev/null
+for _ in $(seq 30); do pgrep -f '^sleep 2717$' >/dev/null || break; sleep 0.5; done
+if pgrep -f '^sleep 2717$' >/dev/null; then
+  pkill -f '^sleep 2717$'
+  fail "stop $h left its tool running"
+fi
+ok "stop $h ended cursor-agent and the sleep it ran"
+
 "$bin" done "$h" >/dev/null
 runs=()
+# the file goes back once the process is gone
+for _ in $(seq 30); do [[ -z $(git -C "$cwd" status --porcelain -- .cursor) ]] && break; sleep 0.5; done
 [[ -z $(git -C "$cwd" status --porcelain -- .cursor) ]] || fail "cursor $h: the repo's .cursor/hooks.json was not restored"
 ok "done $h, and the repo's own .cursor/hooks.json is back as it was"
+
+# hooks.json edited during a run stays edited: yours, without drover's entries
+e=$("$bin" run --harness cursor --repo livetest --branch live-e --headless --model "${MODEL:-auto}" --prompt "Reply with exactly: PONG-E" | field run)
+runs+=("$e")
+await "$e" reply || fail "cursor $e: no reply"
+cwd=$("$bin" show "$e" | field cwd)
+jq '.hooks.afterFileEdit = [{"command": "./fmt.sh"}]' "$cwd/.cursor/hooks.json" >"$tmp/edited.json"
+cp "$tmp/edited.json" "$cwd/.cursor/hooks.json"
+"$bin" done "$e" >/dev/null
+runs=()
+for _ in $(seq 30); do grep -q "kept yours" "$tmp/serve.log" && break; sleep 0.5; done
+[[ $(jq -r '.hooks.afterFileEdit[0].command' "$cwd/.cursor/hooks.json") == ./fmt.sh ]] || fail "cursor $e: the edit was lost on done"
+[[ $(jq -r '.hooks | [.. | strings | select(contains("hook"))] | length' "$cwd/.cursor/hooks.json") == 0 ]] || fail "cursor $e: drover's hooks stayed in the file"
+grep -q "kept yours" "$tmp/serve.log" || fail "cursor $e: the kept file was not reported"
+ok "an edit made during the run is kept on done, and said so"
 
 echo "all checks passed"

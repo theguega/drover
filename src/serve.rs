@@ -357,6 +357,7 @@ impl App {
     // Headless processes end with the service, and their runs wait for the next send, which
     // resumes them. One the service left running (it was killed) is ended now, and before a resume.
     fn orphans(&self) -> Result<()> {
+        self.repair_hooks();
         if !self.store.procs(None)?.is_empty() {
             let me = Weak::clone(&self.me);
             tokio::spawn(async move {
@@ -442,11 +443,17 @@ impl App {
         self.emit(r, kind, data)?;
         self.save(r)?;
         self.forget_calls(&r.id);
-        self.restore_hooks(r);
         let proc = locked(&self.procs).remove(&r.id);
-        if let (Some(p), Some(me)) = (proc, self.me.upgrade()) {
-            let id = r.id.clone();
-            tokio::spawn(async move { me.stop(&id, p).await });
+        match (proc, self.me.upgrade()) {
+            // the file goes back once the process is gone: a call in its grace window is still held
+            (Some(p), Some(me)) => {
+                let id = r.id.clone();
+                tokio::spawn(async move {
+                    me.stop(&id, p).await;
+                    me.restore_hooks(&id);
+                });
+            }
+            _ => self.restore_hooks(&r.id),
         }
         self.wake.notify_waiters();
         Ok(())
@@ -791,15 +798,35 @@ impl App {
         }
         let (asked, hooks) = (self.asked(r)?, self.hook_url(&r.id));
         let ours = harness.hook_settings(&self.spec(r, &asked, &hooks, None));
-        harness::install(&r.cwd, rel, &ours).map_err(|e| err!("{}: {e}", r.cwd.join(rel).display()))
+        harness::swap::install(&self.hooks_dir(), r.id.as_str(), &r.cwd, rel, &ours)
+            .map_err(|e| err!("{}: {e}", r.cwd.join(rel).display()))
     }
 
-    fn restore_hooks(&self, r: &Run) {
-        let Some(rel) = Self::harness(r).ok().and_then(|h| h.hook_file(r.profile)) else {
-            return;
-        };
-        if let Err(e) = harness::restore(&r.cwd, rel, r.id.as_str()) {
-            eprintln!("run {}: {e}", r.id);
+    // Where the swaps of a harness's hook files are recorded.
+    fn hooks_dir(&self) -> PathBuf {
+        self.state.join("hooks")
+    }
+
+    // The file back as it was (or as the user changed it), when nothing of the run still runs.
+    fn restore_hooks(&self, id: &RunId) {
+        match harness::swap::restore(&self.hooks_dir(), id.as_str()) {
+            Ok(Some(note)) => eprintln!("run {id}: {note}"),
+            Ok(None) => {}
+            Err(e) => eprintln!("run {id}: hooks not restored: {e}"),
+        }
+    }
+
+    // A crash leaves the swaps of the runs it was running; those that have ended give theirs back.
+    fn repair_hooks(&self) {
+        for run in harness::swap::left(&self.hooks_dir()) {
+            let live = run
+                .parse::<RunId>()
+                .ok()
+                .and_then(|id| self.store.get(&id).ok().flatten())
+                .is_some_and(|r| r.phase.live());
+            if !live && let Ok(id) = run.parse::<RunId>() {
+                self.restore_hooks(&id);
+            }
         }
     }
 
@@ -914,7 +941,6 @@ impl App {
             }
         };
         self.save(run)?;
-        self.install_hooks(run)?;
         let prompt = self
             .asked(run)?
             .get("prompt")
@@ -977,6 +1003,8 @@ impl App {
     }
 
     fn spawn(&self, r: &Run, resume: Option<&SessionId>) -> Result<()> {
+        // every process, since the file may have changed since the last: no hooks, no process
+        self.install_hooks(r)?;
         let h = self.host(&r.machine)?;
         let harness = Self::harness(r)?;
         let (asked, hooks) = (self.asked(r)?, self.hook_url(&r.id));

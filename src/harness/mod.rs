@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, path::Path, process::Stdio, time::Duration};
 
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::{
@@ -16,6 +16,7 @@ use crate::{
 pub mod claude;
 pub mod cursor;
 pub mod pi;
+pub mod swap;
 
 // What a harness can do, declared and never guessed.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -128,77 +129,6 @@ pub fn get(name: HarnessName) -> Option<&'static dyn Harness> {
     }
 }
 
-fn backup(path: &Path) -> std::path::PathBuf {
-    let mut name = path.as_os_str().to_owned();
-    name.push(".drover");
-    name.into()
-}
-
-// Puts our hooks in `cwd/rel` next to the repo's own, which keep running. The repo's file waits
-// beside it as `rel.drover` until `restore`; installing again replaces only ours.
-pub fn install(cwd: &Path, rel: &str, ours: &Value) -> std::io::Result<()> {
-    let bad = |what: &str| std::io::Error::other(format!("{rel}: {what}"));
-    let path = cwd.join(rel);
-    let kept = backup(&path);
-    if !kept.exists() && path.exists() {
-        std::fs::rename(&path, &kept)?;
-    }
-    let mut merged: Value = match std::fs::read_to_string(&kept) {
-        Ok(text) => serde_json::from_str(&text).map_err(|e| bad(&e.to_string()))?,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
-        Err(e) => return Err(e),
-    };
-    let file = merged.as_object_mut().ok_or_else(|| bad("not an object"))?;
-    if let Some(version) = ours.get("version") {
-        file.entry("version").or_insert_with(|| version.clone());
-    }
-    let hooks = file
-        .entry("hooks")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| bad("hooks is not an object"))?;
-    for (event, entries) in ours
-        .get("hooks")
-        .and_then(Value::as_object)
-        .into_iter()
-        .flatten()
-    {
-        let list = hooks
-            .entry(event)
-            .or_insert_with(|| json!([]))
-            .as_array_mut()
-            .ok_or_else(|| bad(&format!("{event} is not a list")))?;
-        list.extend(entries.as_array().cloned().unwrap_or_default());
-    }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&path, serde_json::to_string_pretty(&merged)?)
-}
-
-// The repo's file back, or none if it had none. A file without `run` in it is not ours: an
-// install that failed first leaves the repo's own where it was.
-pub fn restore(cwd: &Path, rel: &str, run: &str) -> std::io::Result<()> {
-    let path = cwd.join(rel);
-    let kept = backup(&path);
-    if kept.exists() {
-        return std::fs::rename(&kept, &path);
-    }
-    match std::fs::read_to_string(&path) {
-        Ok(text) if text.contains(run) => {
-            std::fs::remove_file(&path)?;
-            // only an empty .cursor goes
-            if let Some(dir) = path.parent() {
-                let _ = std::fs::remove_dir(dir);
-            }
-            Ok(())
-        }
-        Ok(_) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
 pub struct Spawned {
     pub child: Child,
     pub stdin: ChildStdin,
@@ -265,7 +195,9 @@ pub fn spawn(
             c.args(["-c", &format!("{IDENT} && exec \"$@\""), "sh"])
                 .args(argv)
                 .current_dir(cwd)
-                .envs(env.iter().copied());
+                .envs(env.iter().copied())
+                // a group of its own, which `terminate` signals with everything below it
+                .process_group(0);
             c
         }
     };
@@ -284,15 +216,29 @@ pub fn spawn(
     })
 }
 
-// Sends `sig` (TERM, KILL, or 0 to look) to the process, here or over ssh, if it is still the one
-// `ident` names and has not ended. False when it is gone.
-pub async fn signal(ssh: Option<&str>, ident: &Ident, sig: &str) -> std::io::Result<bool> {
-    let script = format!(
-        // a zombie has ended: only its parent's wait is left
-        r#"[ "$(ps -o lstart= -p {pid} 2>/dev/null)" = {start} ] && case "$(ps -o stat= -p {pid})" in Z*) false ;; *) kill -{sig} {pid} ;; esac"#,
-        pid = ident.pid,
-        start = quote(&ident.start)
-    );
+// Ends the process `ident` names and everything it started: SIGTERM, then SIGKILL for what is
+// left after `grace`. A harness's tools run in sessions and groups of their own, so they are found
+// by their parents, which a SIGKILL of the harness alone would orphan, and by the harness's group.
+// One script, here or over ssh, so the tree is read before anything dies. Nothing to do when the
+// process is gone or its pid is another process now.
+const TERMINATE: &str = r#"
+pid=PID; start=START; grace=GRACE
+[ "$(ps -o lstart= -p $pid 2>/dev/null)" = "$start" ] || exit 0
+ids="$pid $(ps -e -o pid=,pgid= | awk -v g=$pid '$2 == g { print $1 }') $(ps -e -o pid=,ppid= | awk -v r=$pid '{ p[$1] = $2 } END { for (i in p) { x = i; while (x in p) { if (p[x] == r) { print i; break }; x = p[x] } } }')"
+# a zombie has ended: only its parent's wait is left
+alive() { for i in $ids; do case "$(ps -o stat= -p $i 2>/dev/null)" in "" | Z*) ;; *) return 0 ;; esac; done; return 1; }
+kill -TERM $ids 2>/dev/null
+n=0
+while alive && [ $n -lt $((grace * 5)) ]; do sleep 0.2; n=$((n + 1)); done
+alive && kill -KILL $ids 2>/dev/null
+exit 0
+"#;
+
+pub async fn terminate(ssh: Option<&str>, ident: &Ident, grace: Duration) -> std::io::Result<()> {
+    let script = TERMINATE
+        .replace("PID", &ident.pid.to_string())
+        .replace("START", &quote(&ident.start))
+        .replace("GRACE", &grace.as_secs().max(1).to_string());
     let mut cmd = match ssh {
         Some(host) => {
             let mut c = Command::new("ssh");
@@ -311,26 +257,10 @@ pub async fn signal(ssh: Option<&str>, ident: &Ident, sig: &str) -> std::io::Res
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .status();
-    let status = tokio::time::timeout(Duration::from_secs(20), status)
+    tokio::time::timeout(grace + Duration::from_secs(20), status)
         .await
-        .map_err(|_| std::io::Error::other("signal timed out"))??;
-    Ok(status.success())
-}
-
-// SIGTERM first: claude ends the tools it started, which run in sessions of their own and would
-// outlive a SIGKILL. SIGKILL after `grace`.
-pub async fn terminate(ssh: Option<&str>, ident: &Ident, grace: Duration) -> std::io::Result<()> {
-    if !signal(ssh, ident, "TERM").await? {
-        return Ok(());
-    }
-    let deadline = tokio::time::Instant::now() + grace;
-    while tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        if !signal(ssh, ident, "0").await? {
-            return Ok(());
-        }
-    }
-    signal(ssh, ident, "KILL").await.map(drop)
+        .map_err(|_| std::io::Error::other("terminate timed out"))??;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -347,7 +277,28 @@ mod tests {
         Ok((sp, ident))
     }
 
-    // The ident is the exec'd process's own, and a signal reaches only that process.
+    fn running(pid: u32) -> bool {
+        let stat = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        // a zombie has ended
+        !stat.is_empty() && !stat.starts_with('Z')
+    }
+
+    fn pgrep(pattern: &str) -> Vec<u32> {
+        let out = std::process::Command::new("pgrep")
+            .args(["-f", pattern])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        out.split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    }
+
+    // The ident is the exec'd process's own, and terminate ends only the process it names.
     #[tokio::test]
     async fn terminate_ends_the_process_it_names() -> Result<(), Box<dyn std::error::Error>> {
         let (sp, ident) = started(&["sleep", "30"]).await?;
@@ -356,10 +307,10 @@ mod tests {
             start: "Thu Jan  1 00:00:00 1970".into(),
             ..ident.clone()
         };
-        assert!(!signal(None, &other, "TERM").await?);
-        assert!(signal(None, &ident, "0").await?);
+        terminate(None, &other, Duration::from_secs(1)).await?;
+        assert!(running(ident.pid));
         terminate(None, &ident, Duration::from_secs(5)).await?;
-        assert!(!signal(None, &ident, "0").await?);
+        assert!(!running(ident.pid));
         Ok(())
     }
 
@@ -371,48 +322,29 @@ mod tests {
         let t = std::time::Instant::now();
         terminate(None, &ident, Duration::from_secs(1)).await?;
         assert!(t.elapsed() >= Duration::from_secs(1));
-        assert!(!signal(None, &ident, "0").await?);
+        assert!(!running(ident.pid));
         Ok(())
     }
 
-    // A repo's own hooks keep running beside ours, and the run's end gives its file back as it was.
-    #[test]
-    fn install_keeps_the_repos_hooks_and_restore_returns_them() -> std::io::Result<()> {
-        let dir = std::env::temp_dir().join(format!("drover-install-{}", std::process::id()));
-        let file = dir.join(".cursor/hooks.json");
-        let ours = |cmd: &str| json!({"version": 1, "hooks": {"beforeShellExecution": [{"command": cmd}]}});
-        let url = "127.0.0.1:7341/hooks/r-00000a";
-        let commands = || -> std::io::Result<Vec<String>> {
-            let v: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
-            Ok(v.pointer("/hooks/beforeShellExecution")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|h| h.get("command")?.as_str().map(String::from))
-                .collect())
-        };
-
-        // no file of its own: ours alone, and gone again with the empty .cursor
-        install(&dir, ".cursor/hooks.json", &ours(url))?;
-        assert_eq!(commands()?, [url]);
-        restore(&dir, ".cursor/hooks.json", "r-00000a")?;
-        assert!(!dir.join(".cursor").exists());
-
-        // the repo's own: kept, ours added, installing twice adds ours once, then the original byte for byte
-        let theirs =
-            "{\"version\":1,\"hooks\":{\"beforeShellExecution\":[{\"command\":\"./lint.sh\"}]}}";
-        std::fs::create_dir_all(dir.join(".cursor"))?;
-        std::fs::write(&file, theirs)?;
-        install(&dir, ".cursor/hooks.json", &ours("one"))?;
-        install(&dir, ".cursor/hooks.json", &ours(url))?;
-        assert_eq!(commands()?, ["./lint.sh", url]);
-        restore(&dir, ".cursor/hooks.json", "r-00000a")?;
-        assert_eq!(std::fs::read_to_string(&file)?, theirs);
-
-        // a file that is not ours is left alone when nothing was installed
-        restore(&dir, ".cursor/hooks.json", "r-00000a")?;
-        assert_eq!(std::fs::read_to_string(&file)?, theirs);
-        std::fs::remove_dir_all(&dir)
+    // A tool in a session of its own, and one the process left running as it ended, go with it.
+    #[tokio::test]
+    async fn terminate_takes_the_tools_with_it() -> Result<(), Box<dyn std::error::Error>> {
+        let (_sp, ident) = started(&[
+            "sh",
+            "-c",
+            "setsid sleep 30417 & (trap '' TERM; sleep 30418) & wait",
+        ])
+        .await?;
+        for _ in 0..40 {
+            if !pgrep("^sleep 30417$").is_empty() && !pgrep("^sleep 30418$").is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(!pgrep("^sleep 30417$").is_empty());
+        terminate(None, &ident, Duration::from_secs(1)).await?;
+        assert!(pgrep("^sleep 30417$").is_empty() && pgrep("^sleep 30418$").is_empty());
+        Ok(())
     }
 
     #[test]
