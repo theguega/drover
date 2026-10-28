@@ -1,8 +1,7 @@
-// herdr and shell access per machine: herdr over its socket, git and transcripts over sh or ssh.
+// herdr and shell access per machine: herdr over its socket, git over sh or ssh.
 
 use std::{
-    io::SeekFrom,
-    path::{Path, PathBuf},
+    path::PathBuf,
     process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
@@ -10,11 +9,7 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::json;
-use tokio::{
-    io::{AsyncReadExt, AsyncSeekExt},
-    process::Command,
-    time::sleep,
-};
+use tokio::{process::Command, time::sleep};
 
 use crate::socket::{Link, SSH_OPTS};
 
@@ -51,28 +46,19 @@ impl Host {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Status {
-    Idle,
-    Working,
-    Blocked,
-    Done,
-    #[serde(other)]
-    Unknown,
-}
-
-impl Status {
-    #[must_use]
-    pub fn ready(self) -> bool {
-        matches!(self, Self::Idle | Self::Done)
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 #[repr(transparent)]
 pub struct PaneId(pub String);
+
+impl PaneId {
+    // herdr names a pane after its workspace: `wB4:p5` is in `wB4`.
+    #[must_use]
+    pub fn workspace(&self) -> Option<WorkspaceId> {
+        let (ws, _) = self.0.split_once(':')?;
+        Some(WorkspaceId(ws.into()))
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -139,24 +125,6 @@ impl Name {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Agent {
     pub pane_id: PaneId,
-    pub agent_status: Status,
-    pub cwd: String,
-    #[serde(default)]
-    agent_session: Option<Session>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct Session {
-    value: String,
-}
-
-impl Agent {
-    #[must_use]
-    pub fn session(&self) -> Option<SessionId> {
-        self.agent_session
-            .as_ref()
-            .and_then(|s| SessionId::parse(&s.value))
-    }
 }
 
 pub struct Worktree {
@@ -178,13 +146,6 @@ impl From<String> for Code {
             "agent_blocked" => Self::AgentBlocked,
             _ => Self::Other(s),
         }
-    }
-}
-
-impl Code {
-    #[must_use]
-    pub fn busy(&self) -> bool {
-        matches!(self, Self::AgentNotReady)
     }
 }
 
@@ -229,11 +190,6 @@ impl Error {
         matches!(self, Self::Herdr { code: c, .. } if c == code)
     }
 
-    #[must_use]
-    pub fn is_busy(&self) -> bool {
-        matches!(self, Self::Herdr { code, .. } if code.busy())
-    }
-
     pub(crate) fn failed(message: String) -> Self {
         Self::Herdr {
             code: Code::Other("failed".into()),
@@ -248,8 +204,6 @@ pub(crate) type Result<T> = std::result::Result<T, Error>;
 const ROOT: &str = r#""${REPOS_ROOT:-$HOME/.drover-workspace}""#;
 
 const SHORT: Duration = Duration::from_secs(15);
-// bytes read from the end of a transcript; a turn's reply sits well inside this
-const TAIL: u64 = 8 << 20;
 const LONG: Duration = Duration::from_secs(120);
 
 struct Out {
@@ -258,7 +212,7 @@ struct Out {
     code: Option<i32>,
 }
 
-// Shell work herdr has no method for: git via drover-wt, transcripts. ssh runs the login shell, so the dotfiles' env applies.
+// Shell work herdr has no method for: git via drover-wt. ssh runs the login shell, so the dotfiles' env applies.
 async fn sh(m: &Host, script: &str, timeout: Duration) -> Result<Out> {
     let mut cmd = match m.reach {
         Reach::Ssh => {
@@ -373,9 +327,10 @@ pub async fn worktree(m: &Host, repo: &Name, branch: &Name) -> Result<Worktree> 
     })
 }
 
-// Resolves once the agent is ready or blocked at startup (folder trust and similar dialogs).
-// A reopened workspace keeps its shell wherever it was left, so cd to the checkout first. `env`
-// is exported in the pane's shell, so the agent's own drover calls carry it.
+// Resolves once herdr sees the agent, which may still be blocked at startup (folder trust and
+// similar dialogs; then agent.start fails with AgentNotReady). A reopened workspace keeps its shell wherever it was left,
+// so cd to the checkout first. `env` is exported in the pane's shell, so the agent's own drover
+// calls carry it; `args` follow the agent's binary.
 pub async fn start(
     m: &Host,
     name: &str,
@@ -383,6 +338,7 @@ pub async fn start(
     pane: &PaneId,
     path: &str,
     env: &[(&str, &str)],
+    args: &[String],
 ) -> Result<()> {
     let exports: String = env
         .iter()
@@ -393,7 +349,7 @@ pub async fn start(
         .call::<IgnoredAny>("pane.send_input", cd, SHORT)
         .await?;
     let params =
-        json!({"name": name, "kind": kind, "pane_id": pane.0, "args": [], "timeout_ms": 90_000});
+        json!({"name": name, "kind": kind, "pane_id": pane.0, "args": args, "timeout_ms": 90_000});
     // A new pane's shell may still be starting, and agent.start refuses until it prompts.
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
@@ -405,10 +361,27 @@ pub async fn start(
             Err(e) if !e.is(&Code::AgentNotReady) && Instant::now() < deadline => {
                 sleep(Duration::from_millis(500)).await;
             }
-            Err(e) if !e.is(&Code::AgentNotReady) => return Err(e),
-            _ => return Ok(()),
+            r => return r.map(drop),
         }
     }
+}
+
+// Until the pane's agent is in one of `until` (idle, blocked, …), and which one.
+pub async fn wait(m: &Host, pane: &PaneId, until: &[&str]) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Waited {
+        agent: State,
+    }
+    #[derive(Deserialize)]
+    struct State {
+        agent_status: String,
+    }
+    let params = json!({"target": pane.0, "until": until});
+    Ok(m.link
+        .call::<Waited>("agent.wait", params, Duration::from_secs(86_400))
+        .await?
+        .agent
+        .agent_status)
 }
 
 pub async fn prompt(m: &Host, pane: &PaneId, text: &str) -> Result<()> {
@@ -489,7 +462,11 @@ pub async fn checkout_path(m: &Host, workspace: &WorkspaceId) -> Result<String> 
 
 // Through drover-wt rm, like the desk: it keeps a dirty checkout and an unmerged branch.
 pub async fn remove(m: &Host, workspace: &WorkspaceId) -> Result<String> {
-    let path = Name::parse(&checkout_path(m, workspace).await?)?;
+    remove_path(m, &checkout_path(m, workspace).await?).await
+}
+
+pub async fn remove_path(m: &Host, path: &str) -> Result<String> {
+    let path = Name::parse(path)?;
     let o = sh(m, &format!("drover-wt rm '{}'", path.as_str()), LONG).await?;
     if o.code != Some(0) {
         return Err(failure(&o));
@@ -498,7 +475,7 @@ pub async fn remove(m: &Host, workspace: &WorkspaceId) -> Result<String> {
 }
 
 // Quotes one argument for the shell, for a folder that came from herdr or drover-wt.
-fn quote(s: &str) -> String {
+pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
@@ -509,299 +486,9 @@ pub async fn close_pane(m: &Host, pane: &PaneId) -> Result<()> {
         .map(drop)
 }
 
-// ── transcript ──────────────────────────────────────────────
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Line {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    is_meta: bool,
-    #[serde(default)]
-    is_compact_summary: bool,
-    #[serde(default)]
-    subtype: Option<String>,
-    #[serde(default)]
-    uuid: String,
-    message: Option<Msg>,
-}
-
-#[derive(Deserialize)]
-struct Msg {
-    content: Option<Content>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum Content {
-    Text(#[expect(dead_code, reason = "only the variant matters")] String), // must stay a String: untagged tries variants in order
-    Blocks(Vec<Block>),
-    Other(IgnoredAny),
-}
-
-#[derive(Deserialize)]
-struct Block {
-    #[serde(rename = "type")]
-    kind: String,
-    text: Option<String>,
-}
-
-impl Line {
-    fn content(&self) -> Option<&Content> {
-        self.message.as_ref()?.content.as_ref()
-    }
-
-    fn is_prompt(&self) -> bool {
-        self.kind == "user"
-            && !self.is_meta
-            && !self.is_compact_summary
-            && match self.content() {
-                Some(Content::Text(_)) => true,
-                Some(Content::Blocks(b)) => b.iter().any(|b| b.kind == "text"),
-                _ => false,
-            }
-    }
-
-    // Claude Code writes this once a turn is over, after the turn's last text.
-    fn ends_turn(&self) -> bool {
-        self.kind == "system" && self.subtype.as_deref() == Some("turn_duration")
-    }
-
-    fn texts(&self) -> impl Iterator<Item = &str> {
-        let blocks = match self.content() {
-            Some(Content::Blocks(b)) => b.as_slice(),
-            _ => &[],
-        };
-        blocks
-            .iter()
-            .filter(|b| b.kind == "text")
-            .filter_map(|b| b.text.as_deref())
-            .map(str::trim)
-    }
-}
-
-pub struct Reply {
-    pub id: String,
-    pub text: String,
-}
-
-// The newest turn of a Claude Code transcript: the turn after its latest real prompt.
-#[derive(Default)]
-pub struct Turn {
-    pub reply: Option<Reply>, // its last assistant text
-    // the agent wrote in it and its end line has not come yet, so a later text may still land
-    pub open: bool,
-}
-
-pub async fn reply(m: &Host, session: &SessionId) -> Result<Turn> {
-    let turn = read_back(m, session, |text| match last_reply(text) {
-        Scan::Turn(t) => Some(t),
-        Scan::NoPrompt => None,
-    });
-    Ok(turn.await?.unwrap_or_default())
-}
-
-// Reads the transcript from the end and doubles the window until `scan` finds what it looks for,
-// so a long session crosses ssh only as far as it needs. None when the file has none.
-async fn read_back<T>(
-    m: &Host,
-    session: &SessionId,
-    scan: impl Fn(&str) -> Option<T>,
-) -> Result<Option<T>> {
-    let file = format!("{}.jsonl", session.0);
-    let local = match m.reach {
-        Reach::Ssh => None,
-        Reach::Local => match find_local(&file).await? {
-            Some(path) => Some(path),
-            None => return Ok(None),
-        },
-    };
-    let mut window = TAIL;
-    loop {
-        let (text, whole) = match &local {
-            Some(path) => tail(path, window).await?,
-            None => match ssh_tail(m, &file, window).await? {
-                Some(t) => t,
-                None => return Ok(None),
-            },
-        };
-        match scan(&text) {
-            Some(found) => return Ok(Some(found)),
-            None if whole => return Ok(None),
-            None => window *= 2,
-        }
-    }
-}
-
-async fn find_local(file: &str) -> Result<Option<PathBuf>> {
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "HOME is not set"))?;
-    let mut dirs = match tokio::fs::read_dir(Path::new(&home).join(".claude/projects")).await {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    while let Some(d) = dirs.next_entry().await? {
-        let path = d.path().join(file);
-        if tokio::fs::try_exists(&path).await? {
-            return Ok(Some(path));
-        }
-    }
-    Ok(None)
-}
-
-// The last `window` bytes, and whether they reach the start of the file.
-async fn tail(path: &Path, window: u64) -> Result<(String, bool)> {
-    let mut f = tokio::fs::File::open(path).await?;
-    let len = f.metadata().await?.len();
-    let from = len.saturating_sub(window);
-    f.seek(SeekFrom::Start(from)).await?;
-    let mut buf = Vec::new();
-    f.read_to_end(&mut buf).await?;
-    // the first line may be cut mid-way; it fails to parse and is skipped
-    Ok((String::from_utf8_lossy(&buf).into_owned(), from == 0))
-}
-
-// None when the file is not there.
-async fn ssh_tail(m: &Host, file: &str, window: u64) -> Result<Option<(String, bool)>> {
-    let o = sh(
-        m,
-        &format!("tail -c {window} ~/.claude/projects/*/{file}"),
-        SHORT,
-    )
-    .await?;
-    if o.code != Some(0) {
-        return Ok(None);
-    }
-    // tail returns fewer bytes than asked only when the file is shorter
-    let whole = (o.out.len() as u64) < window;
-    Ok(Some((o.out, whole)))
-}
-
-enum Scan {
-    NoPrompt,
-    Turn(Turn),
-}
-
-// Walks back from the end, so only the latest turn is parsed. An interrupt or a local command
-// such as /compact is a prompt with nothing after it, so its turn is not open.
-#[must_use]
-fn last_reply(jsonl: &str) -> Scan {
-    let mut reply = None;
-    // the newest line that tells: an assistant line opens the turn, the end line closes it
-    let mut open = None;
-    for line in jsonl.lines().rev() {
-        let Ok(e) = serde_json::from_str::<Line>(line) else {
-            continue;
-        };
-        if e.is_prompt() {
-            return Scan::Turn(Turn {
-                reply,
-                open: open.unwrap_or(false),
-            });
-        }
-        if e.ends_turn() {
-            open.get_or_insert(false);
-        }
-        if e.kind != "assistant" {
-            continue;
-        }
-        open.get_or_insert(true);
-        if reply.is_none()
-            && let Some(text) = e.texts().filter(|t| !t.is_empty()).last()
-        {
-            reply = Some(Reply {
-                id: e.uuid.clone(),
-                text: text.into(),
-            });
-        }
-    }
-    Scan::NoPrompt
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn reply_after_latest_prompt() {
-        let jsonl = [
-            r#"{"type":"user","message":{"content":"first"}}"#,
-            r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"old"}]}}"#,
-            r#"{"type":"user","message":{"content":[{"type":"text","text":"second"}]}}"#,
-            r#"{"type":"assistant","uuid":"a2","message":{"content":[{"type":"text","text":" new "},{"type":"tool_use","id":"t"}]}}"#,
-            r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"x"}]}}"#,
-            r#"{"type":"assistant","uuid":"a3","message":{"content":[{"type":"text","text":"  "}]}}"#,
-            "not json",
-        ]
-        .join("\n");
-        assert!(matches!(
-            last_reply(&jsonl),
-            Scan::Turn(Turn { reply: Some(r), .. }) if r.id == "a2" && r.text == "new"
-        ));
-
-        let only_prompt = r#"{"type":"user","message":{"content":"hi"}}"#;
-        assert!(matches!(
-            last_reply(only_prompt),
-            Scan::Turn(Turn { reply: None, .. })
-        ));
-        let no_prompt = r#"{"type":"assistant","uuid":"a1","message":{"content":[{"type":"text","text":"x"}]}}"#;
-        assert!(matches!(last_reply(no_prompt), Scan::NoPrompt));
-    }
-
-    // Lines as Claude Code 2.1 writes them.
-    const PROMPT: &str = r#"{"type":"user","message":{"content":"go"}}"#;
-    const MID: &str = r#"{"type":"assistant","uuid":"m","message":{"content":[{"type":"text","text":"13 pass, then the full checks:"}]}}"#;
-    const TOOL: &str =
-        r#"{"type":"assistant","uuid":"t","message":{"content":[{"type":"tool_use","id":"x"}]}}"#;
-    const RESULT: &str =
-        r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"ok"}]}}"#;
-    const LAST: &str = r#"{"type":"assistant","uuid":"l","message":{"content":[{"type":"text","text":"DONE: 2cde9f6"}]}}"#;
-    const END: &str = r#"{"type":"system","subtype":"turn_duration","isMeta":false}"#;
-    const NOTIFY: &str = r#"{"type":"user","origin":{"kind":"task-notification"},"message":{"content":"<task-notification>\n<task-id>b1</task-id>\n<status>completed</status>\n</task-notification>"}}"#;
-    const INTERRUPT: &str = r#"{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]}}"#;
-    const COMPACT: &str =
-        r#"{"type":"user","message":{"content":"<command-name>/compact</command-name>"}}"#;
-
-    // The reply's id, and whether the turn is still open.
-    fn turn(lines: &[&str]) -> Option<(Option<String>, bool)> {
-        match last_reply(&lines.join("\n")) {
-            Scan::Turn(t) => Some((t.reply.map(|r| r.id), t.open)),
-            Scan::NoPrompt => None,
-        }
-    }
-
-    // The status flips before the turn's last text is written, and the newest text is then one
-    // from the middle of the turn. The turn stays open until its end line.
-    #[test]
-    fn a_turn_is_open_until_its_end_line() {
-        let open = turn(&[PROMPT, MID, TOOL, RESULT]);
-        assert_eq!(open, Some((Some("m".into()), true)));
-        let ended = turn(&[PROMPT, MID, TOOL, RESULT, LAST, END]);
-        assert_eq!(ended, Some((Some("l".into()), false)));
-    }
-
-    // Claude Code resumes on its own when a background task ends, with a notification prompt.
-    #[test]
-    fn a_task_notification_starts_a_turn_of_its_own() {
-        // the mid-turn text ended its turn; the notification's turn has written no text yet
-        let resuming = turn(&[PROMPT, MID, END, NOTIFY, TOOL, RESULT]);
-        assert_eq!(resuming, Some((None, true)));
-        let resumed = turn(&[PROMPT, MID, END, NOTIFY, TOOL, RESULT, LAST, END]);
-        assert_eq!(resumed, Some((Some("l".into()), false)));
-    }
-
-    // Turns that never get an end line: there is nothing to wait for.
-    #[test]
-    fn an_interrupt_or_a_local_command_is_not_open() {
-        assert_eq!(
-            turn(&[PROMPT, MID, TOOL, RESULT, INTERRUPT]),
-            Some((None, false))
-        );
-        assert_eq!(turn(&[PROMPT, LAST, END, COMPACT]), Some((None, false)));
-        assert_eq!(turn(&[PROMPT, LAST, END, NOTIFY]), Some((None, false)));
-    }
 
     #[test]
     fn quote_keeps_one_argument() {

@@ -23,7 +23,7 @@ use tokio::{
     sync::{Mutex, oneshot},
 };
 
-use crate::herdr::{Error, PaneId, Result, Status};
+use crate::herdr::{Error, PaneId, Result};
 
 const RELAY: &str = r#"
 import json, os, socket, sys, threading
@@ -262,8 +262,6 @@ impl Link {
 
 #[derive(Debug)]
 pub enum Push {
-    Status(PaneId, Status),
-    Detected(PaneId), // an agent (re)started in a pane, so its session may be new
     Gone(PaneId),
     Reconcile, // a workspace closed; its payload names no pane
     Lost,
@@ -277,20 +275,13 @@ pub struct Events {
 }
 
 impl Events {
-    /// Status for `panes`, plus agent starts and pane teardown anywhere.
-    /// `panes` must all still exist or herdr rejects the whole request.
-    pub async fn subscribe(host: Option<&str>, panes: &[PaneId]) -> Result<Self> {
-        let mut subs = vec![
+    /// Pane and workspace teardown anywhere: what hooks cannot report.
+    pub async fn subscribe(host: Option<&str>) -> Result<Self> {
+        let subs = [
             json!({"type": "pane.closed"}),
             json!({"type": "pane.exited"}),
             json!({"type": "workspace.closed"}),
-            json!({"type": "pane.agent_detected"}),
         ];
-        subs.extend(
-            panes
-                .iter()
-                .map(|p| json!({"type": "pane.agent_status_changed", "pane_id": p.0})),
-        );
         let line = format!(
             "{}\n",
             json!({"id": "sub", "method": "events.subscribe", "params": {"subscriptions": subs}})
@@ -345,15 +336,8 @@ impl Events {
             let (Some(event), Some(data)) = (w.event, w.data) else {
                 continue;
             };
-            // herdr 0.9.3 names this one with dots and the others with underscores
+            // herdr 0.9.3 names some events with dots and others with underscores
             return Ok(match event.replace('.', "_").as_str() {
-                "pane_agent_status_changed" => {
-                    let d: Data = serde_json::from_value(data)?;
-                    Push::Status(d.pane_id, d.agent_status.unwrap_or(Status::Unknown))
-                }
-                "pane_agent_detected" => {
-                    Push::Detected(serde_json::from_value::<Data>(data)?.pane_id)
-                }
                 "pane_closed" | "pane_exited" => {
                     Push::Gone(serde_json::from_value::<Data>(data)?.pane_id)
                 }
@@ -370,5 +354,4 @@ struct IgnoredResult {}
 #[derive(Deserialize)]
 struct Data {
     pane_id: PaneId,
-    agent_status: Option<Status>,
 }

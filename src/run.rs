@@ -258,6 +258,16 @@ pub struct Usage {
     pub cost_usd: f64,
 }
 
+impl std::ops::AddAssign<&Usage> for Usage {
+    fn add_assign(&mut self, u: &Usage) {
+        self.input += u.input;
+        self.output += u.output;
+        self.cache_read += u.cache_read;
+        self.cache_write += u.cache_write;
+        self.cost_usd += u.cost_usd;
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
     pub id: RunId,
@@ -277,12 +287,9 @@ pub struct Run {
 }
 
 impl Run {
-    // herdr names a pane after its workspace: `wB4:p5` is in `wB4`.
     #[must_use]
     pub fn workspace(&self) -> Option<WorkspaceId> {
-        let pane = self.mode.pane()?;
-        let (ws, _) = pane.0.split_once(':')?;
-        Some(WorkspaceId(ws.into()))
+        self.mode.pane()?.workspace()
     }
 }
 
@@ -293,9 +300,37 @@ pub fn now() -> i64 {
         .map_or(0, |d| d.as_secs().try_into().unwrap_or(i64::MAX))
 }
 
+// Unix seconds as UTC, `2026-10-19T16:12:04Z`. Days to a civil date as in Hinnant's `civil_from_days`.
+#[must_use]
+pub fn rfc3339(secs: i64) -> String {
+    let (days, t) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        t / 3600,
+        t % 3600 / 60,
+        t % 60
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn times_print_as_utc() {
+        assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
+        assert_eq!(rfc3339(1_792_426_324), "2026-10-19T16:12:04Z");
+    }
 
     #[test]
     fn ids_and_names_are_checked() {

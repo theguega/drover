@@ -5,8 +5,11 @@
 //   remotes = ["chicken", "dog"]     # ssh names whose herdr server already runs
 //   repos_root = "~/.drover-workspace"   # given to drover-wt on this machine as REPOS_ROOT
 //   v1_state = "~/Developer/drover/state.json"   # migrated into a new drover.db, once
+//   http_port = 7341                 # hooks, events and approvals, on 127.0.0.1 only
+//   hook_timeout = 600               # seconds a tool call waits for your approve or deny
+//   idle_kill = 900                  # seconds a headless process stays warm after its last turn
 //
-// Only that flat subset of TOML is read: `key = "string"` and `key = ["a", "b"]`.
+// Only that flat subset of TOML is read: `key = "string"`, `key = ["a", "b"]` and `key = 7`.
 
 use std::path::{Path, PathBuf};
 
@@ -50,6 +53,9 @@ pub struct Config {
     pub remotes: Vec<Machine>,
     pub repos_root: Option<PathBuf>,
     pub v1_state: Option<PathBuf>,
+    pub http_port: u16,
+    pub hook_timeout: u64,
+    pub idle_kill: u64,
 }
 
 impl Config {
@@ -68,6 +74,9 @@ impl Config {
             remotes: Vec::new(),
             repos_root: None,
             v1_state: None,
+            http_port: 7341,
+            hook_timeout: 600,
+            idle_kill: 900,
         };
         for (n, line) in text.lines().enumerate() {
             let line = line.split_once('#').map_or(line, |(l, _)| l).trim();
@@ -76,7 +85,7 @@ impl Config {
             }
             let bad = || {
                 err!(
-                    "line {}: expected key = \"value\" or key = [\"a\", \"b\"]",
+                    "line {}: expected key = \"value\", key = [\"a\", \"b\"] or key = 7",
                     n + 1
                 )
             };
@@ -98,6 +107,9 @@ impl Config {
                 }
                 "repos_root" => c.repos_root = Some(expand(string(value).ok_or_else(bad)?)),
                 "v1_state" => c.v1_state = Some(expand(string(value).ok_or_else(bad)?)),
+                "http_port" => c.http_port = value.parse().map_err(|_| bad())?,
+                "hook_timeout" => c.hook_timeout = value.parse().map_err(|_| bad())?,
+                "idle_kill" => c.idle_kill = value.parse().map_err(|_| bad())?,
                 k => bail!("line {}: unknown key {k}", n + 1),
             }
         }
@@ -123,8 +135,10 @@ mod tests {
     #[test]
     fn reads_the_flat_subset() -> Result<()> {
         let c = Config::parse(
-            "# drover\nhost = \"meerkat\"\nremotes = [\"chicken\", \"dog\"]  # two\nv1_state = \"/x/state.json\"\n",
+            "# drover\nhost = \"meerkat\"\nremotes = [\"chicken\", \"dog\"]  # two\nv1_state = \"/x/state.json\"\nhttp_port = 7342\n",
         )?;
+        assert_eq!((c.http_port, c.hook_timeout), (7342, 600));
+        assert!(Config::parse("http_port = \"7342\"").is_err());
         assert_eq!(c.host.as_str(), "meerkat");
         assert_eq!(
             c.remotes.iter().map(Machine::as_str).collect::<Vec<_>>(),

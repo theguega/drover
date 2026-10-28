@@ -14,7 +14,9 @@ macro_rules! bail {
 mod cli;
 mod config;
 mod control;
+mod harness;
 mod herdr;
+mod http;
 mod migrate;
 mod run;
 mod serve;

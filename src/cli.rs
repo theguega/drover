@@ -35,7 +35,7 @@ pub struct Cli {
 #[derive(Subcommand, Serialize, Deserialize)]
 #[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Cmd {
-    /// Start a run: a worktree, and the agent in a herdr pane. With --parent it waits for your approve-run
+    /// Start a run: a worktree, and the agent in a herdr pane or headless. With --parent it waits for your approve-run
     Run(Start),
     /// Runs, live ones unless --all or --phase
     Ls(Ls),
@@ -43,10 +43,15 @@ pub enum Cmd {
     Show { run: RunId },
     /// The next prompt to a run you own; - reads it from stdin
     Send { run: RunId, text: String },
-    /// Allow a tool call a run waits on [not implemented]
+    /// Allow a tool call a run waits on (its `needs` perm). Late, it resumes the run with the approval
     Approve { run: RunId, perm: String },
-    /// Deny a tool call a run waits on [not implemented]
-    Deny { run: RunId, perm: String },
+    /// Deny a tool call a run waits on; the agent reads the reason
+    Deny {
+        run: RunId,
+        perm: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Start a pending run
     ApproveRun { run: RunId },
     /// Remove a pending run
@@ -58,7 +63,7 @@ pub enum Cmd {
         #[arg(long)]
         parent: Option<RunId>,
     },
-    /// Take a run over: you type into it, its owner can only read
+    /// Take a run over: you type into it, its owner can only read. A headless run reopens in a pane
     Attach { run: RunId },
     /// The end of a pane run's terminal
     Screen {
@@ -72,7 +77,7 @@ pub enum Cmd {
         #[arg(required = true)]
         keys: Vec<String>,
     },
-    /// Interrupt the run's current turn
+    /// Interrupt the run's current turn; a headless run's process is stopped, and the next send resumes it
     Stop { run: RunId },
     /// Close a run: `brain log` its entry, close its pane, and with --remove its worktree if clean and merged
     Done {
@@ -93,11 +98,15 @@ pub enum Cmd {
         #[arg(long)]
         text: String,
     },
-    /// Open runs as JSON, then a line per change
+    /// Events as JSON lines (C9), as they happen: started, text, tool_start, tool_end, needs, reply, done, failed
     Watch {
-        /// Done and failed runs too
         #[arg(long)]
-        all: bool,
+        run: Option<RunId>,
+        #[arg(long, value_enum)]
+        role: Option<Role>,
+        /// Events after this id first [default: only new ones]
+        #[arg(long)]
+        since: Option<i64>,
     },
     /// Open runs as JSON
     Snapshot {
@@ -105,7 +114,7 @@ pub enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// The service: the unix socket and one event watcher per machine
+    /// The service: the unix socket, HTTP on 127.0.0.1 for hooks and events, and one herdr watcher per machine
     Serve,
     #[command(hide = true)]
     Home,
@@ -116,11 +125,11 @@ pub struct Start {
     /// A machine from the config [default: this one]
     #[arg(long)]
     pub machine: Option<Machine>,
-    /// A repo under the repos root
-    #[arg(long, required_unless_present = "scratch")]
+    /// A repo under the repos root [required for an actor]
+    #[arg(long, requires = "branch")]
     pub repo: Option<String>,
     /// A new name, an existing branch, or #<pr>
-    #[arg(long, required_unless_present = "scratch")]
+    #[arg(long, requires = "repo")]
     pub branch: Option<String>,
     /// A temp dir and no repo [not implemented]
     #[arg(long, conflicts_with_all = ["repo", "branch"])]
@@ -128,13 +137,17 @@ pub struct Start {
     /// In a herdr pane [default]
     #[arg(long, conflicts_with = "headless")]
     pub pane: bool,
-    /// Headless, over the harness's stream [not implemented]
+    /// Headless, over the harness's stream: the process stays warm for the next send
     #[arg(long)]
     pub headless: bool,
     #[arg(long, value_enum, default_value_t = HarnessName::Claude)]
     pub harness: HarnessName,
+    /// actor: a worktree and your allowlists. reader: brain reads and Read only, headless, in the state dir's reader/
     #[arg(long, value_enum, default_value_t = Profile::Actor)]
     pub profile: Profile,
+    /// The harness's model [default: the harness's own]
+    #[arg(long)]
+    pub model: Option<String>,
     /// The run that asks for this one, which then owns it and waits for your approve-run. A run (with $DROVER_RUN) is always the parent of the runs it asks for
     #[arg(long)]
     pub parent: Option<RunId>,
@@ -201,6 +214,9 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
         }
         Cmd::Run(Start { prompt: text, .. })
         | Cmd::Send { text, .. }
+        | Cmd::Deny {
+            reason: Some(text), ..
+        }
         | Cmd::Done {
             entry: Some(text), ..
         } => stdin_dash(text)?,
@@ -275,8 +291,8 @@ mod tests {
     #[test]
     fn bad_input_is_a_usage_error() {
         for line in [
-            "run --prompt go",
-            "run --scratch --repo x --prompt go",
+            "run --repo x --prompt go",
+            "run --scratch --repo x --branch y --prompt go",
             "run --pane --headless --scratch --prompt go",
             "send r-1 hi",
             "keys r-00aa11",

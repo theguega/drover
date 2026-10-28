@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::{
     Result,
     herdr::{PaneId, SessionId},
-    run::{HarnessName, Mode, Owner, Phase, Profile, Role, Run, RunId, now},
+    run::{HarnessName, Mode, Owner, Phase, Profile, Role, Run, RunId, now, rfc3339},
 };
 
 const SCHEMA: &str = "
@@ -30,11 +30,15 @@ CREATE INDEX IF NOT EXISTS events_run ON events(run, id);
 CREATE TABLE IF NOT EXISTS goals(run TEXT PRIMARY KEY, graph TEXT NOT NULL, updated_at INTEGER NOT NULL);
 ";
 
-// What happened to a run. `Requested` holds what a run was asked to do, kept until it starts.
+// What happened to a run: the C9 kinds, and `requested`, what a run was asked to do, which is
+// stored and never streamed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Requested,
     Started,
+    Text,
+    ToolStart,
+    ToolEnd,
     Needs,
     Reply,
     Done,
@@ -47,12 +51,51 @@ impl Kind {
         match self {
             Self::Requested => "requested",
             Self::Started => "started",
+            Self::Text => "text",
+            Self::ToolStart => "tool_start",
+            Self::ToolEnd => "tool_end",
             Self::Needs => "needs",
             Self::Reply => "reply",
             Self::Done => "done",
             Self::Failed => "failed",
         }
     }
+}
+
+// An event as it streams (C9), with its row id for `since`. The usage it carries is lifted out of data.
+#[must_use]
+pub fn c9(id: i64, r: &Run, at: i64, kind: Kind, data: &Value) -> Value {
+    c9_row(
+        id,
+        r.id.as_str(),
+        r.mode.as_str(),
+        r.role.as_str(),
+        r.parent.as_ref().map(RunId::as_str),
+        at,
+        kind.as_str(),
+        data.clone(),
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one events row joined with its run"
+)]
+fn c9_row(
+    id: i64,
+    run: &str,
+    mode: &str,
+    role: &str,
+    parent: Option<&str>,
+    at: i64,
+    kind: &str,
+    mut data: Value,
+) -> Value {
+    let usage = data.as_object_mut().and_then(|d| d.remove("usage"));
+    json!({
+        "id": id, "run": run, "mode": mode, "role": role, "parent": parent,
+        "at": rfc3339(at), "kind": kind, "data": data, "usage": usage,
+    })
 }
 
 pub struct Store(Mutex<Connection>);
@@ -200,7 +243,7 @@ impl Store {
         rows.into_iter().map(Row::run).collect()
     }
 
-    pub fn count(&self) -> Result<usize> {
+    pub fn total(&self) -> Result<usize> {
         let n: i64 = self
             .db()
             .query_row("SELECT count(*) FROM runs", [], |r| r.get(0))?;
@@ -274,8 +317,74 @@ impl Store {
         Ok(())
     }
 
-    pub fn event(&self, run: &RunId, kind: Kind, data: &Value) -> Result<()> {
-        add_event(&self.db(), run, kind, data)
+    // The new row's id and time.
+    pub fn event(&self, run: &RunId, kind: Kind, data: &Value) -> Result<(i64, i64)> {
+        let db = self.db();
+        let at = add_event(&db, run, kind, data)?;
+        Ok((db.last_insert_rowid(), at))
+    }
+
+    // Streamed events after row `since`, oldest first, as C9.
+    pub fn events_after(
+        &self,
+        since: i64,
+        run: Option<&RunId>,
+        role: Option<Role>,
+    ) -> Result<Vec<Value>> {
+        let db = self.db();
+        let mut stmt = db.prepare(
+            "SELECT e.id, e.run, r.mode, r.role, r.parent, e.at, e.kind, e.data FROM events e
+             JOIN runs r ON r.id = e.run
+             WHERE e.id > ?1 AND e.kind != 'requested' AND (?2 IS NULL OR e.run = ?2) AND (?3 IS NULL OR r.role = ?3)
+             ORDER BY e.id LIMIT 1000",
+        )?;
+        let rows = stmt
+            .query_map(
+                params![since, run.map(RunId::as_str), role.map(Role::as_str)],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, i64>(5)?,
+                        r.get::<_, String>(6)?,
+                        r.get::<_, String>(7)?,
+                    ))
+                },
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(id, run, mode, role, parent, at, kind, data)| {
+                Ok(c9_row(
+                    id,
+                    &run,
+                    &mode,
+                    &role,
+                    parent.as_deref(),
+                    at,
+                    &kind,
+                    serde_json::from_str(&data)?,
+                ))
+            })
+            .collect()
+    }
+
+    pub fn last_event(&self) -> Result<i64> {
+        Ok(self
+            .db()
+            .query_row("SELECT coalesce(max(id), 0) FROM events", [], |r| r.get(0))?)
+    }
+
+    // How many tool calls of the run asked for a permission: `needs` events with a perm.
+    pub fn perms(&self, run: &RunId) -> Result<usize> {
+        let n: i64 = self.db().query_row(
+            "SELECT count(*) FROM events WHERE run = ?1 AND kind = 'needs' AND data ->> '$.perm' IS NOT NULL",
+            [run.as_str()],
+            |r| r.get(0),
+        )?;
+        Ok(usize::try_from(n).unwrap_or_default())
     }
 
     // The data of the run's newest event of this kind.
@@ -317,12 +426,13 @@ fn write(db: &Connection, verb: &str, r: &Run) -> Result<()> {
     Ok(())
 }
 
-fn add_event(db: &Connection, run: &RunId, kind: Kind, data: &Value) -> Result<()> {
+fn add_event(db: &Connection, run: &RunId, kind: Kind, data: &Value) -> Result<i64> {
+    let at = now();
     db.execute(
         "INSERT INTO events(run, at, kind, data) VALUES (?1, ?2, ?3, ?4)",
-        params![run.as_str(), now(), kind.as_str(), data.to_string()],
+        params![run.as_str(), at, kind.as_str(), data.to_string()],
     )?;
-    Ok(())
+    Ok(at)
 }
 
 #[cfg(test)]

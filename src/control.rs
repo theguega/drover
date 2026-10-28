@@ -1,5 +1,5 @@
 // The service's unix socket: one JSON line in, one JSON line out. `watch` keeps the connection
-// open and writes a line per change.
+// open and writes a line per event.
 
 use std::{os::unix::fs::PermissionsExt, path::Path, sync::Arc};
 
@@ -17,7 +17,7 @@ use crate::{
     Error, Result,
     cli::{Cmd, Request},
     config::Paths,
-    serve::App,
+    serve::{App, Feed, Filter},
 };
 
 // An error as the terminal prints it: what went wrong and the command that fixes it.
@@ -87,9 +87,9 @@ async fn handle(app: &App, stream: UnixStream) -> Result<()> {
     read.read_line(&mut line).await?;
     let reply = match serde_json::from_str::<Request>(&line) {
         Ok(Request {
-            cmd: Cmd::Watch { all },
+            cmd: Cmd::Watch { run, role, since },
             ..
-        }) => return watch_loop(app, all, read, write).await,
+        }) => return watch_loop(app, Filter { run, role, since }, read, write).await,
         Ok(r) => app.act(r.from, r.cmd).await.map_err(Failure::from),
         Err(e) => Err(Failure::from(err!("bad request: {e}"))),
     };
@@ -103,24 +103,22 @@ async fn write_reply(write: &mut OwnedWriteHalf, reply: &impl Serialize) -> Resu
     Ok(())
 }
 
-// A snapshot now, then one per change, until the client closes its end. Changes that land while
-// a snapshot is built or written coalesce into the next line.
+// Each event as it comes, until the client closes its end.
 async fn watch_loop(
     app: &App,
-    all: bool,
+    filter: Filter,
     mut read: BufReader<OwnedReadHalf>,
     mut write: OwnedWriteHalf,
 ) -> Result<()> {
+    let mut feed = Feed::new(app, filter)?;
     loop {
-        // enabled before the snapshot is built, so a change during it still wakes the wait
-        let changed = app.changed.notified();
-        tokio::pin!(changed);
-        changed.as_mut().enable();
-        let reply = app.snapshot(all).map_err(Failure::from);
-        write_reply(&mut write, &reply).await?;
         let mut gone = String::new();
         tokio::select! {
-            () = &mut changed => {}
+            events = feed.next(app) => {
+                for e in events? {
+                    write_reply(&mut write, &Ok::<_, Failure>(e)).await?;
+                }
+            }
             // the client sends nothing more, so any read result means it hung up
             _ = read.read_line(&mut gone) => return Ok(()),
         }
@@ -128,25 +126,30 @@ async fn watch_loop(
 }
 
 pub async fn send(paths: &Paths, request: &Request) -> Result<Value, Failure> {
-    let read = connect(paths, request).await?;
+    let (read, _write) = connect(paths, request).await?;
     let mut reply = String::new();
     BufReader::new(read).read_line(&mut reply).await?;
     serde_json::from_str::<Result<Value, Failure>>(&reply)
         .map_err(|e| Failure::from(err!("reply from drover: {e}")))?
 }
 
-// Prints each snapshot as one JSON line, until the service or this terminal closes.
+// Prints each event as one JSON line, until the service or this terminal closes.
 pub async fn watch(paths: &Paths, request: &Request) -> Result<(), Failure> {
-    let mut lines = BufReader::new(connect(paths, request).await?).lines();
+    // the write half stays open: dropping it shuts the socket down, which the service reads as leaving
+    let (read, _write) = connect(paths, request).await?;
+    let mut lines = BufReader::new(read).lines();
     while let Some(reply) = lines.next_line().await? {
-        let snapshot = serde_json::from_str::<Result<Value, Failure>>(&reply)
+        let event = serde_json::from_str::<Result<Value, Failure>>(&reply)
             .map_err(|e| Failure::from(err!("reply from drover: {e}")))??;
-        println!("{snapshot}");
+        println!("{event}");
     }
     Ok(())
 }
 
-async fn connect(paths: &Paths, request: &Request) -> Result<OwnedReadHalf, Failure> {
+async fn connect(
+    paths: &Paths,
+    request: &Request,
+) -> Result<(OwnedReadHalf, OwnedWriteHalf), Failure> {
     let path = paths.socket();
     let Ok(stream) = UnixStream::connect(&path).await else {
         return Err(Failure::new(
@@ -158,5 +161,5 @@ async fn connect(paths: &Paths, request: &Request) -> Result<OwnedReadHalf, Fail
     let mut line = serde_json::to_string(request).map_err(Error::from)?;
     line.push('\n');
     write.write_all(line.as_bytes()).await?;
-    Ok(read)
+    Ok((read, write))
 }
