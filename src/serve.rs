@@ -1,7 +1,13 @@
 // The service: what each command does to the runs, and one event watcher per machine that moves
 // pane runs along as herdr pushes their agents' status. Nothing polls.
 
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 
 use serde_json::{Value, json};
 use tokio::{io::AsyncWriteExt, process::Command, sync::Notify, time::sleep};
@@ -42,6 +48,8 @@ pub async fn run(paths: &Paths) -> Result<()> {
     let config = Config::load(&paths.config)?;
     std::fs::create_dir_all(&paths.state)?;
     std::fs::set_permissions(&paths.state, std::fs::Permissions::from_mode(0o700))?;
+    // held until the process ends, so the socket, drover.db and the watchers have one owner
+    let _lock = lock(&paths.state)?;
     let db = paths.db();
     let first = !db.exists();
     let store = Store::open(&db)?;
@@ -68,6 +76,20 @@ pub async fn run(paths: &Paths) -> Result<()> {
         tokio::spawn(async move { watch_machine(&app, &h).await });
     }
     control::serve(app, &paths.socket()).await
+}
+
+// One service per state dir. The OS drops the lock with its process, so a crash leaves none behind.
+fn lock(state: &Path) -> Result<std::fs::File> {
+    let file = std::fs::File::create(state.join("drover.lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Failure::new(
+            format!("drover serve already runs on {}", state.display()),
+            "stop that one first, or give this one another --state-dir",
+        )
+        .into()),
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
 }
 
 fn require_runtime() -> Result<()> {
@@ -976,8 +998,6 @@ async fn watch_session(app: &App, h: &Host) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     fn app() -> Result<App> {
@@ -1141,6 +1161,21 @@ mod tests {
             .is_some_and(|e| e == "no run r-0000ff")
         );
         assert_eq!(app.store.list()?.len(), 3);
+        Ok(())
+    }
+
+    // A second serve on the same state dir refuses; once the first is gone, a new one starts.
+    #[test]
+    fn one_serve_per_state_dir() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("drover-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let first = lock(&dir)?;
+        let second = lock(&dir).err().map(|e| Failure::from(e).error);
+        assert!(second.is_some_and(|e| e.starts_with("drover serve already runs on")));
+        drop(first);
+        let again = lock(&dir);
+        std::fs::remove_dir_all(&dir)?;
+        assert!(again.is_ok());
         Ok(())
     }
 

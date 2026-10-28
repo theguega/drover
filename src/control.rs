@@ -65,7 +65,7 @@ impl From<std::io::Error> for Failure {
 }
 
 pub async fn serve(app: Arc<App>, path: &Path) -> Result<()> {
-    // a socket left by a crash would make bind fail
+    // a socket left by a crash would make bind fail; the state dir lock says no serve owns it
     let _ = tokio::fs::remove_file(path).await;
     let listener = UnixListener::bind(path).map_err(|e| err!("bind {}: {e}", path.display()))?;
     tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
