@@ -5,7 +5,7 @@ description: "Drive drover, the agent runtime: start coding agents (runs) in git
 
 # drover
 
-drover runs coding agents and has no model. `drover run` opens a git worktree (`$REPOS_ROOT/<repo>.<branch>`) and starts the agent's TUI in a herdr pane, on the host or an SSH remote. Each agent session is a **run**, `r-` and six hex digits. drover follows a run through herdr events, so its phase is always current: `pending`, `starting`, `working`, `needs`, `idle`, `done`, `failed`.
+drover runs coding agents and has no model. `drover run` opens a git worktree (`$REPOS_ROOT/<repo>.<branch>`) and starts the agent's TUI in a herdr pane, or headless with `--headless`, on the host or an SSH remote. Each agent session is a **run**, `r-` and six hex digits. drover follows a run through the agent's hooks and stream, so its phase is always current: `pending`, `starting`, `working`, `needs`, `idle`, `done`, `failed`.
 
 Before any other command, read the home view:
 
@@ -24,6 +24,8 @@ drover run --repo <repo> --branch <branch> --prompt <prompt>   # starts now; - r
 drover ls [--role --machine --phase --all]
 drover show <run>                  # phase, owner, last reply (300 chars), children
 drover send <run> <text>           # the next prompt, only while idle
+drover approve <run> <perm> · deny <run> <perm> --reason <why>   # a tool call in `needs`; `show` lists perms
+drover watch [--run --role --since]   # events as JSON lines: started, text, tool_start, tool_end, needs, reply, done, failed
 drover screen <run> · keys <run> <keys…> · stop <run>
 drover done <run> [--remove] [--entry <text>]
 ```
@@ -32,8 +34,8 @@ drover done <run> [--remove] [--entry <text>]
 
 - A run started by an agent carries `DROVER_RUN` (its own id). drover checks it.
 - A run that runs `drover run …` asks for a crew run, with itself as parent and owner (`--parent` may only name itself). It waits in `pending` until the user runs `drover approve-run <run>`, or `drover drop-run <run>`. Only the user approves.
-- The parent owns its crew: only the owner may `send`, `keys` or `stop`. Anyone may read. `drover attach <run>` gives the run to the user.
+- The parent owns its crew: only the owner may `send`, `keys`, `stop`, `approve` or `deny`. Anyone may read. `drover attach <run>` gives the run to the user.
 
 ## Read the output
 
-Output is TOON: `key: value` lines, lists as `name[count]{fields}:` with one row per record. Errors print `error:` and `help:` with exit 1; exit 2 is a usage error. A change prints the run first, then `help:` with the next commands. `not implemented` marks a command a later version builds (`approve`, `deny`, `wait`, `goal`, `escalate`, `--headless`).
+Output is TOON: `key: value` lines, lists as `name[count]{fields}:` with one row per record. Errors print `error:` and `help:` with exit 1; exit 2 is a usage error. A change prints the run first, then `help:` with the next commands. `not implemented` marks a command a later version builds (`wait`, `goal`, `escalate`, `--scratch`, harnesses other than claude).

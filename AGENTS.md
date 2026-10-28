@@ -8,13 +8,15 @@ The user-facing guide is `README.md`. This file is how the program is put togeth
 src/main.rs     error type, err!/bail!, module list
 src/cli.rs      clap: argv to one Cmd, which is also the socket request; prints TOON
 src/control.rs  unix socket the service listens on, and the client side; `watch` holds it open
-src/serve.rs    the service: what each command does to the runs, one herdr event watcher per machine
+src/http.rs     127.0.0.1 HTTP: hook endpoints, GET /events (SSE), POST /runs/:id/permissions/:perm
+src/serve.rs    the service: commands, headless processes, hooks and approvals, a herdr watcher per machine
+src/harness/    the Harness trait (C12) and its adapters: claude.rs
 src/run.rs      Run and its types: RunId, Machine, Mode, Role, Profile, Owner, Phase, Usage
 src/store.rs    drover.db: runs, events, goals
 src/migrate.rs  v1 state.json into runs, once
 src/config.rs   state dir, config.toml (a flat TOML subset)
 src/socket.rs   herdr socket: requests and `events.subscribe` (direct locally, one ssh relay per remote)
-src/herdr.rs    herdr calls per machine, drover-wt and transcripts over sh / ssh
+src/herdr.rs    herdr calls per machine, drover-wt over sh / ssh
 src/toon.rs     JSON to TOON, what the terminal prints
 fixtures/       v1-state.json, the live v1 state with reply text scrubbed, for the migration test
 bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not from dotfiles)
@@ -22,18 +24,20 @@ bin/drover-ssh  the client on a non-host machine: runs drover on DROVER_HOST
 skills/drover/  the drover skill, copied by hand into ~/.agents/skills
 install.sh      host: config.toml, build, links, user service. --remote: links only
 bootstrap.sh    curl entry point: clones into ~/.local/share/drover, runs install.sh
+scripts/live-test.sh  headless, approvals, pane and attach against a real claude (haiku) and herdr
 mates/          v1 mate instructions (v2 mates are a later node, see DESIGN.md)
 ```
 
 State lives in `~/.local/state/drover/` (`drover.db`, `drover.sock`), config in `~/.config/drover/config.toml`.
 
-drover is an agent runtime, and it has no model. It opens a worktree, starts the real agent TUI inside herdr, and records the end of each turn. Every pane run is an ordinary herdr workspace, so the desk can take it over at any point. The model lives in the agent CLI, never in drover.
+drover is an agent runtime, and it has no model. It opens a worktree and starts the real agent CLI: its TUI in a herdr pane, or headless over its stream. Every pane run is an ordinary herdr workspace, so the desk can take it over at any point. The model lives in the agent CLI, never in drover.
 
 ```
 drover <cmd> ─ drover.sock ─▶ drover serve ─ drover.db
-                                  │
-                                  ├─ herdr.sock + drover-wt    $REPOS_ROOT/<repo>.<branch>
-                                  └─ ssh relay + ssh          the same on each remote
+dashboard ─ 127.0.0.1:7341 ─▶      │  ▲ hooks (http)
+                                   ├─ claude -p stream-json     headless, warm between turns
+                                   ├─ herdr.sock + drover-wt    $REPOS_ROOT/<repo>.<branch>
+                                   └─ ssh relay, ssh -R tunnel  the same on each remote
 ```
 
 ## Dotfiles
@@ -56,22 +60,31 @@ Native herdr worktree (0.9.3):
 
 The dotfiles blank native `new_worktree` so `prefix+shift+g` can run `drover-wt prompt`. `prefix+o` focuses the first blocked agent, else the first done one — the native toast target is gone with `ui.toast.delivery = "system"`.
 
+## Harness adapters
+
+`src/harness/mod.rs` holds the `Harness` trait: an adapter is its harness's protocol, as pure functions. `start` is the command line (pane or headless, profile, model, `--resume`), `send` a prompt as a stdin line, `events` one stdout line as `Out`s, `hook_settings` and `hook` the hooks it posts, `respond` the answer to a permission (back to the hook, or onto stdin), `abort`, and `caps`. Spawning the process, here or over ssh, its stdin and stdout, and what the events do to a run are drover's own and the same for every harness. A new harness is one file in `src/harness/`.
+
+Claude (`claude.rs`, see SPIKE.md):
+
+- Headless: `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages`. `system/init` gives the session, `text_delta`s are text, `tool_use` and `tool_result` blocks are tool_start and tool_end, `result` is the reply with the turn's `usage`; `total_cost_usd` is the process's running total, so a turn's cost is the difference.
+- Both modes get `--settings` with `http` hooks to `127.0.0.1:<http_port>/hooks/<run>`: `PermissionRequest` always, and for a pane `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop` (`last_assistant_message` is the reply) and `SessionEnd`. An actor gets `--permission-mode default`, since your default may be auto.
+- A reader gets `--restricted --tools Bash,Read --permission-mode dontAsk` and allow rules for `brain find|get|pages|code` and `Read`: your own settings files (and allowlists) are not read, and anything else is denied without asking.
+
 ## Event loop
 
-herdr's socket takes one request per connection and closes it after the reply. Locally drover connects to `~/.config/herdr/herdr.sock` per request (~0.1 ms). Each remote keeps one ssh open to a short Python relay that opens a socket connection per request line and streams every reply line back, matched by `id` (~1 RTT, about 100 ms to a remote, against ~2 s for `herdr --machine`). The relay needs `python3` on the remote. Only git (`drover-wt`) and remote transcript reads still spawn a shell.
-
-Each machine gets a watcher holding one `events.subscribe` — `pane.agent_status_changed` per live pane run, plus `pane.agent_detected`, `pane.closed`, `pane.exited`, and `workspace.closed` anywhere. `agent.list` runs only after (re)subscribing and when an agent starts, leaves, or a workspace closes. A change in the set of live panes resubscribes, subscribing before that reconcile so no event falls between them.
+Events are C9: `started`, `text`, `tool_start`, `tool_end`, `needs`, `reply`, `done`, `failed`. Each is stored and sent on a broadcast channel under one lock, so ids reach readers in order. `drover watch` and `GET /events` read through a `Feed`: stored events after `since`, then live ones; a reader that lags reads the store again. `requested` is stored and never streamed.
 
 ```
-pending ──approve-run──▶ starting ──ready: first prompt──▶ working ──turn read──▶ idle ──send──▶ working
-   └──drop-run (row deleted)        blocked: needs ◀──▶ working          any ──done / pane gone──▶ done
-                                    open fails, first prompt fails ──▶ failed
+pending ──approve-run──▶ starting ──first prompt──▶ working ──reply──▶ idle ──send──▶ working
+   └──drop-run (row deleted)        needs ◀──permission──▶ working      any ──done / pane gone──▶ done
+                                    open fails, a process dies mid-turn ──▶ failed
 ```
 
-- The prompt a run was asked for is a `requested` event; it goes out on the agent's first ready push, then a `started` event.
-- A ready push reads the transcript's newest turn. A turn not written yet leaves the run `working`, so an early push never loses a reply. Each reply is a `reply` event: the first 300 characters, `chars`, and the transcript line's id.
-- Turn handling and `send` take one lock. `send` first reads a turn that ended before its push came, refuses while a turn runs (Claude would queue the prompt), and after typing waits until herdr sees the turn start.
-- herdr may send no status change for a turn typed within a few ms of the previous turn's end. That turn is read at the next push, the next `send`, or a restart.
+- Headless: the process stays warm after a turn and is killed after `idle_kill`. `send` to a cold run spawns it again with `--resume`. A process that dies mid-turn fails its run; drover restarting leaves its headless runs idle, to resume on the next send.
+- Pane: `agent.start` with the adapter's args, then `agent.wait` for idle or blocked. Blocked is a startup dialog (folder trust): a `needs` with `dialog`, answered with `keys`, after which the first prompt goes out. Every later change comes from hooks. herdr's events report only a pane or workspace that closed; a run's watcher subscribes while its machine has live pane runs.
+- Turn handling, hooks and commands take one lock (`turns`). `send` refuses while a turn runs (Claude would queue the prompt).
+- Approvals: a `PermissionRequest` hook is a `needs` event with a perm id (`p1`, `p2`, …) and blocks until the owner's `approve` or `deny`. With no answer `min(10, hook_timeout/2)` s before `hook_timeout`, drover denies it with "awaiting approval". A later approve sends the run a prompt to make the call again, and allows that call (same tool and input, Bash description aside) without asking, since session allows do not survive `--resume`. Expired perms live in memory only.
+- Remote: a headless run is `ssh <machine> 'cd … && exec claude …'`, and each remote has one `ssh -N -R` tunnel carrying its hooks back to the host's port.
 
 ## Memory
 
@@ -92,7 +105,8 @@ Enforced by the lints in `Cargo.toml`:
 - Newtypes for ids (`RunId`, `Machine`, `PaneId`, `SessionId`, `Name`), validated once at the edge. herdr output is parsed straight into typed structs.
 - A typed `herdr::Error` (codes like `agent_not_ready` are matched). Elsewhere a boxed `std::error::Error` with `bail!` and `err!`; a `control::Failure` carries the `help:` line to the terminal.
 - Five dependencies: tokio, serde, serde_json, rusqlite, clap. Prefer a few lines over a crate: config.toml is read by a 30-line parser.
-- The owner check lives in the service: `send`, `keys` and `stop` need the run's owner, `approve-run`, `drop-run` and `attach` need you (no `DROVER_RUN`).
+- The owner check lives in the service: `send`, `keys`, `stop`, `approve` and `deny` need the run's owner (a crew run's approvals go to its mate), `approve-run`, `drop-run` and `attach` need you (no `DROVER_RUN`).
+- HTTP listens on 127.0.0.1 only and refuses a request with an `Origin` header or a `Host` that is not its address, so a browser page cannot reach it.
 - `state.json` from v1, and from the TypeScript version before it, still migrates. There are tests for both.
 
 Repo and branch names are checked (letters, digits, `# . _ / -`), machine names likewise, and session ids must be uuids before they reach a shell. drover adds no sandbox.
@@ -106,4 +120,4 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-A test service needs its own state dir: the default one is the live service's. Keep the path short, a unix socket path is capped at 108 bytes. Startup refuses to launch if `herdr`, `drover-wt`, `git`, `jq`, or `ssh` is missing from `PATH`.
+A test service needs its own state dir and `http_port`: the defaults are the live service's. `scripts/live-test.sh` sets both up. Keep the path short, a unix socket path is capped at 108 bytes. Startup refuses to launch if `herdr`, `drover-wt`, `git`, `jq`, or `ssh` is missing from `PATH`.

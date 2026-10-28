@@ -2,7 +2,7 @@
 
 drover runs coding agents. It starts them in git worktrees, on this machine or over ssh. It runs them either in a herdr pane, for you to pair with, or headless, for the dashboard and for other agents. It carries their approvals and streams their events. It calls no model and holds no knowledge: when a task ends, its journal entry goes to `brain log`.
 
-Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12.
+Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude adapter (pane and headless), events and SSE, approvals, profiles, per-run usage. Not yet: cursor and pi, mates (`goal`, `wait`, `escalate`), plan-window usage, the dashboard.
 
 ## What changes from v1
 
@@ -61,15 +61,18 @@ There is one native adapter per harness behind one trait (Q13). Each adapter map
 
 ```rust
 trait Harness {
-    fn start(&self, spec: &StartSpec) -> Result<Session>;   // cwd, prompt, profile, resume
-    fn send(&self, s: &Session, text: &str) -> Result<()>;
-    fn respond(&self, s: &Session, perm: PermId, allow: bool) -> Result<()>;
-    fn abort(&self, s: &Session) -> Result<()>;
-    fn events(&self, s: &Session) -> EventStream;           // normalized C9 events
-    fn hook_settings(&self, run: &RunId, url: &Url) -> Option<HookConfig>;  // pane mode
-    fn caps(&self) -> Caps;  // resume, approvals, usage, hooks: declared, never guessed
+    fn caps(&self) -> Caps;                          // headless, resume, approvals, usage, hooks: declared, never guessed
+    fn start(&self, spec: &StartSpec) -> Vec<String>; // the command line: pane or headless, profile, model, resume, hooks
+    fn send(&self, text: &str) -> String;            // a prompt, as one stdin line
+    fn respond(&self, d: &Decision) -> Answer;       // to the waiting hook, or onto stdin
+    fn abort(&self) -> Abort;                        // kill, or an interrupt line
+    fn events(&self, line: &str, p: &mut Parse) -> Vec<Out>;  // one stdout line, normalized
+    fn hook_settings(&self, spec: &StartSpec) -> Value;       // what makes the harness post to drover
+    fn hook(&self, body: &Value) -> Vec<Out>;                 // one hook it posted
 }
 ```
+
+The adapter is the protocol only, as pure functions. Spawning the process (here or over ssh), its pipes, idle kill, and what events do to a run are the same for every harness and live in drover once. Cursor's command hook reaches the same endpoint through `drover hook`; pi's rpc mode answers on stdin (`Answer::Stdin`).
 
 | Harness | Headless | Approvals | Pane observation | Ships |
 |---|---|---|---|---|
@@ -226,9 +229,7 @@ Everything lives in `~/.local/state/drover/`. Config is in `~/.config/drover/con
 
 ## Open (design level)
 
-- A one-day spike before writing `harness/claude.rs`, to answer four questions:
-  1. Does `-p` fire `PermissionRequest`, or only `PreToolUse`?
-  2. What is the maximum hook `timeout`?
-  3. After a deny, does the turn continue with the reason?
-  4. Does "allow for this session" persist?
-- Whether a pane run's text deltas are worth streaming, or only `reply` and tool events.
+- The spike's four questions are answered in SPIKE.md: `-p` fires `PermissionRequest`; no timeout cap was found, and drover answers before it; a deny's reason reaches the turn; session allows do not survive `--resume`, so drover allows a late-approved call itself.
+- Pane runs stream `reply` and tool events, not text deltas: the hooks carry no deltas.
+- Pane runs have no per-run usage yet: hooks carry none (the transcript does).
+- Expired approvals live in memory: a restart of `serve` forgets them.

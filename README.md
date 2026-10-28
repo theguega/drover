@@ -6,7 +6,8 @@ drover calls no model itself. The agents are the CLIs you already use.
 
 ## What you get
 
-- **Runs:** `drover run` opens a worktree and starts the agent in a herdr pane. drover follows it through herdr's events and keeps its phase, owner and last reply in `~/.local/state/drover/drover.db`.
+- **Runs:** `drover run` opens a worktree and starts the agent in a herdr pane, or `--headless` over its stream. drover follows it through the agent's own hooks and stream, and keeps its phase, owner, usage and last reply in `~/.local/state/drover/drover.db`.
+- **Approvals:** a tool call that needs a permission waits for `drover approve` or `drover deny --reason`, in both modes.
 - **Nothing runs without you:** a run another agent asks for (`--parent`) waits as `pending` until you `drover approve-run` it.
 - **`drover-wt`:** worktrees for herdr, from a branch, a new name, or a GitHub pull request (`#123`).
 - **Remotes:** drive herdr servers on other machines over ssh from the same desk.
@@ -42,9 +43,13 @@ drover show r-1a2b3c         # phase, owner, last reply, children
 drover send r-1a2b3c "now the tests"
 drover screen r-1a2b3c       # the pane's terminal
 drover keys r-1a2b3c esc enter
+drover run --repo myrepo --branch fix-y --headless --model haiku --prompt "…"   # no pane; warm for the next send
+drover approve r-1a2b3c p1   # allow the tool call it waits on; deny r-1a2b3c p1 --reason "…"
+drover attach r-1a2b3c       # a headless run reopens in a pane, as yours
 drover approve-run r-4d5e6f  # start a run an agent asked for; drop-run removes it
 drover done r-1a2b3c --remove --entry "what, why, outcome"   # brain log, close, remove the worktree
-drover snapshot              # open runs as JSON (--all for every run); `drover watch` streams it, one line per change
+drover snapshot              # open runs as JSON (--all for every run)
+drover watch --run r-1a2b3c  # its events as JSON lines; the same stream is GET http://127.0.0.1:7341/events
 ```
 
 `--help` on any command documents its flags.
