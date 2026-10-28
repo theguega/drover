@@ -93,10 +93,18 @@ pub enum Cmd {
         #[arg(long)]
         text: String,
     },
-    /// Every run as JSON, then a line per change
-    Watch,
-    /// Every run as JSON
-    Snapshot,
+    /// Open runs as JSON, then a line per change
+    Watch {
+        /// Done and failed runs too
+        #[arg(long)]
+        all: bool,
+    },
+    /// Open runs as JSON
+    Snapshot {
+        /// Done and failed runs too
+        #[arg(long)]
+        all: bool,
+    },
     /// The service: the unix socket and one event watcher per machine
     Serve,
     #[command(hide = true)]
@@ -205,8 +213,8 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
         ),
         _ => None,
     };
-    let watch = matches!(cmd, Cmd::Watch);
-    let snapshot = matches!(cmd, Cmd::Snapshot);
+    let watch = matches!(cmd, Cmd::Watch { .. });
+    let snapshot = matches!(cmd, Cmd::Snapshot { .. });
     let request = Request { from, cmd };
     if watch {
         return control::watch(&paths, &request).await.map(|()| Value::Null);

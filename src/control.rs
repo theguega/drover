@@ -87,8 +87,9 @@ async fn handle(app: &App, stream: UnixStream) -> Result<()> {
     read.read_line(&mut line).await?;
     let reply = match serde_json::from_str::<Request>(&line) {
         Ok(Request {
-            cmd: Cmd::Watch, ..
-        }) => return watch_loop(app, read, write).await,
+            cmd: Cmd::Watch { all },
+            ..
+        }) => return watch_loop(app, all, read, write).await,
         Ok(r) => app.act(r.from, r.cmd).await.map_err(Failure::from),
         Err(e) => Err(Failure::from(err!("bad request: {e}"))),
     };
@@ -106,6 +107,7 @@ async fn write_reply(write: &mut OwnedWriteHalf, reply: &impl Serialize) -> Resu
 // a snapshot is built or written coalesce into the next line.
 async fn watch_loop(
     app: &App,
+    all: bool,
     mut read: BufReader<OwnedReadHalf>,
     mut write: OwnedWriteHalf,
 ) -> Result<()> {
@@ -114,7 +116,7 @@ async fn watch_loop(
         let changed = app.changed.notified();
         tokio::pin!(changed);
         changed.as_mut().enable();
-        let reply = app.snapshot().map_err(Failure::from);
+        let reply = app.snapshot(all).map_err(Failure::from);
         write_reply(&mut write, &reply).await?;
         let mut gone = String::new();
         tokio::select! {

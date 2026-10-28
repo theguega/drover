@@ -44,7 +44,7 @@ drover screen r-1a2b3c       # the pane's terminal
 drover keys r-1a2b3c esc enter
 drover approve-run r-4d5e6f  # start a run an agent asked for; drop-run removes it
 drover done r-1a2b3c --remove --entry "what, why, outcome"   # brain log, close, remove the worktree
-drover snapshot              # every run as JSON; `drover watch` streams it, one line per change
+drover snapshot              # open runs as JSON (--all for every run); `drover watch` streams it, one line per change
 ```
 
 `--help` on any command documents its flags.

@@ -2,12 +2,14 @@
 // call is a few rows, so it never waits long.
 
 use std::{
+    collections::HashMap,
+    io::Write,
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
 use rusqlite::{Connection, OptionalExtension, params};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     Result,
@@ -54,6 +56,8 @@ impl Kind {
 }
 
 pub struct Store(Mutex<Connection>);
+
+const OPEN: &str = "WHERE phase NOT IN ('done', 'failed')";
 
 const COLUMNS: &str = "id, machine, cwd, harness, mode, pane, role, parent, profile, owner, session, phase, usage, created_at, ended_at";
 
@@ -172,15 +176,94 @@ impl Store {
 
     // Oldest first.
     pub fn list(&self) -> Result<Vec<Run>> {
+        self.select("", [])
+    }
+
+    // Runs not done or failed: what the desk and the watchers look at.
+    pub fn list_open(&self) -> Result<Vec<Run>> {
+        self.select(OPEN, [])
+    }
+
+    pub fn children(&self, id: &RunId) -> Result<Vec<Run>> {
+        self.select("WHERE parent = ?1", [id.as_str()])
+    }
+
+    fn select(&self, filter: &str, params: impl rusqlite::Params) -> Result<Vec<Run>> {
         let rows = {
             let db = self.db();
             let mut stmt = db.prepare(&format!(
-                "SELECT {COLUMNS} FROM runs ORDER BY created_at, rowid"
+                "SELECT {COLUMNS} FROM runs {filter} ORDER BY created_at, rowid"
             ))?;
-            stmt.query_map([], Row::read)?
+            stmt.query_map(params, Row::read)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         rows.into_iter().map(Row::run).collect()
+    }
+
+    pub fn count(&self) -> Result<usize> {
+        let n: i64 = self
+            .db()
+            .query_row("SELECT count(*) FROM runs", [], |r| r.get(0))?;
+        Ok(usize::try_from(n).unwrap_or_default())
+    }
+
+    // Each open run's newest reply event, in one query.
+    pub fn open_replies(&self) -> Result<HashMap<String, Value>> {
+        let db = self.db();
+        let mut stmt = db.prepare(&format!(
+            "SELECT e.run, e.data FROM events e WHERE e.id IN (
+                SELECT max(id) FROM events WHERE kind = 'reply'
+                AND run IN (SELECT id FROM runs {OPEN}) GROUP BY run)"
+        ))?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        rows.into_iter()
+            .map(|(run, data)| Ok((run, serde_json::from_str(&data)?)))
+            .collect()
+    }
+
+    // Moves events from before `before` to the end of `file`, one JSON line each, and returns
+    // how many. An open run keeps its own: its requested, started and last reply events drive it.
+    // The lines are written before the rows go, so a crash between repeats lines, never loses one.
+    pub fn archive(&self, before: i64, file: &Path) -> Result<usize> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        let old = format!("at < ?1 AND run NOT IN (SELECT id FROM runs {OPEN})");
+        let lines = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT id, run, at, kind, data FROM events WHERE {old} ORDER BY id"
+            ))?;
+            stmt.query_map([before], |r| {
+                Ok(json!({
+                    "id": r.get::<_, i64>(0)?, "run": r.get::<_, String>(1)?, "at": r.get::<_, i64>(2)?,
+                    "kind": r.get::<_, String>(3)?, "data": r.get::<_, String>(4)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        let mut out = String::new();
+        for mut line in lines.iter().cloned() {
+            // data goes back to the JSON it was
+            if let Some(d) = line.get_mut("data")
+                && let Some(text) = d.as_str()
+            {
+                *d = serde_json::from_str(text)?;
+            }
+            out.push_str(&line.to_string());
+            out.push('\n');
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(file)?
+            .write_all(out.as_bytes())?;
+        tx.execute(&format!("DELETE FROM events WHERE {old}"), [before])?;
+        tx.commit()?;
+        Ok(lines.len())
     }
 
     // A pending run that is dropped leaves nothing behind.
@@ -244,8 +327,6 @@ fn add_event(db: &Connection, run: &RunId, kind: Kind, data: &Value) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
     use crate::run::Usage;
 
@@ -298,6 +379,56 @@ mod tests {
         assert_eq!(store.last(&r.id, Kind::Reply)?, None);
         store.delete(&r.id)?;
         assert!(store.list()?.is_empty() && store.last(&r.id, Kind::Requested)?.is_none());
+        Ok(())
+    }
+
+    // Old events of ended runs move to the archive, in order; an open run keeps all of its own.
+    #[test]
+    fn the_archive_takes_old_events_of_ended_runs() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let mut ended = run("r-0000e1")?;
+        ended.phase = Phase::Done;
+        let open = run("r-0000e2")?;
+        store.save(&ended)?;
+        store.save(&open)?;
+        for r in [&ended, &open] {
+            store.event(&r.id, Kind::Requested, &json!({ "prompt": "go" }))?;
+            store.event(&r.id, Kind::Reply, &json!({ "text": "ok" }))?;
+        }
+        let file =
+            std::env::temp_dir().join(format!("drover-archive-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(store.archive(0, &file)?, 0); // nothing is older than the epoch
+        assert!(!file.exists());
+
+        assert_eq!(store.archive(now() + 1, &file)?, 2);
+        assert_eq!(store.archive(now() + 1, &file)?, 0);
+        let text = std::fs::read_to_string(&file)?;
+        std::fs::remove_file(&file)?;
+        let lines: Vec<Value> = text
+            .lines()
+            .map(serde_json::from_str)
+            .collect::<Result<_, _>>()?;
+        let kinds: Vec<&str> = lines
+            .iter()
+            .filter_map(|l| l.get("kind")?.as_str())
+            .collect();
+        assert_eq!(kinds, ["requested", "reply"]);
+        assert!(
+            lines
+                .iter()
+                .all(|l| l.get("run").is_some_and(|r| r == "r-0000e1"))
+        );
+        assert_eq!(
+            lines.first().and_then(|l| l.pointer("/data/prompt")),
+            Some(&json!("go"))
+        );
+        assert!(store.last(&ended.id, Kind::Reply)?.is_none());
+        assert!(store.last(&open.id, Kind::Requested)?.is_some());
+        assert_eq!(
+            store.open_replies()?.keys().collect::<Vec<_>>(),
+            ["r-0000e2"]
+        );
         Ok(())
     }
 

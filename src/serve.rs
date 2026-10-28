@@ -24,6 +24,8 @@ use crate::{
     store::{Kind, Store},
 };
 
+// Events of ended runs older than this, 30 days, move to events.jsonl in the state dir.
+const ARCHIVE_AFTER: i64 = 30 * 86_400;
 // Characters of a reply its event keeps.
 const REPLY_EXCERPT: usize = 300;
 // Appended to a crewmate's first prompt: the end of each turn is what its mate reads.
@@ -65,6 +67,18 @@ pub async fn run(paths: &Paths) -> Result<()> {
         paths.socket().display(),
         names.join(", ")
     );
+    let archive = Arc::clone(&app);
+    let file = paths.state.join("events.jsonl");
+    tokio::spawn(async move {
+        loop {
+            match archive.store.archive(now() - ARCHIVE_AFTER, &file) {
+                Ok(0) => {}
+                Ok(n) => println!("archived {n} events to {}", file.display()),
+                Err(e) => eprintln!("archive: {e}"),
+            }
+            sleep(Duration::from_secs(86_400)).await;
+        }
+    });
     for h in app.hosts.clone() {
         let app = Arc::clone(&app);
         tokio::spawn(async move { watch_machine(&app, &h).await });
@@ -187,7 +201,7 @@ impl App {
     fn live_on(&self, machine: &str) -> Result<Vec<(Run, PaneId)>> {
         Ok(self
             .store
-            .list()?
+            .list_open()?
             .into_iter()
             .filter(|r| r.machine.as_str() == machine && r.phase.live())
             .filter_map(|r| r.mode.pane().cloned().map(|p| (r, p)))
@@ -222,14 +236,14 @@ impl App {
             Cmd::Done { run, remove, entry } => {
                 self.cmd_done(from, &run, remove, entry.as_deref()).await
             }
-            Cmd::Snapshot => self.snapshot(),
+            Cmd::Snapshot { all } => self.snapshot(all),
             Cmd::Home => self.home(),
             Cmd::Approve { .. }
             | Cmd::Deny { .. }
             | Cmd::Wait { .. }
             | Cmd::Goal { .. }
             | Cmd::Escalate { .. } => Err(not_implemented()),
-            Cmd::Watch | Cmd::Serve => bail!("not a request"),
+            Cmd::Watch { .. } | Cmd::Serve => bail!("not a request"),
         }
     }
 
@@ -397,9 +411,14 @@ impl App {
     }
 
     fn cmd_ls(&self, l: &Ls) -> Result<Value> {
-        let all = self.store.list()?;
-        let total = all.len();
-        let runs: Vec<Value> = all
+        let ended = l.all || l.phase.is_some_and(Phase::ended);
+        let runs = if ended {
+            self.store.list()?
+        } else {
+            self.store.list_open()?
+        };
+        let total = self.store.count()?;
+        let runs: Vec<Value> = runs
             .iter()
             .filter(|r| l.role.is_none_or(|x| r.role == x))
             .filter(|r| l.machine.as_ref().is_none_or(|m| &r.machine == m))
@@ -416,13 +435,7 @@ impl App {
 
     fn cmd_show(&self, id: &RunId) -> Result<Value> {
         let r = self.get(id)?;
-        let children: Vec<RunId> = self
-            .store
-            .list()?
-            .into_iter()
-            .filter(|c| c.parent.as_ref() == Some(id))
-            .map(|c| c.id)
-            .collect();
+        let children: Vec<RunId> = self.store.children(id)?.into_iter().map(|c| c.id).collect();
         let reply = self
             .store
             .last(id, Kind::Reply)?
@@ -671,10 +684,15 @@ impl App {
         )
     }
 
-    pub fn snapshot(&self) -> Result<Value> {
-        let runs: Vec<Value> = self
-            .store
-            .list()?
+    // Open runs, or with `all` every run, each with its last reply.
+    pub fn snapshot(&self, all: bool) -> Result<Value> {
+        let replies = self.store.open_replies()?;
+        let runs = if all {
+            self.store.list()?
+        } else {
+            self.store.list_open()?
+        };
+        let runs: Vec<Value> = runs
             .iter()
             .map(|r| {
                 let mut v = row(r);
@@ -682,15 +700,8 @@ impl App {
                     m.insert("pane".into(), json!(r.mode.pane().map(|p| &p.0)));
                     m.insert("parent".into(), json!(r.parent));
                     m.insert("owner".into(), json!(r.owner.to_string()));
-                    m.insert(
-                        "reply".into(),
-                        self.store
-                            .last(&r.id, Kind::Reply)
-                            .ok()
-                            .flatten()
-                            .and_then(|d| d.get("text").cloned())
-                            .unwrap_or_default(),
-                    );
+                    let reply = replies.get(r.id.as_str()).and_then(|d| d.get("text"));
+                    m.insert("reply".into(), reply.cloned().unwrap_or_default());
                 }
                 v
             })
@@ -700,7 +711,7 @@ impl App {
     }
 
     fn home(&self) -> Result<Value> {
-        let runs = self.store.list()?;
+        let runs = self.store.list_open()?;
         let mut phases = serde_json::Map::new();
         for p in [
             Phase::Pending,

@@ -112,6 +112,7 @@ Events go to the `events` table and fan out over SSE (`GET /events?run=&role=&si
 - You answer it with `drover approve-run <run>`, or from the dashboard Inbox.
 - The setting is `autostart = "never"` in config. It's the only value today, and the rest of the system is built so it can be relaxed later, for example to allow small automated proofs of concept, without redesign.
 - `reader` runs (the planner, chat) can't act, so a timer may start them.
+- The caller is whatever `$DROVER_RUN` says, so these approval and owner checks guard against mistakes, not against an agent set on getting around them: every run is your uid, and an agent that unsets `$DROVER_RUN` speaks as you. Enforcing more would take a sandbox and a credential per run, which the non-goals rule out.
 - Tool calls inside a run go through the approval flow below.
 
 ## Approvals
@@ -192,6 +193,8 @@ runs(id PK, machine, cwd, harness, mode, pane, role, parent, profile, owner, ses
 events(id PK, run, at, kind, data JSON)          -- capped at 30 days, older rows archived to JSONL
 goals(run PK, graph JSON, updated_at)
 ```
+
+The archive runs at start and daily: events older than 30 days move to `events.jsonl` in the state dir, except those of open runs, whose `requested`, `started` and last `reply` still drive them. `ls`, `watch`, `snapshot` and the watchers read open runs only; `--all` shows the rest.
 
 Two event kinds beyond C9 are stored, never streamed: `requested` (repo, branch and the first prompt, kept so a pending run can start after a restart) and `started` (the first prompt went out). A pending pane run has no pane yet: `Mode::Pane { pane: Option<PaneId> }`, the `pane` column NULL.
 
