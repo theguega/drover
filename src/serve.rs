@@ -45,6 +45,11 @@ const GRACE: Duration = Duration::from_secs(5);
 const TEXT_BATCH: Duration = Duration::from_millis(500);
 // What a tool call hears when you have not answered before its hook times out (SPIKE.md q2).
 const AWAITING: &str = "awaiting approval: the user has not answered yet. Do not retry this call; you will be told when it is approved.";
+// What a tool call of a run that has ended hears.
+const ENDED: &str = "the run has ended";
+// A call drover denied stays approvable this long, and a run keeps at most EXPIRED_MAX of them.
+const EXPIRED_FOR: Duration = Duration::from_secs(86_400);
+const EXPIRED_MAX: usize = 16;
 // Appended to a crewmate's first prompt: the end of each turn is what its mate reads.
 const CREW: &str = "You are a crewmate. Your mate reads the end of each of your turns. The brief above is your only source of facts: do not assume what it does not say. When blocked or unsure, stop and end your turn with a line starting QUESTION:. When the check in the brief passes, end your turn with DONE: and its output. Do not change the check. Do not end your turn while a check or background job you started still runs: wait for it, or end with a line starting RUNNING: and what runs.";
 // The reader profile's cwd holds only this.
@@ -89,9 +94,9 @@ pub struct App {
     procs: StdMutex<HashMap<RunId, Proc>>,
     next_proc: AtomicU64,
     waiting: StdMutex<HashMap<Key, Waiter>>,
-    // answered by drover with "awaiting approval"; yours to approve later
-    expired: StdMutex<HashMap<Key, (String, Value)>>,
-    // calls you approved late, allowed when the resumed session asks again
+    // answered by drover with "awaiting approval"; yours to approve later, for EXPIRED_FOR
+    expired: StdMutex<HashMap<Key, (String, Value, Instant)>>,
+    // calls you approved late: allowed once, in the turn your approval starts
     approved: StdMutex<Vec<(RunId, String, Value)>>,
     events: broadcast::Sender<Value>,
     // an event is stored and sent under this, so a stream sees ids in order
@@ -393,6 +398,7 @@ impl App {
         };
         self.emit(r, kind, data)?;
         self.save(r)?;
+        self.forget_calls(&r.id);
         let proc = locked(&self.procs).remove(&r.id);
         if let (Some(p), Some(me)) = (proc, self.me.upgrade()) {
             let id = r.id.clone();
@@ -400,6 +406,46 @@ impl App {
         }
         self.wake.notify_waiters();
         Ok(())
+    }
+
+    // An ended run's calls: a waiting one hears ENDED, and nothing of it stays approvable.
+    fn forget_calls(&self, id: &RunId) {
+        let waiting: Vec<Waiter> = {
+            let mut waiting = locked(&self.waiting);
+            let keys: Vec<Key> = waiting
+                .keys()
+                .filter(|(run, _)| run == id)
+                .cloned()
+                .collect();
+            keys.iter().filter_map(|k| waiting.remove(k)).collect()
+        };
+        for w in waiting {
+            let _ = w.tx.send(Decision {
+                allow: false,
+                reason: Some(ENDED.into()),
+            });
+        }
+        locked(&self.expired).retain(|(run, _), _| run != id);
+        locked(&self.approved).retain(|(run, ..)| run != id);
+    }
+
+    // Keeps a call drover denied approvable, within EXPIRED_FOR and EXPIRED_MAX per run.
+    fn expire(&self, key: Key, tool: String, input: Value) {
+        let mut expired = locked(&self.expired);
+        expired.retain(|_, (.., at)| at.elapsed() < EXPIRED_FOR);
+        let mut mine: Vec<(Key, Instant)> = expired
+            .iter()
+            .filter(|((run, _), _)| *run == key.0)
+            .map(|(k, (.., at))| (k.clone(), *at))
+            .collect();
+        mine.sort_by_key(|(_, at)| *at);
+        for (old, _) in mine
+            .iter()
+            .take((mine.len() + 1).saturating_sub(EXPIRED_MAX))
+        {
+            expired.remove(old);
+        }
+        expired.insert(key, (tool, input, Instant::now()));
     }
 
     // Takes the run's process out and ends it.
@@ -954,6 +1000,8 @@ impl App {
                     r.phase = Phase::Idle;
                     self.emit(&r, Kind::Reply, data)?;
                     self.idle(&r.id);
+                    // a late approval holds for the turn it started, and this one has ended
+                    locked(&self.approved).retain(|(run, ..)| *run != r.id);
                 }
                 Out::End if r.mode != Mode::Headless => {
                     return self.end(&mut r, Phase::Done, Kind::Done, json!({ "by": "exit" }));
@@ -1019,23 +1067,26 @@ impl App {
             allow: false,
             reason: Some(why.into()),
         };
-        // the session a late approval resumed asks again for the call you approved
-        {
-            let mut approved = locked(&self.approved);
-            let same = approved
-                .iter()
-                .position(|(r, t, i)| r == id && *t == tool && *i == call(&input));
-            if let Some(i) = same {
-                approved.remove(i);
-                return allow;
-            }
-        }
         let (tx, mut rx) = oneshot::channel();
         let key = {
             let _turn = self.turns.lock().await;
             let Ok(Some(mut r)) = self.store.get(id) else {
                 return deny("drover has no such run");
             };
+            if !r.phase.live() {
+                return deny(ENDED);
+            }
+            // the session a late approval resumed asks again for the call you approved
+            {
+                let mut approved = locked(&self.approved);
+                let same = approved
+                    .iter()
+                    .position(|(r, t, i)| r == id && *t == tool && *i == call(&input));
+                if let Some(i) = same {
+                    approved.remove(i);
+                    return allow;
+                }
+            }
             let perm = match self.store.perms(id) {
                 Ok(n) => format!("p{}", n + 1),
                 Err(e) => return deny(&format!("drover: {e}")),
@@ -1068,14 +1119,25 @@ impl App {
         if let Ok(Ok(d)) = tokio::time::timeout(wait, &mut rx).await {
             return d;
         }
-        match locked(&self.waiting).remove(&key) {
-            Some(w) => {
-                locked(&self.expired).insert(key, (w.tool, w.input));
-                deny(AWAITING)
-            }
+        let waiter = locked(&self.waiting).remove(&key);
+        let Some(w) = waiter else {
             // taken by an answer on its way
-            None => rx.try_recv().unwrap_or_else(|_| deny(AWAITING)),
+            return rx.try_recv().unwrap_or_else(|_| deny(AWAITING));
+        };
+        self.expire(key, w.tool, w.input);
+        // the turn goes on with the deny: nothing waits, unless another call does
+        let _turn = self.turns.lock().await;
+        let others = locked(&self.waiting).keys().any(|(run, _)| run == id);
+        if let Ok(Some(mut r)) = self.store.get(id)
+            && r.phase == Phase::Needs
+            && !others
+        {
+            r.phase = Phase::Working;
+            if let Err(e) = self.save(&r) {
+                eprintln!("run {id}: {e}");
+            }
         }
+        deny(AWAITING)
     }
 
     // approve and deny: the answer goes to the waiting call, or, for one drover already denied,
@@ -1091,6 +1153,13 @@ impl App {
         let _turn = self.turns.lock().await;
         let mut r = self.get(id)?;
         Self::owned(&r, from)?;
+        if !r.phase.live() {
+            return Err(Failure::new(
+                format!("{id} is {}: it takes no approvals", r.phase.as_str()),
+                format!("drover show {id}"),
+            )
+            .into());
+        }
         let key = (id.clone(), perm.to_string());
         let waiter = locked(&self.waiting).remove(&key);
         if let Some(w) = waiter {
@@ -1105,7 +1174,7 @@ impl App {
             );
         }
         let late = locked(&self.expired).remove(&key);
-        let Some((tool, input)) = late else {
+        let Some((tool, input, at)) = late else {
             return Err(Failure::new(
                 format!("{id} has no call {perm} waiting"),
                 format!("drover show {id}"),
@@ -1113,12 +1182,28 @@ impl App {
             .into());
         };
         if allow {
-            locked(&self.approved).push((id.clone(), tool.clone(), call(&input)));
+            // like send: a prompt typed into a running turn would be queued behind it
+            if r.phase != Phase::Idle {
+                locked(&self.expired).insert(key, (tool, input, at));
+                return Err(Failure::new(
+                    format!(
+                        "{id} is {}: approve {perm} again once it is idle",
+                        r.phase.as_str()
+                    ),
+                    format!("drover watch --run {id}"),
+                )
+                .into());
+            }
             let text = format!(
                 "drover: the user approved the {tool} call that was denied with \"awaiting approval\": {}. Make that call again now.",
                 call(&input)
             );
-            self.deliver(&mut r, &text).await?;
+            if let Err(e) = self.deliver(&mut r, &text).await {
+                locked(&self.expired).insert(key, (tool, input, at));
+                return Err(e);
+            }
+            // under the turns lock, so the call it asks for again comes after this
+            locked(&self.approved).push((id.clone(), tool, call(&input)));
         }
         Ok(
             json!({ "run": id, "perm": perm, "allowed": allow, "late": true, "help": [format!("drover show {id}")] }),
@@ -1208,7 +1293,7 @@ impl App {
             locked(&self.expired)
                 .iter()
                 .filter(|((run, _), _)| run == id)
-                .map(|((_, perm), (tool, input))| json!({ "perm": perm, "tool": tool, "input": call(input).to_string(), "state": "denied, awaiting approval" })),
+                .map(|((_, perm), (tool, input, _))| json!({ "perm": perm, "tool": tool, "input": call(input).to_string(), "state": "denied, awaiting approval" })),
         );
         let mut out = self.brief(&r);
         let fields = json!({
@@ -1996,7 +2081,15 @@ mod tests {
         let second = lock(&dir).err().map(|e| Failure::from(e).error);
         assert!(second.is_some_and(|e| e.starts_with("drover serve already runs on")));
         drop(first);
-        let again = lock(&dir);
+        // a child another test forks holds a copy of the fd until it execs
+        let mut again = lock(&dir);
+        for _ in 0..50 {
+            if again.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+            again = lock(&dir);
+        }
         std::fs::remove_dir_all(&dir)?;
         assert!(again.is_ok());
         Ok(())
@@ -2218,32 +2311,76 @@ mod tests {
         Ok(())
     }
 
-    // Unanswered before the hook's timeout, a call is denied with "awaiting approval". Approved
-    // later, the same call is allowed when the run makes it again, without asking.
+    // A warm headless process that only takes stdin lines, which the test reads.
+    fn warm(app: &App, id: &RunId) -> Result<mpsc::UnboundedReceiver<String>> {
+        let sp = harness::spawn(&["cat".to_string()], Path::new("/"), &[], None)?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        let ident = watch::channel(None).1;
+        let p = Proc {
+            id: 0,
+            machine: app.local.clone(),
+            stdin: tx,
+            busy: true,
+            idle_since: Instant::now(),
+            ident,
+            _child: sp.child,
+        };
+        locked(&app.procs).insert(id.clone(), p);
+        Ok(rx)
+    }
+
+    fn approved(app: &App, id: &RunId) -> usize {
+        locked(&app.approved)
+            .iter()
+            .filter(|(r, ..)| r == id)
+            .count()
+    }
+
+    // Unanswered before the hook's timeout, a call is denied with "awaiting approval" and the run
+    // goes on working. Approved later, only once the run is idle, it is the run's next prompt,
+    // and the same call is allowed once, in that turn, without asking.
     #[tokio::test]
-    async fn a_late_approval_allows_the_call_next_time() -> Result<()> {
+    async fn a_late_approval_waits_for_idle_and_allows_the_call_once() -> Result<()> {
         let app = app_with("hook_timeout = 2")?;
         let mut r = run("r-00000e", Role::Task)?;
-        // no pane: the approval's prompt cannot be delivered, which this test does not need
-        r.mode = Mode::Pane { pane: None };
+        r.mode = Mode::Headless;
         r.phase = Phase::Working;
         app.store.save(&r)?;
+        let mut stdin = warm(&app, &r.id)?;
         let answer = app.hook(&r.id, &touch("z")).await;
         assert!(
             at(&answer, "/hookSpecificOutput/decision/message")
                 .as_str()
                 .is_some_and(|m| m.starts_with("awaiting approval"))
         );
+        // nothing waits: the run is not left in needs
+        assert_eq!(phase(&app, "r-00000e"), Some(Phase::Working));
         let show = request(&app, None, "show r-00000e").await?;
         assert_eq!(at(&show, "/perms/0/state"), "denied, awaiting approval");
+
+        // a turn runs: the approval would be queued behind it, so it is refused and kept
         assert!(
             failure(request(&app, None, "approve r-00000e p1").await)
-                .is_some_and(|e| e.contains("has no pane"))
+                .is_some_and(|e| e == "r-00000e is working: approve p1 again once it is idle")
         );
+        app.hook(
+            &r.id,
+            &hook_body("Stop", json!({"last_assistant_message": "waiting"})),
+        )
+        .await;
+        assert_eq!(phase(&app, "r-00000e"), Some(Phase::Idle));
+        request(&app, None, "approve r-00000e p1").await?;
+        assert!(
+            stdin
+                .try_recv()
+                .is_ok_and(|l| l.contains("the user approved the Bash call"))
+        );
+        assert_eq!(phase(&app, "r-00000e"), Some(Phase::Working));
         assert!(
             failure(request(&app, None, "approve r-00000e p1").await)
                 .is_some_and(|e| e.contains("no call p1"))
         );
+
         // the model writes another description for the same command
         let mut again = touch("z");
         if let Some(d) = again.pointer_mut("/tool_input/description") {
@@ -2255,7 +2392,82 @@ mod tests {
             at(&answer, "/hookSpecificOutput/decision/behavior"),
             "allow"
         );
-        assert_eq!(app.store.perms(&r.id)?, 1);
+        assert_eq!((app.store.perms(&r.id)?, approved(&app, &r.id)), (1, 0));
+
+        // an approval the resumed turn did not use ends with that turn
+        locked(&app.approved).push((r.id.clone(), "Bash".into(), json!({"command": "touch z"})));
+        app.hook(
+            &r.id,
+            &hook_body("Stop", json!({"last_assistant_message": "done"})),
+        )
+        .await;
+        assert_eq!(approved(&app, &r.id), 0);
+        Ok(())
+    }
+
+    // An ended run takes no hooks and no approvals: its waiting call is denied, nothing of it
+    // stays approvable, and it never comes back.
+    #[tokio::test]
+    async fn an_ended_run_stays_ended() -> Result<()> {
+        let app = app()?;
+        let mut r = run("r-00000d", Role::Task)?;
+        // on a machine this service does not drive, so done touches no herdr
+        r.machine = "elsewhere".parse()?;
+        r.phase = Phase::Working;
+        app.store.save(&r)?;
+        let id = r.id.clone();
+        let a = Arc::clone(&app);
+        let hook = tokio::spawn(async move {
+            Ok::<_, crate::Error>(a.hook(&"r-00000d".parse()?, &touch("x")).await)
+        });
+        needs(&app, &id).await?;
+        app.expire((id.clone(), "p9".into()), "Bash".into(), json!({}));
+        locked(&app.approved).push((id.clone(), "Bash".into(), json!({})));
+
+        request(&app, None, "done r-00000d").await?;
+        let answer = hook.await??;
+        assert_eq!(at(&answer, "/hookSpecificOutput/decision/message"), ENDED);
+        assert!(
+            locked(&app.expired).is_empty()
+                && approved(&app, &id) == 0
+                && locked(&app.waiting).is_empty()
+        );
+
+        let answer = app.hook(&id, &touch("y")).await;
+        assert_eq!(at(&answer, "/hookSpecificOutput/decision/message"), ENDED);
+        assert!(
+            app.store
+                .get(&id)?
+                .is_some_and(|r| r.phase == Phase::Done && r.ended_at.is_some())
+        );
+        assert_eq!(app.store.perms(&id)?, 1);
+        assert!(
+            failure(request(&app, None, "approve r-00000d p1").await)
+                .is_some_and(|e| e == "r-00000d is done: it takes no approvals")
+        );
+        assert_eq!(at(&request(&app, None, "ls").await?, "/runs"), &json!([]));
+        Ok(())
+    }
+
+    // Calls drover denied stay approvable for a day, at most EXPIRED_MAX per run.
+    #[tokio::test]
+    async fn expired_calls_are_bounded() -> Result<()> {
+        let app = app()?;
+        let (a, b): (RunId, RunId) = ("r-0000d1".parse()?, "r-0000d2".parse()?);
+        let old = Instant::now()
+            .checked_sub(EXPIRED_FOR + Duration::from_secs(1))
+            .ok_or("clock")?;
+        locked(&app.expired).insert((b.clone(), "p1".into()), ("Bash".into(), json!({}), old));
+        for n in 1..=20 {
+            app.expire((a.clone(), format!("p{n}")), "Bash".into(), json!({}));
+        }
+        let expired = locked(&app.expired);
+        assert_eq!(expired.len(), EXPIRED_MAX);
+        assert!(
+            expired.contains_key(&(a.clone(), "p20".into()))
+                && !expired.contains_key(&(a, "p4".into()))
+        );
+        assert!(!expired.contains_key(&(b, "p1".into())));
         Ok(())
     }
 
