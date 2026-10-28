@@ -199,6 +199,14 @@ fn head(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+// The last `n` characters: where a turn's DONE:, QUESTION: or RUNNING: line is.
+fn tail(s: &str, n: usize) -> &str {
+    let skip = s.chars().count().saturating_sub(n);
+    s.char_indices()
+        .nth(skip)
+        .map_or("", |(i, _)| s.get(i..).unwrap_or_default())
+}
+
 // An event as `wait` prints it, one flat row: what the run said or asked.
 fn wait_row(e: &Value) -> Value {
     let text = |k: &str| {
@@ -212,7 +220,7 @@ fn wait_row(e: &Value) -> Value {
         .find(|v| !v.is_null())
         .unwrap_or_default();
     json!({
-        "run": e.get("run"), "kind": e.get("kind"), "text": said,
+        "run": e.get("run"), "kind": e.get("kind"), "text": said, "tail": text("tail"),
         "perm": text("perm"), "tool": text("tool"),
         "input": e.pointer("/data/input").map_or(Value::Null, |i| call(i).to_string().into()),
     })
@@ -543,6 +551,7 @@ impl App {
             Cmd::Run(s) => self.cmd_run(from, s).await,
             Cmd::Ls(l) => self.cmd_ls(&l),
             Cmd::Show { run } => self.cmd_show(&run),
+            Cmd::Reply { run } => self.cmd_reply(&run),
             Cmd::Send { run, text } => self.cmd_send(from, &run, &text).await,
             Cmd::Approve { run, perm } => self.answer(from, &run, &perm, true, None).await,
             Cmd::Deny { run, perm, reason } => self.answer(from, &run, &perm, false, reason).await,
@@ -1052,7 +1061,7 @@ impl App {
                         r.usage += u;
                     }
                     let text = text.trim();
-                    let mut data = json!({ "text": head(text, REPLY_EXCERPT), "chars": text.chars().count(), "usage": usage });
+                    let mut data = json!({ "text": head(text, REPLY_EXCERPT), "tail": tail(text, REPLY_EXCERPT), "chars": text.chars().count(), "full": text, "usage": usage });
                     if error && let Value::Object(d) = &mut data {
                         d.insert("error".into(), true.into());
                     }
@@ -1392,13 +1401,22 @@ impl App {
             .cloned()
     }
 
+    // The whole last reply; events before `full` existed have only their excerpt.
+    fn cmd_reply(&self, id: &RunId) -> Result<Value> {
+        self.get(id)?;
+        let d = self.store.last(id, Kind::Reply)?.ok_or_else(|| {
+            Failure::new(format!("{id} has not replied"), format!("drover show {id}"))
+        })?;
+        let text = d.get("full").or_else(|| d.get("text"));
+        Ok(json!({ "run": id, "chars": d.get("chars"), "text": text }))
+    }
+
     fn cmd_show(&self, id: &RunId) -> Result<Value> {
         let r = self.get(id)?;
         let children: Vec<RunId> = self.store.children(id)?.into_iter().map(|c| c.id).collect();
-        let reply = self
-            .store
-            .last(id, Kind::Reply)?
-            .map(|d| json!({ "text": d.get("text"), "chars": d.get("chars") }));
+        let reply = self.store.last(id, Kind::Reply)?.map(
+            |d| json!({ "text": d.get("text"), "tail": d.get("tail"), "chars": d.get("chars") }),
+        );
         let mut perms: Vec<Value> = locked(&self.waiting)
             .iter()
             .filter(|((run, _), _)| run == id)
@@ -2326,6 +2344,43 @@ pub(crate) mod tests {
 
     fn phase(app: &App, id: &str) -> Option<Phase> {
         app.store.get(&id.parse().ok()?).ok()?.map(|r| r.phase)
+    }
+
+    // A reply carries its first 300 characters, its last 300, and the whole text only on `reply`.
+    #[tokio::test]
+    async fn a_reply_has_a_tail_and_the_whole_text_is_kept() -> Result<()> {
+        let app = app()?;
+        let mut r = run("r-0000d1", Role::Crew)?;
+        r.phase = Phase::Working;
+        app.store.save(&r)?;
+        let mut feed = Feed::new(&app, Filter::default())?;
+        let text = format!("{}\nDONE: é ok", "é".repeat(700));
+        app.apply(
+            &r.id,
+            vec![Out::Reply {
+                text: text.clone(),
+                usage: None,
+                error: false,
+            }],
+        )
+        .await;
+        let got = feed.next(&app).await?;
+        let d = at(&Value::from(got), "/0/data").clone();
+        assert_eq!(d.get("full"), None);
+        assert_eq!(at(&d, "/chars"), &json!(text.chars().count()));
+        assert_eq!(
+            at(&d, "/text").as_str().map(|t| t.chars().count()),
+            Some(300)
+        );
+        let last = at(&d, "/tail").as_str().unwrap_or_default();
+        assert_eq!(
+            (last.chars().count(), last.ends_with("DONE: é ok")),
+            (300, true)
+        );
+        let whole = request(&app, None, "reply r-0000d1").await?;
+        assert_eq!(at(&whole, "/text"), &json!(text));
+        assert_eq!(tail("abc", 5), "abc");
+        Ok(())
     }
 
     // A mate's wait returns its crew's replies in order, each once; its goal and escalation are carried.

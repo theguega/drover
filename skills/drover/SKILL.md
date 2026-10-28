@@ -23,7 +23,8 @@ The binary is the authority for syntax: `drover --help`, `drover <command> --hel
 drover run --repo <repo> --branch <branch> --prompt <prompt>   # starts now; - reads the prompt from stdin
 drover run --role mate --repo <repo> --branch <branch> --headless --prompt <goal>   # a mate, see below
 drover ls [--role --machine --phase --all]
-drover show <run>                  # phase, owner, last reply (300 chars), children, a mate's goal graph and question
+drover show <run>                  # phase, owner, last reply (first and last 300 chars), children, a mate's goal graph and question
+drover reply <run>                 # the whole last reply
 drover send <run> <text>           # the next prompt, only while idle
 drover approve <run> <perm> · deny <run> <perm> --reason <why>   # a tool call in `needs`; `show` lists perms
 drover watch [--run --role --since]   # events as JSON lines: started, text, tool_start, tool_end, needs, reply, done, failed

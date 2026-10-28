@@ -41,6 +41,8 @@ pub enum Cmd {
     Ls(Ls),
     /// One run: phase, owner, usage, last reply, children
     Show { run: RunId },
+    /// The whole last reply of a run (events carry its first and last 300 characters)
+    Reply { run: RunId },
     /// The next prompt to a run you own; - reads it from stdin
     Send { run: RunId, text: String },
     /// Allow a tool call a run waits on (its `needs` perm). Late, it resumes the run with the approval

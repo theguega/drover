@@ -14,7 +14,8 @@ drover run --parent $DROVER_RUN --repo <repo> --branch <branch> --model <model> 
 drover wait --any --parent $DROVER_RUN        # blocks for the next reply, needs, done or failed of your crew
 drover send <crew> -                          # the next step, on stdin; only while it is idle
 drover approve <crew> <perm> · deny <crew> <perm> --reason <why>   # a crew tool call
-drover show <crew>                            # phase, perms, last reply
+drover show <crew>                            # phase, perms, last reply (first and last 300 characters)
+drover reply <crew>                           # the whole last reply
 drover goal set --file goal.json · drover goal node <id> --status … --round … --crew … --review …
 drover escalate --text -                      # to the user, on stdin
 drover done <crew> [--remove] --entry -       # close it
@@ -27,8 +28,8 @@ drover done <crew> [--remove] --entry -       # close it
 
 ## How you hear and speak
 
-- Crew news is what `drover wait` prints: one row per event, with `run`, `kind` (`reply`, `needs`, `done`, `failed`) and `text`. A reply is the end of a crew turn, cut to its first 300 characters; a `needs` row names a `perm`, the tool and its input.
-- A crew run ends a turn with `QUESTION:` when it is blocked, `DONE:` with the check's output when it thinks it is finished, and `RUNNING: <what>` when its own check or background job is still running. drover tells it so in every first prompt. Your brief adds: open the final reply with that word and keep it under 300 characters, since that is all you read.
+- Crew news is what `drover wait` prints: one row per event, with `run`, `kind` (`reply`, `needs`, `done`, `failed`), `text` and `tail`. A reply is the end of a crew turn: `text` is its first 300 characters and `tail` its last 300. Read the status word from `tail`. `drover reply <crew>` prints the whole reply when you need it. A `needs` row names a `perm`, the tool and its input.
+- A crew run ends a turn with `QUESTION:` when it is blocked, `DONE:` with the check's output when it thinks it is finished, and `RUNNING: <what>` when its own check or background job is still running. drover tells it so in every first prompt.
 - The user hears you only through `drover escalate`. What you write in your own turns reaches nobody. After you escalate, end your turn: the user's answer arrives as your next prompt.
 - Escalate only when:
   - a decision is the user's, or a question is not answered by the goal, the brief, or the code
@@ -91,7 +92,7 @@ Raise a level after a failed round, with `goal node <id> --review <level>`. Neve
 ### Dispatch
 
 1. Write the graph. Check each node's host against the task: a cell, a station, or a repo lives on one machine (`--machine`).
-2. Write the brief for each node: the task, the check, the facts, the glossary, what is out of scope, and the reply rule above. The brief is the crew's only source of truth: anything you leave out it will guess.
+2. Write the brief for each node: the task, the check, the facts, the glossary, and what is out of scope. The brief is the crew's only source of truth: anything you leave out it will guess.
 3. `drover run --parent $DROVER_RUN --repo <repo> --branch <branch> --model <model> --headless --prompt - <<'EOF'`, the brief on the lines after it. It prints a `run` in `pending`. Record it: `drover goal node <id> --status working --round 1 --crew <run>`.
 4. Start every node that has no edge waiting. Then `drover wait --any --parent $DROVER_RUN`.
 5. A node that runs after another on the same branch is a new run on that branch (`--branch` names an existing branch), started when the first has passed.
@@ -137,5 +138,5 @@ Each reply from a crew run is one round for its node.
 - Small diffs: one concern per node. Split a node that grows.
 - The check decides: a node passes when its check passes, not when the crew says so.
 - Second look: read the diff before you mark a node passed. Ask for a change instead of making it yourself.
-- Bounded context: answer crew news in one short message. `drover show <crew>` when the cut matters.
+- Bounded context: answer crew news in one short message. `drover reply <crew>` only when the cut matters.
 - Ask, do not guess: what the brief does not settle, the user does.

@@ -97,7 +97,7 @@ Login: Claude runs the unmodified `claude` binary with your own login (allowed, 
 - `tool_start`
 - `tool_end`
 - `needs` (an approval with its `perm` id, or a question)
-- `reply` (end of a turn: the first 300 characters, plus `chars`)
+- `reply` (end of a turn: `text`, its first 300 characters; `tail`, its last 300, where `DONE:` and `QUESTION:` are; `chars`). The whole text is stored and read with `drover reply <run>`, never streamed
 - `done`
 - `failed`
 
