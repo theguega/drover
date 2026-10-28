@@ -51,18 +51,12 @@ pub async fn run(paths: &Paths) -> Result<()> {
     // held until the process ends, so the socket, drover.db and the watchers have one owner
     let _lock = lock(&paths.state)?;
     let db = paths.db();
-    let first = !db.exists();
     let store = Store::open(&db)?;
-    if first && let Some(v1) = &config.v1_state {
-        match migrate::migrate(&store, v1, now()) {
-            Ok(n) => println!("migrated {n} runs from {}", v1.display()),
-            Err(e) => {
-                // the next start tries again on an empty store
-                drop(store);
-                std::fs::remove_file(&db)?;
-                bail!("migrate {}: {e}", v1.display());
-            }
-        }
+    if let Some(v1) = &config.v1_state
+        && let Some(n) = migrate::migrate(&store, v1, now())
+            .map_err(|e| err!("migrate {}: {e}", v1.display()))?
+    {
+        println!("migrated {n} runs from {}", v1.display());
     }
     let app = Arc::new(App::new(&config, store, paths.state.clone()));
     let names: Vec<&str> = app.hosts.iter().map(|h| h.name.as_str()).collect();

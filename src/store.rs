@@ -141,26 +141,20 @@ impl Store {
 
     // Inserts the run, or replaces the row with the same id.
     pub fn save(&self, r: &Run) -> Result<()> {
-        self.db().execute(
-            &format!("INSERT OR REPLACE INTO runs({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
-            params![
-                r.id.as_str(),
-                r.machine.as_str(),
-                r.cwd.to_string_lossy(),
-                r.harness.as_str(),
-                r.mode.as_str(),
-                r.mode.pane().map(|p| p.0.as_str()),
-                r.role.as_str(),
-                r.parent.as_ref().map(RunId::as_str),
-                r.profile.as_str(),
-                r.owner.to_string(),
-                r.session.as_ref().map(SessionId::as_str),
-                r.phase.as_str(),
-                serde_json::to_string(&r.usage)?,
-                r.created_at,
-                r.ended_at,
-            ],
-        )?;
+        write(&self.db(), "INSERT OR REPLACE", r)
+    }
+
+    // New runs with their first events, all or none. An id taken already fails the lot.
+    pub fn insert_all(&self, runs: &[(Run, Vec<(Kind, Value)>)]) -> Result<()> {
+        let mut db = self.db();
+        let tx = db.transaction()?;
+        for (r, events) in runs {
+            write(&tx, "INSERT", r)?;
+            for (kind, data) in events {
+                add_event(&tx, &r.id, *kind, data)?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -198,11 +192,7 @@ impl Store {
     }
 
     pub fn event(&self, run: &RunId, kind: Kind, data: &Value) -> Result<()> {
-        self.db().execute(
-            "INSERT INTO events(run, at, kind, data) VALUES (?1, ?2, ?3, ?4)",
-            params![run.as_str(), now(), kind.as_str(), data.to_string()],
-        )?;
-        Ok(())
+        add_event(&self.db(), run, kind, data)
     }
 
     // The data of the run's newest event of this kind.
@@ -217,6 +207,39 @@ impl Store {
             .optional()?;
         Ok(data.map(|d| serde_json::from_str(&d)).transpose()?)
     }
+}
+
+// `verb` is INSERT, or INSERT OR REPLACE.
+fn write(db: &Connection, verb: &str, r: &Run) -> Result<()> {
+    db.execute(
+        &format!("{verb} INTO runs({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
+        params![
+            r.id.as_str(),
+            r.machine.as_str(),
+            r.cwd.to_string_lossy(),
+            r.harness.as_str(),
+            r.mode.as_str(),
+            r.mode.pane().map(|p| p.0.as_str()),
+            r.role.as_str(),
+            r.parent.as_ref().map(RunId::as_str),
+            r.profile.as_str(),
+            r.owner.to_string(),
+            r.session.as_ref().map(SessionId::as_str),
+            r.phase.as_str(),
+            serde_json::to_string(&r.usage)?,
+            r.created_at,
+            r.ended_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn add_event(db: &Connection, run: &RunId, kind: Kind, data: &Value) -> Result<()> {
+    db.execute(
+        "INSERT INTO events(run, at, kind, data) VALUES (?1, ?2, ?3, ?4)",
+        params![run.as_str(), now(), kind.as_str(), data.to_string()],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -275,6 +298,25 @@ mod tests {
         assert_eq!(store.last(&r.id, Kind::Reply)?, None);
         store.delete(&r.id)?;
         assert!(store.list()?.is_empty() && store.last(&r.id, Kind::Requested)?.is_none());
+        Ok(())
+    }
+
+    // A taken id fails the whole batch loudly, and nothing of it stays.
+    #[test]
+    fn insert_all_is_all_or_none() -> Result<()> {
+        let store = Store::open(Path::new(":memory:"))?;
+        let a = run("r-00000c")?;
+        let b = run("r-00000d")?;
+        let events = vec![(Kind::Reply, json!({ "id": "x" }))];
+        let twice = [
+            (a.clone(), events.clone()),
+            (b, vec![]),
+            (a.clone(), vec![]),
+        ];
+        assert!(store.insert_all(&twice).is_err());
+        assert!(store.list()?.is_empty() && store.last(&a.id, Kind::Reply)?.is_none());
+        store.insert_all(&[(a.clone(), events)])?;
+        assert_eq!(store.list()?, vec![a]);
         Ok(())
     }
 }

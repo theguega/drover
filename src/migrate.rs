@@ -137,7 +137,19 @@ pub fn runs(state: &str, at: i64) -> Result<Vec<Migrated>> {
         }
         tasks.insert(key, t);
     }
-    let tasks: Vec<(RunId, Task)> = tasks.into_values().map(|t| (RunId::random(), t)).collect();
+    // ids are 24 bits: a repeat is drawn again, so no run replaces another
+    let mut ids = std::collections::HashSet::new();
+    let tasks: Vec<(RunId, Task)> = tasks
+        .into_values()
+        .map(|t| {
+            loop {
+                let id = RunId::random();
+                if ids.insert(id.clone()) {
+                    break (id, t);
+                }
+            }
+        })
+        .collect();
 
     // a mate's name to its run: the live one if any, else the last one
     let mut mates: BTreeMap<&str, (&RunId, bool)> = BTreeMap::new();
@@ -202,17 +214,16 @@ pub fn runs(state: &str, at: i64) -> Result<Vec<Migrated>> {
     Ok(out)
 }
 
-// Writes the runs of a v1 state file into an empty store. Returns how many.
-pub fn migrate(store: &Store, path: &Path, at: i64) -> Result<usize> {
+// Writes the runs of a v1 state file into a store with no runs, in one transaction, so a crash
+// leaves none and the next start tries again. Returns how many, or None when the store has runs.
+pub fn migrate(store: &Store, path: &Path, at: i64) -> Result<Option<usize>> {
+    if !store.list()?.is_empty() {
+        return Ok(None);
+    }
     let text = std::fs::read_to_string(path).map_err(|e| err!("{}: {e}", path.display()))?;
     let runs = runs(&text, at)?;
-    for (run, events) in &runs {
-        store.save(run)?;
-        for (kind, data) in events {
-            store.event(&run.id, *kind, data)?;
-        }
-    }
-    Ok(runs.len())
+    store.insert_all(&runs)?;
+    Ok(Some(runs.len()))
 }
 
 #[cfg(test)]
@@ -228,7 +239,7 @@ mod tests {
     fn the_live_state_migrates() -> Result<()> {
         let store = Store::open(Path::new(":memory:"))?;
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/v1-state.json");
-        assert_eq!(migrate(&store, &path, 7)?, 33);
+        assert_eq!(migrate(&store, &path, 7)?, Some(33));
         let runs: Vec<Migrated> = store.list()?.into_iter().map(|r| (r, vec![])).collect();
         assert_eq!(runs.len(), 33);
 
@@ -278,6 +289,23 @@ mod tests {
         assert!(mate.is_some_and(|m| m.role == Role::Mate
             && m.phase == Phase::Idle
             && m.machine.as_str() == "meerkat"));
+        Ok(())
+    }
+
+    // An empty drover.db, as a crash right after it was created leaves it, still migrates; a
+    // store that has runs never does again.
+    #[test]
+    fn it_migrates_while_the_store_has_no_runs() -> Result<()> {
+        let db = std::env::temp_dir().join(format!("drover-migrate-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        drop(Store::open(&db)?);
+        let store = Store::open(&db)?;
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures/v1-state.json");
+        let first = migrate(&store, &fixture, 7)?;
+        let again = migrate(&store, &fixture, 8)?;
+        let n = store.list()?.len();
+        std::fs::remove_file(&db)?;
+        assert_eq!((first, again, n), (Some(33), None, 33));
         Ok(())
     }
 
