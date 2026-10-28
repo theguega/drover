@@ -85,6 +85,7 @@ pending ──approve-run──▶ starting ──first prompt──▶ working 
 - Pane: `agent.start` with the adapter's args, then `agent.wait` for idle or blocked. Blocked is a startup dialog (folder trust): a `needs` with `dialog`, answered with `keys`, after which the first prompt goes out. Every later change comes from hooks. herdr's events report only a pane or workspace that closed; a run's watcher subscribes while its machine has live pane runs.
 - Turn handling, hooks and commands take one lock (`turns`). `send` refuses while a turn runs (Claude would queue the prompt).
 - Approvals: a `PermissionRequest` hook is a `needs` event with a perm id (`p1`, `p2`, …) and blocks until the owner's `approve` or `deny`. With no answer `min(10, hook_timeout/2)` s before `hook_timeout`, drover denies it with "awaiting approval" and the run goes back to working; the call stays approvable for a day (at most 16 per run, in memory). A late approve follows `send`'s rule: refused while a turn runs, else it is the run's next prompt, and that turn may make the same call (same tool and input, Bash description aside) once without asking, since session allows do not survive `--resume`; the allowance ends with the turn. An ended run takes no hooks and no approvals: its waiting calls hear "the run has ended" and nothing of it stays approvable.
+- Sessions: a hook must carry the run's session. A new one is taken when the run has none yet (a pane's first hook), and once after a resume drover started in a pane (attach: claude may resume under a copy's id) or after `SessionEnd` with reason `clear`. Any other hook is ignored and its permission request denied. A headless run's session comes from its own stream (`system/init`), which is drover's child, so it is always taken.
 - Remote: a headless run is `ssh <machine> 'cd … && exec claude …'`, and each remote has one `ssh -N -R` tunnel carrying its hooks back to the host's port.
 
 ## Memory
@@ -107,7 +108,7 @@ Enforced by the lints in `Cargo.toml`:
 - A typed `herdr::Error` (codes like `agent_not_ready` are matched). Elsewhere a boxed `std::error::Error` with `bail!` and `err!`; a `control::Failure` carries the `help:` line to the terminal.
 - Five dependencies: tokio, serde, serde_json, rusqlite, clap. Prefer a few lines over a crate: config.toml is read by a 30-line parser.
 - The owner check lives in the service: `send`, `keys`, `stop`, `approve` and `deny` need the run's owner (a crew run's approvals go to its mate), `approve-run`, `drop-run` and `attach` need you (no `DROVER_RUN`).
-- HTTP listens on 127.0.0.1 only and refuses a request with an `Origin` header or a `Host` that is not its address, so a browser page cannot reach it.
+- HTTP listens on 127.0.0.1 only, closes a connection whose request has not arrived within 5 s, and refuses a request with an `Origin` header or a `Host` that is not its address, so a browser page cannot reach it.
 - `state.json` from v1, and from the TypeScript version before it, still migrates. There are tests for both.
 
 Repo and branch names are checked (letters, digits, `# . _ / -`), machine names likewise, and session ids must be uuids before they reach a shell. drover adds no sandbox.

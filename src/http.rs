@@ -26,6 +26,12 @@ use crate::{
 
 const MAX_HEAD: u64 = 16 << 10;
 const MAX_BODY: usize = 4 << 20;
+// A request's head and body arrive within this, or the connection closes.
+const HEAD_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(200)
+} else {
+    Duration::from_secs(5)
+};
 // An idle stream sends a comment this often, so a client that left is noticed.
 const PING: Duration = Duration::from_secs(15);
 
@@ -51,7 +57,12 @@ struct Request {
 async fn handle(app: &App, stream: TcpStream, port: u16) -> Result<()> {
     let (read, mut write) = stream.into_split();
     let mut read = BufReader::new(read);
-    let Some(req) = request(&mut read, port).await? else {
+    // a client that never sends its request holds a socket; one waiting on an approval or
+    // reading events is past this
+    let Ok(req) = tokio::time::timeout(HEAD_TIMEOUT, request(&mut read, port)).await else {
+        return Ok(());
+    };
+    let Some(req) = req? else {
         return reply(
             &mut write,
             "403 Forbidden",
@@ -207,6 +218,35 @@ async fn events(app: &App, f: Filter, mut write: tokio::net::tcp::OwnedWriteHalf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A client that sends nothing is closed after HEAD_TIMEOUT; one that sends its request is answered.
+    #[tokio::test]
+    async fn a_silent_client_is_closed() -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port();
+        let app = crate::serve::tests::app()?;
+        tokio::spawn(serve(app, listener, port));
+        let mut silent = TcpStream::connect(("127.0.0.1", port)).await?;
+        let mut buf = [0; 64];
+        let n = tokio::time::timeout(HEAD_TIMEOUT * 5, silent.read(&mut buf)).await??;
+        assert_eq!(n, 0, "closed");
+
+        let mut hook = TcpStream::connect(("127.0.0.1", port)).await?;
+        let body = "{}";
+        let req = format!(
+            "POST /hooks/r-00000a HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        hook.write_all(req.as_bytes()).await?;
+        let mut answer = String::new();
+        hook.read_to_string(&mut answer).await?;
+        assert!(
+            answer.starts_with("HTTP/1.1 200 OK") && answer.ends_with("{}"),
+            "{answer}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn filters_parse() {

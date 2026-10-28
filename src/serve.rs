@@ -45,6 +45,8 @@ const GRACE: Duration = Duration::from_secs(5);
 const TEXT_BATCH: Duration = Duration::from_millis(500);
 // What a tool call hears when you have not answered before its hook times out (SPIKE.md q2).
 const AWAITING: &str = "awaiting approval: the user has not answered yet. Do not retry this call; you will be told when it is approved.";
+// What a tool call from a session that is not the run's hears.
+const FOREIGN: &str = "drover: this session is not the run's";
 // What a tool call of a run that has ended hears.
 const ENDED: &str = "the run has ended";
 // A call drover denied stays approvable this long, and a run keeps at most EXPIRED_MAX of them.
@@ -94,6 +96,8 @@ pub struct App {
     procs: StdMutex<HashMap<RunId, Proc>>,
     next_proc: AtomicU64,
     waiting: StdMutex<HashMap<Key, Waiter>>,
+    // runs whose next hook may bring a new session: a pane drover resumed, or one after /clear
+    rekey: StdMutex<std::collections::HashSet<RunId>>,
     // answered by drover with "awaiting approval"; yours to approve later, for EXPIRED_FOR
     expired: StdMutex<HashMap<Key, (String, Value, Instant)>>,
     // calls you approved late: allowed once, in the turn your approval starts
@@ -309,6 +313,7 @@ impl App {
             procs: StdMutex::default(),
             next_proc: AtomicU64::new(1),
             waiting: StdMutex::default(),
+            rekey: StdMutex::default(),
             expired: StdMutex::default(),
             approved: StdMutex::default(),
             events: broadcast::channel(1024).0,
@@ -980,6 +985,7 @@ impl App {
         for out in outs {
             match out {
                 Out::Session(s) => r.session = Some(s),
+                Out::Rekey => drop(locked(&self.rekey).insert(r.id.clone())),
                 Out::Prompt => r.phase = Phase::Working,
                 Out::Text(text) => self.emit(&r, Kind::Text, json!({ "text": text }))?,
                 Out::ToolStart { tool } => {
@@ -1039,6 +1045,24 @@ impl App {
             return json!({});
         };
         let mut outs = harness.hook(body);
+        let session = outs.iter().find_map(|o| match o {
+            Out::Session(s) => Some(s),
+            _ => None,
+        });
+        if !self.own_session(&r, session) {
+            eprintln!("run {id}: a hook from another session, ignored");
+            let foreign = outs.iter().any(|o| matches!(o, Out::Permission { .. }));
+            return match (
+                foreign,
+                harness.respond(&Decision {
+                    allow: false,
+                    reason: Some(FOREIGN.into()),
+                }),
+            ) {
+                (true, Answer::Hook(v)) => v,
+                _ => json!({}),
+            };
+        }
         let ask = outs
             .iter()
             .position(|o| matches!(o, Out::Permission { .. }))
@@ -1053,6 +1077,17 @@ impl App {
                 }
             }
             _ => json!({}),
+        }
+    }
+
+    // Whether a hook's session is the run's: its own, the first one it has, or a new one where
+    // drover expects one (a resumed pane, /clear). The headless stream's own is never asked.
+    fn own_session(&self, r: &Run, hook: Option<&SessionId>) -> bool {
+        match (&r.session, hook) {
+            (None, _) => true,
+            (Some(known), Some(s)) if known == s => true,
+            (Some(_), Some(_)) => locked(&self.rekey).remove(&r.id),
+            (Some(_), None) => false,
         }
     }
 
@@ -1469,6 +1504,8 @@ impl App {
             self.save(&r)?;
             self.wake.notify_waiters();
             drop(turn);
+            // claude may resume a session under the id of a copy
+            locked(&self.rekey).insert(id.clone());
             self.launch(h, &r, &wt, &argv, None).await?;
             return Ok(
                 json!({ "run": id, "machine": h.name, "pane": wt.pane_id.0, "owner": "user", "noop": noop }),
@@ -1705,6 +1742,12 @@ impl App {
     }
 }
 
+// The last `max` bytes of `s`, or a few fewer: the cut lands on a char boundary.
+fn keep_tail(s: &mut String, max: usize) {
+    let cut = s.ceil_char_boundary(s.len().saturating_sub(max));
+    s.drain(..cut);
+}
+
 async fn write_lines(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
     while let Some(mut line) = rx.recv().await {
         line.push('\n');
@@ -1742,10 +1785,7 @@ async fn read_proc(
             }
             tail.push_str(&l);
             tail.push('\n');
-            let cut = tail.len().saturating_sub(2000);
-            if cut > 0 {
-                tail = tail.chars().skip(tail[..cut].chars().count()).collect();
-            }
+            keep_tail(&mut tail, 2000);
         }
         tail
     });
@@ -1895,7 +1935,7 @@ async fn watch_session(app: &App, h: &Host) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn app_with(config: &str) -> Result<Arc<App>> {
@@ -1907,8 +1947,91 @@ mod tests {
         ))
     }
 
-    fn app() -> Result<Arc<App>> {
+    pub(crate) fn app() -> Result<Arc<App>> {
         app_with("")
+    }
+
+    // A multi-byte character at the cut stays whole.
+    #[test]
+    fn the_stderr_tail_cuts_between_chars() {
+        let mut tail = "é\n".repeat(1500);
+        keep_tail(&mut tail, 2000);
+        // 2500 bytes go, which ends inside an é: the cut moves past it
+        assert_eq!(tail.len(), 1999);
+        assert!(tail.starts_with('\n') && tail.ends_with("é\n"));
+        let mut short = "abc".to_string();
+        keep_tail(&mut short, 2000);
+        assert_eq!(short, "abc");
+    }
+
+    // A hook from another session is ignored, and its call denied, unless drover expects a new
+    // session: the first one, after /clear, after a resume it started.
+    #[tokio::test]
+    async fn a_hook_from_another_session_is_ignored() -> Result<()> {
+        let app = app()?;
+        let mut r = run("r-0000e1", Role::Task)?;
+        r.phase = Phase::Idle;
+        app.store.save(&r)?;
+        let (a, b, c) = (
+            "aaaaaaaa-0000-0000-0000-000000000000",
+            "bbbbbbbb-0000-0000-0000-000000000000",
+            "cccccccc-0000-0000-0000-000000000000",
+        );
+        let hook = |sid: &str, name: &str, extra: Value| {
+            let mut body = hook_body(name, extra);
+            if let Some(s) = body.get_mut("session_id") {
+                *s = json!(sid);
+            }
+            body
+        };
+        let session = |app: &App| {
+            app.store
+                .get(&"r-0000e1".parse().ok()?)
+                .ok()?
+                .and_then(|r| r.session)
+                .map(|s| s.as_str().to_string())
+        };
+        // the first session a pane run has is its own
+        app.hook(&r.id, &hook(a, "UserPromptSubmit", json!({})))
+            .await;
+        assert_eq!(session(&app).as_deref(), Some(a));
+        // another one moves nothing, and its tool call is denied without a needs
+        app.hook(
+            &r.id,
+            &hook(b, "Stop", json!({"last_assistant_message": "x"})),
+        )
+        .await;
+        assert_eq!(phase(&app, "r-0000e1"), Some(Phase::Working));
+        let answer = app
+            .hook(
+                &r.id,
+                &hook(
+                    b,
+                    "PermissionRequest",
+                    json!({"tool_name": "Bash", "tool_input": {}}),
+                ),
+            )
+            .await;
+        assert_eq!(at(&answer, "/hookSpecificOutput/decision/message"), FOREIGN);
+        assert_eq!(
+            (session(&app).as_deref(), app.store.perms(&r.id)?),
+            (Some(a), 0)
+        );
+        // /clear: the next hook brings the new session, once
+        app.hook(&r.id, &hook(a, "SessionEnd", json!({"reason": "clear"})))
+            .await;
+        app.hook(&r.id, &hook(b, "UserPromptSubmit", json!({})))
+            .await;
+        assert_eq!(session(&app).as_deref(), Some(b));
+        app.hook(&r.id, &hook(c, "UserPromptSubmit", json!({})))
+            .await;
+        assert_eq!(session(&app).as_deref(), Some(b));
+        // a resume drover started may come back under a copy's id
+        locked(&app.rekey).insert(r.id.clone());
+        app.hook(&r.id, &hook(c, "UserPromptSubmit", json!({})))
+            .await;
+        assert_eq!(session(&app).as_deref(), Some(c));
+        Ok(())
     }
 
     async fn request(app: &App, from: Option<&str>, line: &str) -> Result<Value> {

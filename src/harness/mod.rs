@@ -58,7 +58,8 @@ pub enum Out {
         usage: Option<Usage>,
         error: bool,
     },
-    End, // the session ended
+    End,   // the session ended
+    Rekey, // the next hook brings a new session, in the same agent
 }
 
 #[derive(Clone, Debug)]

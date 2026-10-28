@@ -214,7 +214,8 @@ impl Harness for Claude {
                 error: false,
             }),
             // /clear starts a new session in the same TUI; its next prompt brings the new id
-            "SessionEnd" if text("reason") != Some("clear") => Some(Out::End),
+            "SessionEnd" if text("reason") == Some("clear") => Some(Out::Rekey),
+            "SessionEnd" => Some(Out::End),
             _ => None,
         });
         out
@@ -472,10 +473,10 @@ mod tests {
             hook("SessionEnd", json!({"reason": "prompt_input_exit"})),
             Some(Out::End)
         );
-        assert!(matches!(
+        assert_eq!(
             hook("SessionEnd", json!({"reason": "clear"})),
-            Some(Out::Session(_))
-        ));
+            Some(Out::Rekey)
+        );
         let deny = Claude.respond(&Decision {
             allow: false,
             reason: Some("not now".into()),

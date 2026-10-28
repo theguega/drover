@@ -116,6 +116,21 @@ sse=$(curl -sN --max-time 3 "http://127.0.0.1:$port/events?run=$h&since=0" || tr
 [[ $(grep -c '^event: reply' <<<"$sse") -ge 4 ]] || fail "SSE: fewer than 4 replies"
 ok "GET /events streams the same events: $(grep -c '^event: ' <<<"$sse") of them"
 
+# ── a client that sends nothing does not hold a socket ──
+fds() { ls "/proc/$serve/fd" | wc -l; }
+before=$(fds)
+socks=()
+for _ in $(seq 300); do
+  exec {s}<>"/dev/tcp/127.0.0.1/$port"
+  socks+=("$s")
+done
+held=$(fds)
+sleep 7
+after=$(fds)
+for s in "${socks[@]}"; do exec {s}>&-; done
+((after < before + 20)) || fail "300 silent sockets: serve went from $before fds to $held, and $after after 7 s"
+ok "300 silent sockets: serve from $before fds to $held, back to $after after 7 s"
+
 # ── a stopped process takes the tools it started with it ──
 leak=drvleak$$
 printf 'exec -a %s tail -f /dev/null\n' "$leak" >"$tmp/wait.sh"
