@@ -107,6 +107,13 @@ file:                                   # not created
 ```
 With HOLD=20: `start ...707.64`, `end ...727.64`, total run 30.1 s, against 15.7 s with the 3 s hold, so the call waits for the hook. Run with `--force --trust`: the hook still denies, so a hook outranks `--force`. The `agent_message` text was not what the model quoted; it quoted the `user_message`.
 
+## 7. cursor-agent, found building the adapter
+
+- No warm process: `--input-format` is unknown, a prompt is argv or stdin to EOF. `--resume <chatId>` keeps the session id, and a hook's `session_id` is the stream's.
+- A hook command with `://` in it is skipped without a word (no error, the call just runs), so `drover hook` takes `host:port/path`. Hooks come from `.cursor/hooks.json` in the project, `~/.cursor/hooks.json`, or `/etc/cursor/hooks.json`; no flag or env.
+- A 75 s hold with `"timeout": 120` was honored. A denied call is a `tool_call` `completed` with `rejected.reason`, and the model quotes the `user_message`.
+- The TUI fires `sessionStart`, `beforeSubmitPrompt`, `afterAgentResponse` (the turn's whole text, once) and `stop`; `-p` fires `sessionStart` and the before hooks, not `stop`. `{}` answers them. Its trust dialog takes the first typed prompt: `--trust`.
+
 ## Not tested
 
 - `PermissionRequest` for tools other than Bash.

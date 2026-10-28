@@ -791,7 +791,7 @@ impl App {
         let Some(rel) = Self::harness(r).ok().and_then(|h| h.hook_file(r.profile)) else {
             return;
         };
-        if let Err(e) = harness::restore(&r.cwd, rel, &self.hook_url(&r.id)) {
+        if let Err(e) = harness::restore(&r.cwd, rel, r.id.as_str()) {
             eprintln!("run {}: {e}", r.id);
         }
     }

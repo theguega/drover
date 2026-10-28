@@ -122,9 +122,9 @@ pub enum Cmd {
     },
     /// The service: the unix socket, HTTP on 127.0.0.1 for hooks and events, and one herdr watcher per machine
     Serve,
-    /// A harness's hook command: its JSON on stdin to the run's hook URL, the answer on stdout
+    /// A harness's hook command: its JSON on stdin to the run's hook at host:port/path, the answer on stdout
     #[command(hide = true)]
-    Hook { url: String },
+    Hook { at: String },
     #[command(hide = true)]
     Home,
 }
@@ -223,8 +223,8 @@ pub struct Request {
 }
 
 pub async fn main(cli: Cli) -> i32 {
-    if let Some(Cmd::Hook { url }) = &cli.cmd {
-        return hook(url);
+    if let Some(Cmd::Hook { at }) = &cli.cmd {
+        return hook(at);
     }
     let reply = run(cli).await;
     match reply {
@@ -301,14 +301,13 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
 
 // Blocks until drover answers. Exit 2 is a deny for the harness, so a hook that cannot reach
 // drover never lets a call through.
-fn hook(url: &str) -> i32 {
+fn hook(at: &str) -> i32 {
     use std::io::Write;
 
     let post = || -> std::io::Result<String> {
-        let (addr, path) = url
-            .strip_prefix("http://")
-            .and_then(|u| u.split_once('/'))
-            .ok_or_else(|| std::io::Error::other("not a drover hook url"))?;
+        let (addr, path) = at
+            .split_once('/')
+            .ok_or_else(|| std::io::Error::other("not a host:port/path"))?;
         let mut body = String::new();
         std::io::stdin().read_to_string(&mut body)?;
         let mut sock = std::net::TcpStream::connect(addr)?;

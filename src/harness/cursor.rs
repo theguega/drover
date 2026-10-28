@@ -1,7 +1,7 @@
 // Cursor: `cursor-agent -p` for headless runs, the TUI for pane runs. Headless takes one prompt
 // per process (no stream input, and it reads stdin to EOF), so a turn is a process, resumed by
 // session id. Approvals are command hooks in `.cursor/hooks.json` in the run's cwd, which run
-// `drover hook <url>`: it posts to drover and prints cursor's answer. See SPIKE.md q6.
+// `drover hook <host:port/path>`: it posts to drover and prints cursor's answer. See SPIKE.md q6.
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -31,7 +31,8 @@ impl Harness for Cursor {
     }
 
     fn start(&self, spec: &StartSpec) -> Vec<String> {
-        let mut argv = vec!["cursor-agent".to_string()];
+        // --trust: the worktree is drover's own, and the TUI's trust dialog would take the first prompt
+        let mut argv = vec!["cursor-agent".to_string(), "--trust".to_string()];
         if spec.headless {
             argv.extend(
                 [
@@ -39,7 +40,6 @@ impl Harness for Cursor {
                     "--output-format",
                     "stream-json",
                     "--stream-partial-output",
-                    "--trust",
                 ]
                 .map(String::from),
             );
@@ -142,7 +142,9 @@ impl Harness for Cursor {
 
     fn hook_settings(&self, spec: &StartSpec) -> Value {
         let hook = |timeout: u64| {
-            let command = format!("{} hook {}", quote(spec.drover), quote(spec.hooks));
+            // cursor silently skips a hook command with a URL in it, so no scheme
+            let at = spec.hooks.trim_start_matches("http://");
+            let command = format!("{} hook {}", quote(spec.drover), quote(at));
             json!([{"command": command, "timeout": timeout}])
         };
         let mut hooks = Map::new();
@@ -190,8 +192,13 @@ impl Harness for Cursor {
                     other => other.cloned().unwrap_or_default(),
                 },
             }),
-            "afterAgentResponse" => Some(Out::Text(text("text").unwrap_or_default().into())),
-            "stop" => Some(Out::Reply {
+            // once a turn, with all of its text; stop has none, and ends a turn that had no response
+            "afterAgentResponse" => Some(Out::Reply {
+                text: text("text").unwrap_or_default().into(),
+                usage: None,
+                error: false,
+            }),
+            "stop" if text("status") != Some("completed") => Some(Out::Reply {
                 text: String::new(),
                 usage: None,
                 error: text("status") == Some("error"),
@@ -286,17 +293,17 @@ mod tests {
         assert_eq!(Cursor.hook_file(Profile::Reader), None);
 
         let actor = Cursor.start(&spec(true, Profile::Actor));
-        assert_eq!(actor.get(1).map(String::as_str), Some("-p"));
+        assert_eq!(actor.get(2).map(String::as_str), Some("-p"));
         assert!(!actor.iter().any(|a| a == "--mode" || a == "--force"));
         assert_eq!(Cursor.hook_file(Profile::Actor), Some(".cursor/hooks.json"));
         let pane = Cursor.start(&spec(false, Profile::Actor));
-        assert_eq!(pane, ["cursor-agent", "--model", "auto"]);
+        assert_eq!(pane, ["cursor-agent", "--trust", "--model", "auto"]);
     }
 
     #[test]
     fn hooks_run_drover_with_the_runs_url() {
         let s = Cursor.hook_settings(&spec(true, Profile::Actor));
-        let command = "'/opt/drover/bin/drover' hook 'http://127.0.0.1:7341/hooks/r-00000a'";
+        let command = "'/opt/drover/bin/drover' hook '127.0.0.1:7341/hooks/r-00000a'";
         for name in ["beforeShellExecution", "beforeMCPExecution"] {
             assert_eq!(
                 s.pointer(&format!("/hooks/{name}/0/command")),
@@ -395,6 +402,19 @@ mod tests {
                 input: json!({"q": 1})
             })
         );
+        assert_eq!(
+            hook(json!({"hook_event_name": "afterAgentResponse", "text": "PONG"})),
+            Some(Out::Reply {
+                text: "PONG".into(),
+                usage: None,
+                error: false
+            })
+        );
+        // the turn's reply came with afterAgentResponse
+        assert!(matches!(
+            hook(json!({"hook_event_name": "stop", "status": "completed"})),
+            Some(Out::Session(_))
+        ));
         assert_eq!(
             hook(json!({"hook_event_name": "stop", "status": "error"})),
             Some(Out::Reply {

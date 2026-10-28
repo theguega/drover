@@ -176,16 +176,16 @@ pub fn install(cwd: &Path, rel: &str, ours: &Value) -> std::io::Result<()> {
     std::fs::write(&path, serde_json::to_string_pretty(&merged)?)
 }
 
-// The repo's file back, or none if it had none. A file without `url` in it is not ours: an
+// The repo's file back, or none if it had none. A file without `run` in it is not ours: an
 // install that failed first leaves the repo's own where it was.
-pub fn restore(cwd: &Path, rel: &str, url: &str) -> std::io::Result<()> {
+pub fn restore(cwd: &Path, rel: &str, run: &str) -> std::io::Result<()> {
     let path = cwd.join(rel);
     let kept = backup(&path);
     if kept.exists() {
         return std::fs::rename(&kept, &path);
     }
     match std::fs::read_to_string(&path) {
-        Ok(text) if text.contains(url) => {
+        Ok(text) if text.contains(run) => {
             std::fs::remove_file(&path)?;
             // only an empty .cursor goes
             if let Some(dir) = path.parent() {
@@ -381,7 +381,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("drover-install-{}", std::process::id()));
         let file = dir.join(".cursor/hooks.json");
         let ours = |cmd: &str| json!({"version": 1, "hooks": {"beforeShellExecution": [{"command": cmd}]}});
-        let url = "http://127.0.0.1:7341/hooks/r-00000a";
+        let url = "127.0.0.1:7341/hooks/r-00000a";
         let commands = || -> std::io::Result<Vec<String>> {
             let v: Value = serde_json::from_str(&std::fs::read_to_string(&file)?)?;
             Ok(v.pointer("/hooks/beforeShellExecution")
@@ -395,7 +395,7 @@ mod tests {
         // no file of its own: ours alone, and gone again with the empty .cursor
         install(&dir, ".cursor/hooks.json", &ours(url))?;
         assert_eq!(commands()?, [url]);
-        restore(&dir, ".cursor/hooks.json", url)?;
+        restore(&dir, ".cursor/hooks.json", "r-00000a")?;
         assert!(!dir.join(".cursor").exists());
 
         // the repo's own: kept, ours added, installing twice adds ours once, then the original byte for byte
@@ -406,11 +406,11 @@ mod tests {
         install(&dir, ".cursor/hooks.json", &ours("one"))?;
         install(&dir, ".cursor/hooks.json", &ours(url))?;
         assert_eq!(commands()?, ["./lint.sh", url]);
-        restore(&dir, ".cursor/hooks.json", url)?;
+        restore(&dir, ".cursor/hooks.json", "r-00000a")?;
         assert_eq!(std::fs::read_to_string(&file)?, theirs);
 
         // a file that is not ours is left alone when nothing was installed
-        restore(&dir, ".cursor/hooks.json", url)?;
+        restore(&dir, ".cursor/hooks.json", "r-00000a")?;
         assert_eq!(std::fs::read_to_string(&file)?, theirs);
         std::fs::remove_dir_all(&dir)
     }

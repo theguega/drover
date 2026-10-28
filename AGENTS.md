@@ -11,7 +11,7 @@ src/control.rs  unix socket the service listens on, and the client side; `watch`
 src/http.rs     127.0.0.1 HTTP: hook endpoints, GET /events (SSE), POST /runs/:id/permissions/:perm
 src/serve.rs    the service: commands, headless processes, hooks and approvals, a herdr watcher per machine
 src/goal.rs     a mate's goal graph (C16): its shape, checked once when set
-src/harness/    the Harness trait (C12) and its adapters: claude.rs, pi.rs
+src/harness/    the Harness trait (C12) and its adapters: claude.rs, cursor.rs, pi.rs
 harness/pi.ts   pi extension: posts events, holds tool calls for approval; linked into ~/.pi/agent/extensions
 src/run.rs      Run and its types: RunId, Machine, Mode, Role, Profile, Owner, Phase, Usage
 src/store.rs    drover.db: runs, events, goals, and each run's `wait` cursor
@@ -30,6 +30,7 @@ bootstrap.sh    curl entry point: clones into ~/.local/share/drover, runs instal
 scripts/live-test.sh  headless, approvals, pane and attach against a real claude (haiku) and herdr
 scripts/live-test-mates.sh  a mate's crew, wait, goal and escalate against a real claude (haiku)
 scripts/live-test-pi.sh  the same for pi; PI_PROVIDER and PI_MODEL pick the model
+scripts/live-test-cursor.sh  headless, approvals and the hooks file against a real cursor-agent
 ```
 
 State lives in `~/.local/state/drover/` (`drover.db`, `drover.sock`), config in `~/.config/drover/config.toml`.
@@ -66,7 +67,7 @@ The dotfiles blank native `new_worktree` so `prefix+shift+g` can run `drover-wt 
 
 ## Harness adapters
 
-`src/harness/mod.rs` holds the `Harness` trait: an adapter is its harness's protocol, as pure functions. `start` is the command line (pane or headless, profile, model, `--resume`), `send` a prompt as a stdin line, `events` one stdout line as `Out`s, `hook_settings` and `hook` the hooks it posts, `respond` the answer to a permission (back to the hook, or onto stdin), `abort`, and `caps`. Spawning the process, here or over ssh, its stdin and stdout, and what the events do to a run are drover's own and the same for every harness. A new harness is one file in `src/harness/`.
+`src/harness/mod.rs` holds the `Harness` trait: an adapter is its harness's protocol, as pure functions. `start` is the command line (pane or headless, profile, model, `--resume`), `send` a prompt as a stdin line, `events` one stdout line as `Out`s, `hook_settings` and `hook` the hooks it posts (`hook_file`: in a file in the cwd, not on the command line), `respond` the answer to a permission (back to the hook, or onto stdin), `abort`, and `caps` (`warm`: one process serves every turn, or each turn is a process). Spawning the process, here or over ssh, its stdin and stdout, and what the events do to a run are drover's own and the same for every harness. A new harness is one file in `src/harness/`.
 
 Claude (`claude.rs`, see SPIKE.md):
 
@@ -80,6 +81,14 @@ Pi (`pi.rs`, `harness/pi.ts`):
 - pi has no hooks or permissions of its own. `--drover-hook <url>` makes `harness/pi.ts` (a global extension, linked by `install.sh`, inert without the flag) post to the run's hook URL: `session_start` (the session id), and for each tool that is not read-only (`read`, `grep`, `find`, `ls`) a `permission` that blocks until drover answers `{allow, reason}`; a deny returns `{block, reason}` to the model, and an unreachable drover blocks. A pane also gets `agent_start`, tool events, `agent_settled` (the reply) and `session_shutdown`.
 - Resume is `--session <id>`. A reader gets `--drover-reader`: read-only tools and `brain find|get|pages|code` only.
 
+Cursor (`cursor.rs`, see SPIKE.md q6):
+
+- Headless: `cursor-agent --trust -p --output-format stream-json --stream-partial-output`. `cursor-agent` takes one prompt per process (no stream input; it reads stdin to EOF), so `warm` is false: each turn is a process, the prompt is its stdin, and the next `send` starts it again with `--resume <session>`, which keeps the id. `system/init` gives the session; an `assistant` line with a timestamp and no `model_call_id` is a text delta, the one with neither is the turn's last message and the reply (`result` joins all of the turn's text); `tool_call` `started`/`completed` are tool_start and tool_end, the tool being the key (`shellToolCall` is Shell), ok when its result has `success`. `usage` has tokens and no cost, so `cost_usd` stays 0.
+- Approvals: cursor has no flag or env for hooks, so an actor run gets `.cursor/hooks.json` in its cwd, with `beforeShellExecution` and `beforeMCPExecution` commands running `drover hook <host:port/path>`. That posts to the run's hook endpoint, blocks on the answer, and prints `{"permission", "user_message", "agent_message"}`; exit 2 when drover is not reachable, which cursor reads as a deny. cursor skips a hook command with `://` in it, so the address has no scheme. A hook outranks `--force`, and a shell call needs no `--force` once a hook allows it. Edits and reads are not held.
+- The file is merged with the repo's own, whose hooks keep running. The repo's file waits beside it as `hooks.json.drover` and comes back when the run ends (or none, if it had none); a crash leaves both. An untracked `.cursor/hooks.json` in the worktree can be committed by the agent in the meantime. Remote machines are refused: the file is written here.
+- A pane also gets `sessionStart`, `beforeSubmitPrompt`, `afterAgentResponse` (the reply: once a turn, with its whole text) and `stop` (only when not completed), `sessionEnd`. `--trust` skips the trust dialog, which would take the first prompt.
+- A reader is `--mode ask` and has no hooks.
+
 ## Event loop
 
 Events are C9: `started`, `text`, `tool_start`, `tool_end`, `needs`, `goal`, `reply`, `done`, `failed`. Each is stored and sent on a broadcast channel under one lock, so ids reach readers in order. `drover watch` and `GET /events` read through a `Feed`: stored events after `since`, then live ones; a reader that lags reads the store again. `requested` is stored and never streamed.
@@ -90,7 +99,7 @@ pending ──approve-run──▶ starting ──first prompt──▶ working 
                                     open fails, a process dies mid-turn ──▶ failed
 ```
 
-- Headless: the process stays warm after a turn and is ended after `idle_kill`. `send` to a cold run spawns it again with `--resume`. A process that dies mid-turn fails its run; drover restarting leaves its headless runs idle, to resume on the next send.
+- Headless: the process stays warm after a turn and is ended after `idle_kill` (a harness that is not `warm` ends it itself). `send` to a cold run spawns it again with `--resume`. A process that dies mid-turn fails its run; drover restarting leaves its headless runs idle, to resume on the next send.
 - Ending a headless process (stop, done, attach, idle_kill, a run's end) is SIGTERM, 5 s, then SIGKILL: claude ends the tools it started on SIGTERM, and those run in sessions of their own, so a bare SIGKILL leaves them running. Each process prints `drover-pid <pid> <lstart>` first on stderr (a `sh`/`ssh` wrapper, then `exec`), kept in the `procs` table while it runs; a signal goes out only while pid and start time still match. A restarted serve ends the processes the table lists, and a resume ends its run's own first, so one session never has two processes.
 - Pane: `agent.start` with the adapter's args, then `agent.wait` for idle or blocked. Blocked is a startup dialog (folder trust): a `needs` with `dialog`, answered with `keys`, after which the first prompt goes out. Every later change comes from hooks. herdr's events report only a pane or workspace that closed; a run's watcher subscribes while its machine has live pane runs.
 - Turn handling, hooks and commands take one lock (`turns`). `send` refuses while a turn runs (Claude would queue the prompt).
