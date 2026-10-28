@@ -2189,6 +2189,11 @@ async fn tunnel(host: String, port: u16) {
             .args(SSH_OPTS)
             .args([
                 "-N",
+                // its own connection: a ControlMaster would take the forward and this ssh exit at once
+                "-o",
+                "ControlMaster=no",
+                "-o",
+                "ControlPath=none",
                 "-o",
                 "ExitOnForwardFailure=yes",
                 "-R",
