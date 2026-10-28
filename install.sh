@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install drover from this checkout. Rerun after a pull. Skills are copied by hand, see README.
-#   ./install.sh           host: ask for .env, build, link the tools, run the service
-#   ./install.sh --remote  remote: link drover-wt only; no service, no .env
+#   ./install.sh           host: write ~/.config/drover/config.toml, build, link the tools, run the service
+#   ./install.sh --remote  remote: link drover-wt and the client only; no service, no config
 # The desk's own config (keys, aliases, REPOS_ROOT) stays in your dotfiles.
 set -euo pipefail
 
@@ -37,30 +37,23 @@ if ((remote)); then
   exit 0
 fi
 
-if [[ ! -f "$root/.env" ]]; then
-  [[ -r /dev/tty ]] || { echo "no .env: copy .env.example to .env and fill it, then rerun" >&2; exit 1; }
-  echo "drover needs a Discord bot, a server and a channel. See README.md, Discord setup."
-  token=
-  read -rsp "DISCORD_TOKEN: " token </dev/tty; echo
-  guild=$(ask DISCORD_GUILD_ID)
-  channel=$(ask DISCORD_CHANNEL_ID)
-  allowed=$(ask "ALLOWED_USER_IDS (comma-separated)")
-  host=$(ask HOST_NAME "$(hostname -s)")
-  remotes=$(ask "REMOTES (ssh names, comma-separated, empty for none)")
-  repos=$(ask "REPOS_ROOT: where repositories and worktrees live" "$default_repos")
-  repos=${repos/#\~/$HOME}
-  mkdir -p "${repos/#\~/$HOME}"
-  umask 077
-  cat >"$root/.env" <<ENV
-DISCORD_TOKEN=$token
-DISCORD_GUILD_ID=$guild
-DISCORD_CHANNEL_ID=$channel
-ALLOWED_USER_IDS=$allowed
-HOST_NAME=$host
-REMOTES=$remotes
-REPOS_ROOT=$repos
-ENV
-  echo "wrote $root/.env"
+config=~/.config/drover/config.toml
+if [[ ! -f "$config" ]]; then
+  [[ -r /dev/tty ]] || { echo "no $config: write it by hand, see README, Configuration" >&2; exit 1; }
+  host=$(ask "this machine's name, as herdr's machine label" "$(hostname -s)")
+  remotes=$(ask "remotes (ssh names, space-separated, empty for none)")
+  repos=$(ask "where repositories and worktrees live" "$default_repos")
+  mkdir -p "${repos/#\~/$HOME}" "$(dirname "$config")"
+  list=
+  for r in $remotes; do list+="\"$r\", "; done
+  {
+    echo "host = \"$host\""
+    echo "remotes = [${list%, }]"
+    echo "repos_root = \"$repos\""
+    # a v1 checkout's tasks become runs on the first start
+    if [[ -f "$root/state.json" ]]; then echo "v1_state = \"$root/state.json\""; fi
+  } >"$config"
+  echo "wrote $config"
 fi
 
 command -v cargo >/dev/null || { echo "drover is built with cargo: install Rust from https://rustup.rs" >&2; exit 1; }
@@ -69,7 +62,8 @@ ln -sfn "$root/target/release/drover" "$bin/drover"
 
 zsh=$(command -v zsh || true)
 [[ -n "$zsh" ]] || { echo "the service starts through zsh: install it first" >&2; exit 1; }
-run="set -a; . ./.env; set +a; exec ./target/release/drover serve"
+# zsh -c, so the login dotfiles' PATH and REPOS_ROOT apply
+run="exec ./target/release/drover serve"
 
 case "$(uname -s)" in
   Linux)

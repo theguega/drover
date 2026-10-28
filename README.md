@@ -1,17 +1,18 @@
 # drover
 
-**An agent runtime for herdr.** drover starts coding agents in git worktrees, follows them in herdr, and carries their answers to Discord or your terminal. Every task is an ordinary herdr workspace, so you can take over any agent at any time.
+**An agent runtime for herdr.** drover starts coding agents in git worktrees, on this machine or over ssh, and follows each one as a **run**. A pane run is an ordinary herdr workspace, so you can take over any agent at any time.
 
 drover calls no model itself. The agents are the CLIs you already use.
 
 ## What you get
 
-- **Tasks:** `drover new` opens a worktree and starts an agent in herdr. Pass `--discord` (or `drover attach --pane ID --discord` later) to open a Discord thread where messages become the next prompts.
-- **Terminal and Discord are the same thing.** Every Discord command has a terminal form, and both act on the same tasks.
+- **Runs:** `drover run` opens a worktree and starts the agent in a herdr pane. drover follows it through herdr's events and keeps its phase, owner and last reply in `~/.local/state/drover/drover.db`.
+- **Nothing runs without you:** a run another agent asks for (`--parent`) waits as `pending` until you `drover approve-run` it.
 - **`drover-wt`:** worktrees for herdr, from a branch, a new name, or a GitHub pull request (`#123`).
-- **A journal:** `drover done` asks the agent for a five-line entry, and `drover recall` searches them later.
 - **Remotes:** drive herdr servers on other machines over ssh from the same desk.
 - **A skill:** `skills/drover` teaches agents to use all of this. See [Skill](#skill).
+
+The design, with what is built and what is still planned, is in [`DESIGN.md`](DESIGN.md).
 
 ## Install
 
@@ -21,7 +22,7 @@ You need herdr, git, jq, ssh, zsh and Rust (for `cargo`). On the machine that ru
 curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh
 ```
 
-It clones drover to `~/.local/share/drover`, asks for the Discord settings (below) and where your repositories live, builds it, puts `drover` and `drover-wt` on your PATH, and starts the service (systemd on Linux, launchd on macOS). Run the same command again to update.
+It clones drover to `~/.local/share/drover`, writes `~/.config/drover/config.toml` from a few questions, builds it, puts `drover` and `drover-wt` on your PATH, and starts the service (systemd on Linux, launchd on macOS). Run the same command again to update.
 
 On each remote machine, install only the worktree tool and the client:
 
@@ -31,29 +32,22 @@ curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh |
 
 The `drover` on a remote machine is a client: it runs the command on the host in `DROVER_HOST` over ssh. Set it in your shell, for example `export DROVER_HOST=amazing_vps`.
 
-## Discord setup
-
-1. Create an application in the Discord developer portal, add a bot, and copy its token.
-2. Invite the bot to your server with permission to read and send messages, create threads, and add reactions.
-3. Copy the server (guild) id, the text channel where drover posts, and your own user id. Discord's developer mode shows these under "Copy ID".
-
-The installer asks for the token, the guild id, the channel id, the allowed user ids (comma-separated; only these can drive agents), this machine's name, and the remotes (ssh names, comma-separated). It writes `.env` in the install directory. `drover config` shows the live values.
-
 ## Use
 
 ```sh
-drover help                  # every command, with its Discord equivalent
-drover new --machine host --repo myrepo --branch feature-x --prompt "add retries to the client"
-drover agents                # agents on every machine, and the thread if bound to Discord
-drover snapshot              # the desk as JSON, for other tools; `drover watch` streams it, one line per change
-drover screen --pane ID      # an agent's terminal
-drover reply --pane ID       # an agent's last reply in full
-drover keys --pane ID --keys "esc enter"
-drover attach --pane ID --discord  # open a Discord thread for a running task to continue there
-drover done --pane ID        # journal entry, then close the workspace
-drover recall retries        # search the journal
-drover journal rm 12         # delete an entry; /journal-rm in Discord picks one from a list
+drover                       # runs per phase, and what needs you
+drover run --repo myrepo --branch feature-x --prompt "add retries to the client"
+drover ls                    # live runs; --all for done and failed too
+drover show r-1a2b3c         # phase, owner, last reply, children
+drover send r-1a2b3c "now the tests"
+drover screen r-1a2b3c       # the pane's terminal
+drover keys r-1a2b3c esc enter
+drover approve-run r-4d5e6f  # start a run an agent asked for; drop-run removes it
+drover done r-1a2b3c --remove --entry "what, why, outcome"   # brain log, close, remove the worktree
+drover snapshot              # every run as JSON; `drover watch` streams it, one line per change
 ```
+
+`--help` on any command documents its flags.
 
 `drover-wt` also works on its own, at the desk or in a shell:
 
@@ -66,25 +60,6 @@ drover-wt --help             # full usage
 ```
 
 A new checkout is ready to work in. Untracked files of the main clone that match `.worktreeinclude` (gitignore syntax, e.g. `.env`, `target/`, `node_modules/`) are copied over, whole directories as copy-on-write clones where the filesystem supports it (APFS, Btrfs, XFS). Then an executable `.worktree-setup` in the repo runs in the new checkout, with the main clone's path as `$1`, for steps like `uv sync` or `direnv allow`.
-
-## Mates and scouts
-
-A **mate** is a dispatcher: an agent in its own pane in the `drover` workspace, with its playbook in `mates/AGENTS.md`. It plans the goal as a small graph of crewmates, starts them with `drover new --mate`, hears each crewmate's turn as it ends, and loops until every check passes. It writes to you only when it needs a decision or the goal is done. At most three run at once.
-
-```sh
-drover mate reviewer         # start a mate; /mate in Discord does the same
-drover new --machine host --repo myrepo --branch feature-x --prompt "..." --mate reviewer
-drover take --thread ID      # the desk user takes a pane back from its mate
-```
-
-A **scout** is a short look at something that belongs to no repo. It has a folder of its own, no journal entry, and it is deleted when you close it:
-
-```sh
-drover scout "what does the cache layer do?"
-drover scout close --thread ID
-```
-
-`mates/state/` holds each mate's log and owner list, and scouts' folders. It is git-ignored.
 
 ## Skill
 
@@ -114,37 +89,20 @@ Claude Code can run `drover` at the start of every session, so the desk's home v
 
 Its output is added to every session's context, so each session pays for those tokens. The [skill](#skill) is the lighter choice: it loads only when a task mentions drover.
 
-## Completion
-
-Completion is opt-in: the installer doesn't set it up. Values such as machines, mates, threads and panes come from `drover complete`, so the scripts work with a running service.
-
-Bash, with the `bash-completion` package:
-
-```sh
-mkdir -p ~/.local/share/bash-completion/completions
-cp completions/drover.bash ~/.local/share/bash-completion/completions/drover
-```
-
-zsh, in any directory on `fpath`:
-
-```sh
-mkdir -p ~/.zsh/completions
-cp completions/_drover ~/.zsh/completions/
-```
-
-Then add these lines to `.zshrc` before `compinit`:
-
-```sh
-fpath=(~/.zsh/completions $fpath)
-```
-
 ## Configuration
 
-drover reads only its own `.env`. Your desk is yours: keybindings, shell aliases, `REPOS_ROOT` and `HERDR_WORKTREE_PREFIX` belong in your dotfiles, and they point at `drover-wt`.
+`~/.config/drover/config.toml`, read once when the service starts. Every key is optional:
 
-The installer asks where repositories and worktrees live. The default is `~/.drover-workspace`, and the answer goes into `.env` as `REPOS_ROOT`. Clone your repositories under it. Worktrees are created next to their main clone as `<repo>.<branch>`.
+```toml
+host = "meerkat"                        # this machine's name, as herdr's machine label (default "host")
+remotes = ["chicken"]                   # ssh names whose herdr server already runs
+repos_root = "~/.drover-workspace"      # REPOS_ROOT for drover-wt on this machine
+v1_state = "~/Developer/drover/state.json"   # a v1 state.json, migrated into a new drover.db once
+```
 
-If your repositories already live somewhere else, such as `~/Developer`, answer that at the prompt, or set `REPOS_ROOT` in your shell environment for the desk and remotes.
+The installer writes it. drover v1's `.env` is not read: copy `HOST_NAME`, `REMOTES` and `REPOS_ROOT` into this file by hand, and drop the Discord keys. `--config` or `DROVER_CONFIG` names another file, and `--state-dir` or `DROVER_STATE_DIR` another state directory, for a test service next to the real one.
+
+Your desk is yours: keybindings, shell aliases, `REPOS_ROOT` and `HERDR_WORKTREE_PREFIX` belong in your dotfiles, and they point at `drover-wt`. Clone your repositories under the repos root. Worktrees are created next to their main clone as `<repo>.<branch>`.
 
 ## Develop
 

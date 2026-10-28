@@ -193,6 +193,8 @@ events(id PK, run, at, kind, data JSON)          -- capped at 30 days, older row
 goals(run PK, graph JSON, updated_at)
 ```
 
+Two event kinds beyond C9 are stored, never streamed: `requested` (repo, branch and the first prompt, kept so a pending run can start after a restart) and `started` (the first prompt went out). A pending pane run has no pane yet: `Mode::Pane { pane: Option<PaneId> }`, the `pane` column NULL.
+
 Everything lives in `~/.local/state/drover/`. Config is in `~/.config/drover/config.toml` (machines, repos root, harness paths), with credentials alongside at mode 600.
 
 ## Migration from v1
