@@ -260,7 +260,8 @@ pub async fn doctor(m: &Host, build: &str) -> Vec<serde_json::Value> {
         "command -v \"$c\" >/dev/null 2>&1 && echo \"bin $c yes\" || echo \"bin $c no\"; done; ",
         "echo \"sha $(drover-wt --version 2>/dev/null)\"; ",
         "herdr status server >/dev/null 2>&1 && echo 'herdr-server yes' || echo 'herdr-server no'; ",
-        "test -f ~/.cursor/auth.json && echo 'cursor-login yes' || echo 'cursor-login no'",
+        // macOS keeps the login in ~/.cursor, Linux under XDG_CONFIG_HOME
+        "{ test -f ~/.cursor/auth.json || test -f \"${XDG_CONFIG_HOME:-$HOME/.config}/cursor/auth.json\"; } && echo 'cursor-login yes' || echo 'cursor-login no'",
     );
     let out = match sh(m, probe, SHORT).await {
         Ok(o) if o.code == Some(0) => o.out,
