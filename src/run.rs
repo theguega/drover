@@ -359,7 +359,7 @@ mod tests {
         assert!("r-1a2b3c".parse::<RunId>().is_ok());
         assert!("r-1A2B3C".parse::<RunId>().is_err());
         assert!("r-1a2b3".parse::<RunId>().is_err());
-        assert!("meerkat".parse::<Machine>().is_ok());
+        assert!("devbox".parse::<Machine>().is_ok());
         assert!("-oProxyCommand=x".parse::<Machine>().is_err());
         assert!("a b".parse::<Machine>().is_err());
     }

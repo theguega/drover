@@ -332,7 +332,7 @@ mod tests {
 
     #[test]
     fn commands_cross_the_socket_as_parsed() -> Result<(), Box<dyn std::error::Error>> {
-        let cmd = parse("run --repo drover --branch theo/x --parent r-00aa11 --prompt go")?;
+        let cmd = parse("run --repo drover --branch me/x --parent r-00aa11 --prompt go")?;
         let wire = serde_json::to_string(&Request { from: None, cmd })?;
         let back: Request = serde_json::from_str(&wire)?;
         assert!(

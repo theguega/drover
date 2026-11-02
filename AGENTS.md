@@ -45,7 +45,7 @@ dashboard ─ 127.0.0.1:7341 ─▶      │  ▲ hooks (http)
 
 ## Dotfiles
 
-drover ships with its own worktree tool (`bin/drover-wt`), linked to `~/.local/bin` by `install.sh`, and its own skill. Your desk is personal and lives in your dotfiles: the herdr keys in `herdr/.config/herdr/config.toml`, the `wt` alias, and the env (`PATH`, `REPOS_ROOT`, `HERDR_WORKTREE_PREFIX`) in `.zshenv`. Those point at `drover-wt`. drover reads none of them itself, except `repos_root` from its config, given to drover-wt on the host. The service starts through `zsh -c`, and ssh runs the login shell, so every machine's own dotfiles decide.
+drover ships with its own worktree tool (`bin/drover-wt`), linked to `~/.local/bin` by `install.sh`, and its own skill. Your desk is personal and lives in your dotfiles: herdr's keybindings, a `wt` alias, and the env (`PATH`, `REPOS_ROOT`, `HERDR_WORKTREE_PREFIX`) in your shell's env file. Those point at `drover-wt`. drover reads none of them itself, except `repos_root` from its config, given to drover-wt on the host. The service starts through `zsh -c`, and ssh runs the login shell, so every machine's own dotfiles decide.
 
 Remotes need `drover-wt` on PATH, so they run `install.sh --remote` too.
 
@@ -61,7 +61,7 @@ Native herdr worktree (0.9.3):
 - checkouts go under `~/.herdr/worktrees/<repo>/<branch>`, not `$REPOS_ROOT/<repo>.<branch>`
 - remove deletes the checkout and never the merged branch
 
-The dotfiles blank native `new_worktree` so `prefix+shift+g` can run `drover-wt prompt`. `prefix+o` focuses the first blocked agent, else the first done one — the native toast target is gone with `ui.toast.delivery = "system"`.
+A desk can blank herdr's native `new_worktree` key and bind one to `drover-wt prompt` instead.
 
 ## Harness adapters
 

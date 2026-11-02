@@ -118,8 +118,8 @@ Its output is added to every session's context, so each session pays for those t
 `~/.config/drover/config.toml`, read once when the service starts. Every key is optional:
 
 ```toml
-host = "meerkat"                        # this machine's name, as herdr's machine label (default "host")
-remotes = ["chicken"]                   # ssh names whose herdr server already runs
+host = "devbox"                         # this machine's name, as herdr's machine label (default "host")
+remotes = ["mac"]                       # ssh names whose herdr server already runs
 repos_root = "~/.drover-workspace"      # REPOS_ROOT for drover-wt on this machine
 journal_cmd = "brain log"               # done --entry: run through sh, the entry on stdin (unset: --entry is refused)
 reader_allow = ["brain find *"]         # Bash commands a reader may run, besides Read (default none)

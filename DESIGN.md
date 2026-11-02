@@ -118,7 +118,7 @@ The approval flow:
 2. The owner answers with `drover approve|deny <run> <perm>`, or the dashboard calls `POST /runs/:id/permissions/:perm`.
 3. A crew run's approvals go to its mate when the mate owns it. Otherwise they go to you.
 4. Nothing is approved automatically. Approval rules live in the harness's own settings (its allowlists), not in drover.
-   - Claude actors run in permission mode `auto` (the desk's choice), pane and headless; `drover run --permission-mode <mode>` picks another, and a non-Claude harness refuses it. Auto mode runs harmless calls without asking, so the hook fires only for what it escalates: an `ask` rule from any settings file (tested), and perhaps a classifier denial (not tested). Without auto (`--permission-mode default`), every call outside the allowlist is a `needs`.
+   - Claude actors run in permission mode `auto` (the default), pane and headless; `drover run --permission-mode <mode>` picks another, and a non-Claude harness refuses it. Auto mode runs harmless calls without asking, so the hook fires only for what it escalates: an `ask` rule from any settings file (tested), and perhaps a classifier denial (not tested). Without auto (`--permission-mode default`), every call outside the allowlist is a `needs`.
 5. Long waits: if you answer after the hook's timeout, drover returns `deny` with the reason "awaiting approval". When you approve later, drover resumes the session (`--resume`) with the approval in the prompt, so an approval given an hour later from the phone isn't lost.
 
 ## Claude features
@@ -166,7 +166,7 @@ Each profile is a settings file per harness (Claude: `--settings`, `--allowedToo
 A mate is a run with `role: mate`, started with the mates skill loaded (`skills/mates/SKILL.md`: goal graph, one check per node, at most 3 rounds without progress before escalating, bounded reports). It dispatches crew with:
 
 ```sh
-drover run --parent $DROVER_RUN --repo opalin --branch fix-x --prompt "…"   # role: crew
+drover run --parent $DROVER_RUN --repo myapp --branch fix-x --prompt "…"   # role: crew
 drover goal set --file goal.json      # C16: nodes, checks, edges
 drover goal node docs --status pass --round 2 --crew r-1a2b3c
 drover wait --any --parent $DROVER_RUN
@@ -236,7 +236,7 @@ Everything lives in `~/.local/state/drover/`. Config is in `~/.config/drover/con
 - Nothing runs without your approval: `autostart = "never"`, and actor runs requested by mates, chat or the planner wait in `pending`.
 - Claude approvals go through a `PermissionRequest` `http` hook in both modes. `-p` fires the hook; no cap on its timeout was found, and drover answers before it runs out; a deny's reason reaches the turn; session allows do not survive `--resume`, so drover allows a late-approved call itself.
 - Mates are a skill plus `role: mate`. drover stores and streams the graph (D11, C16).
-- The S7 restricted agent ssh key was cut. Agents use your key, and the reader/actor split is what keeps untrusted text away from the fleet.
+- The S7 restricted agent ssh key was cut. Agents use your key, and the reader/actor split is what keeps untrusted text away from your machines.
 
 ## Open (design level)
 

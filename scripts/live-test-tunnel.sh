@@ -2,7 +2,7 @@
 # Live test of the hooks tunnel against an ssh remote, through its own drover serve: a temp state
 # dir and its own HTTP port. serve is killed with SIGKILL, with SIGTERM, and restarted; each time
 # the remote's port must be bound again within 60 s, and after the test nothing holds it.
-#   REMOTE=chicken scripts/live-test-tunnel.sh
+#   REMOTE=<remote> scripts/live-test-tunnel.sh
 # LIVE_PORT (default 7391). Each check prints `ok` or `FAIL`; exit 0 when all pass.
 set -euo pipefail
 

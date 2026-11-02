@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run drover on the host in DROVER_HOST, so a client's terminal drives the service there.
-#   DROVER_HOST=meerkat drover ls
+#   DROVER_HOST=<host> drover ls
 set -euo pipefail
 
 host=${DROVER_HOST:?set DROVER_HOST to the ssh name of the drover host}

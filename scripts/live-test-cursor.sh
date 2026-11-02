@@ -2,7 +2,7 @@
 # Live test against a real cursor-agent over ACP, through its own drover serve: a temp state dir,
 # its own HTTP port, a throwaway repo. Cleans up after itself.
 #   scripts/live-test-cursor.sh            on this machine
-#   REMOTE=chicken scripts/live-test-cursor.sh   the run on that ssh remote, drover here
+#   REMOTE=<remote> scripts/live-test-cursor.sh   the run on that ssh remote, drover here
 # LIVE_PORT (default 7381), WAIT seconds per event (default 180), MODEL (default auto).
 # A remote needs cursor's OAuth login in a file there (README: Remote machines).
 # Each check prints `ok` or `FAIL`; exit 0 when all pass.

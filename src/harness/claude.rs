@@ -535,7 +535,7 @@ mod tests {
             for tool in ["Edit", "Write", "WebFetch"] {
                 assert!(!allows(&rules, tool, ""), "{tool}");
             }
-            assert!(allows(&rules, "Bash", "notes find robots") && allows(&rules, "Read", ""));
+            assert!(allows(&rules, "Bash", "notes find hooks") && allows(&rules, "Read", ""));
         }
         Ok(())
     }

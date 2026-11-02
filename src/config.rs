@@ -1,8 +1,8 @@
 // Where drover keeps things, and the config it reads once at start.
 //
 // ~/.config/drover/config.toml, every key optional:
-//   host = "meerkat"                 # this machine's name, as herdr's machine label (default "host")
-//   remotes = ["chicken", "dog"]     # ssh names whose herdr server already runs
+//   host = "devbox"                  # this machine's name, as herdr's machine label (default "host")
+//   remotes = ["mac", "gpu"]         # ssh names whose herdr server already runs
 //   repos_root = "~/.drover-workspace"   # given to drover-wt on this machine as REPOS_ROOT
 //   remote_repos_root = "/tmp/repos" # given to drover-wt on every remote, absolute (default: its own)
 //   http_port = 7341                 # hooks, events and approvals, on 127.0.0.1 only
@@ -170,18 +170,18 @@ mod tests {
     #[test]
     fn reads_the_flat_subset() -> Result<()> {
         let c = Config::parse(
-            "# drover\nhost = \"meerkat\"\nremotes = [\"chicken\", \"dog\"]  # two\nhttp_port = 7342\n",
+            "# drover\nhost = \"devbox\"\nremotes = [\"mac\", \"gpu\"]  # two\nhttp_port = 7342\n",
         )?;
         assert_eq!((c.http_port, c.hook_timeout), (7342, 600));
         assert!(Config::parse("http_port = \"7342\"").is_err());
-        assert_eq!(c.host.as_str(), "meerkat");
+        assert_eq!(c.host.as_str(), "devbox");
         assert_eq!(
             c.remotes.iter().map(Machine::as_str).collect::<Vec<_>>(),
-            ["chicken", "dog"]
+            ["mac", "gpu"]
         );
         assert_eq!(Config::parse("")?.host.as_str(), "host");
         assert!(Config::parse("remotes = [\"-oProxyCommand=x\"]").is_err());
-        assert!(Config::parse("host = meerkat").is_err());
+        assert!(Config::parse("host = devbox").is_err());
         assert_eq!(
             Config::parse("remote_repos_root = \"/tmp/r\"")?.remote_repos_root,
             Some("/tmp/r".into())
@@ -196,10 +196,10 @@ mod tests {
         Ok(())
     }
 
-    // An older config's key, such as v1_state, warns and starts anyway.
+    // A key this version does not read, such as one an older config kept, warns and starts anyway.
     #[test]
     fn an_unknown_key_is_ignored() -> Result<()> {
-        let c = Config::parse("v1_state = \"/x/state.json\"\nhttp_port = 7342\n")?;
+        let c = Config::parse("retired = \"/x\"\nhttp_port = 7342\n")?;
         assert_eq!(c, Config::parse("http_port = 7342")?);
         Ok(())
     }

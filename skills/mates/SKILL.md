@@ -19,7 +19,7 @@ drover show <crew>                            # phase, perms, last reply (first 
 drover reply <crew>                           # the whole last reply
 drover goal set --file goal.json · drover goal node <id> --status … --round … --crew … --review …
 drover escalate --text -                      # to the user, on stdin
-drover done <crew> [--remove] --entry -       # close it
+drover done <crew> [--remove] [--entry -]    # close it; --entry needs journal_cmd in the config
 ```
 
 - Pass long text on stdin with a quoted heredoc (`--prompt -`, `--text -`, `--entry -`). In double quotes the shell expands `$5.65` and backticks.
@@ -81,7 +81,7 @@ Every node has `review: none | code | adversarial`, set when you write the graph
 | Level | Situation | Examples |
 |---|---|---|
 | `none` | only the user reads it, and a mistake shows at once, or the check fails when the work is wrong | read-only or browse-only work, docs, scripts |
-| `code` | a mistake can cost real resources or safety, and nothing else reuses it | a leak, a long-running loop, robot motion |
+| `code` | a mistake can cost real resources or safety, and nothing else reuses it | a leak, a long-running loop, a deploy, a machine that moves |
 | `adversarial` | something else reuses what it writes, and a mistake there is silent | data, formats or contracts: an editor over shared data, a wire or file format another process decodes |
 
 Both: a node that something else reuses and that can also harm resources or safety is `adversarial`, which includes the `code` review.
@@ -92,7 +92,7 @@ Raise a level after a failed round, with `goal node <id> --review <level>`. Neve
 
 ### Dispatch
 
-1. Write the graph. Check each node's host against the task: a cell, a station, or a repo lives on one machine (`--machine`).
+1. Write the graph. Check each node's host against the task: a device, a service, or a repo lives on one machine (`--machine`).
 2. Write the brief for each node: the task, the check, the facts, the glossary, and what is out of scope. The brief is the crew's only source of truth: anything you leave out it will guess.
 3. `drover run --parent $DROVER_RUN --repo <repo> --branch <branch> --model <model> --headless --prompt - <<'EOF'`, the brief on the lines after it. It prints a `run` in `pending`. Record it: `drover goal node <id> --status working --round 1 --crew <run>`.
 4. Start every node that has no edge waiting. Then `drover wait --any --parent $DROVER_RUN`.
@@ -130,7 +130,7 @@ Each reply from a crew run is one round for its node.
 ### Close
 
 1. Only after the user confirms the work is done.
-2. `drover done <crew> --entry -` for each crew run, the journal entry on stdin: what, why, outcome. Add `--remove` once its branch is merged: a dirty checkout and an unmerged branch stay anyway.
+2. `drover done <crew>` for each crew run, with `--entry -` and the journal entry on stdin (what, why, outcome) when the config has a `journal_cmd`; without one, `--entry` is refused. Add `--remove` once its branch is merged: a dirty checkout and an unmerged branch stay anyway.
 3. Report the outcome in one short message.
 
 ## Practices
