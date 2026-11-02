@@ -18,6 +18,7 @@ mod goal;
 mod harness;
 mod herdr;
 mod http;
+mod machine;
 mod run;
 mod serve;
 mod socket;

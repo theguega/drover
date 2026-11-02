@@ -135,6 +135,11 @@ pub enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// The remote machines: ls, add one (herdr, drover over ssh, the config, a restart), or rm
+    Machine {
+        #[command(subcommand)]
+        op: crate::machine::Op,
+    },
     /// Each machine: its tools, herdr's server, drover-wt at this build, and cursor's login
     Doctor {
         /// JSON for programs
@@ -271,6 +276,9 @@ pub async fn main(cli: Cli) -> i32 {
 async fn run(cli: Cli) -> Result<Value, Failure> {
     let paths = Paths::new(cli.state_dir.clone(), cli.config.clone())?;
     let mut cmd = cli.into_cmd();
+    if let Cmd::Machine { op } = cmd {
+        return crate::machine::run(&paths, op);
+    }
     match &mut cmd {
         Cmd::Serve => {
             return serve::run(&paths)

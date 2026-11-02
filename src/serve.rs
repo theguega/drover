@@ -607,7 +607,7 @@ impl App {
             } => self.cmd_wait(from, parent, timeout).await,
             Cmd::Goal { op } => self.cmd_goal(from, op),
             Cmd::Escalate { text } => self.cmd_escalate(from, &text).await,
-            Cmd::Watch { .. } | Cmd::Serve => bail!("not a request"),
+            Cmd::Watch { .. } | Cmd::Serve | Cmd::Machine { .. } => bail!("not a request"),
         }
     }
 

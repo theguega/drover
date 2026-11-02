@@ -158,6 +158,32 @@ fn string(v: &str) -> Option<&str> {
     v.strip_prefix('"')?.strip_suffix('"')
 }
 
+// Replaces the remotes line, or adds one; the rest of the file stays as it is.
+pub fn set_remotes(path: &Path, remotes: &[&str]) -> Result<()> {
+    let text = std::fs::read_to_string(path).unwrap_or_default();
+    std::fs::write(path, with_remotes(&text, remotes))?;
+    Ok(())
+}
+
+fn with_remotes(text: &str, remotes: &[&str]) -> String {
+    let quoted: Vec<String> = remotes.iter().map(|r| format!("\"{r}\"")).collect();
+    let line = format!("remotes = [{}]", quoted.join(", "));
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let mut found = false;
+    for l in &mut lines {
+        if l.split_once('=')
+            .is_some_and(|(k, _)| k.trim() == "remotes")
+        {
+            l.clone_from(&line);
+            found = true;
+        }
+    }
+    if !found {
+        lines.push(line);
+    }
+    lines.join("\n") + "\n"
+}
+
 // `["a", "b"]`; commas inside quotes belong to the item.
 fn list(v: &str) -> Option<Vec<&str>> {
     let inner = v.strip_prefix('[')?.strip_suffix(']')?;
@@ -266,6 +292,20 @@ mod tests {
         assert_eq!(c.reader_allow, ["notes find *", "notes get *"]);
         assert!(Config::parse("reader_allow = [notes]").is_err());
         Ok(())
+    }
+
+    #[test]
+    fn remotes_line_is_replaced_or_added() {
+        let text = "host = \"devbox\"\nremotes = [\"mac\"]  # two\nhttp_port = 7342\n";
+        assert_eq!(
+            with_remotes(text, &["mac", "gpu"]),
+            "host = \"devbox\"\nremotes = [\"mac\", \"gpu\"]\nhttp_port = 7342\n"
+        );
+        assert_eq!(
+            with_remotes("host = \"devbox\"\n", &["gpu"]),
+            "host = \"devbox\"\nremotes = [\"gpu\"]\n"
+        );
+        assert_eq!(with_remotes("", &[]), "remotes = []\n");
     }
 
     // A key this version does not read, such as journal_cmd in an older config, warns and starts anyway.
