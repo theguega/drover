@@ -996,11 +996,25 @@ impl App {
         let env = self.env(h, &r.id, &state);
         let sp = harness::spawn(&argv, &r.cwd, &env, h.ssh(), &names)
             .map_err(|e| err!("{}: {e}", argv.first().map_or("", String::as_str)))?;
+        let mut parse = Parse::default();
+        let first = forwarded.into_iter().map(|(_, v)| v);
+        let first = first.chain(harness.open(&spec, &mut parse)).collect();
+        self.serve_proc(r, harness, sp, first, parse)
+    }
+
+    // A started process: `first` goes onto its stdin, its stdout to the run.
+    fn serve_proc(
+        &self,
+        r: &Run,
+        harness: &'static dyn Harness,
+        sp: harness::Spawned,
+        first: Vec<String>,
+        parse: Parse,
+    ) -> Result<()> {
         let id = self.next_proc.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
-        let parse = Arc::new(StdMutex::new(Parse::default()));
-        let open = harness.open(&spec, &mut locked(&parse));
-        for line in forwarded.into_iter().map(|(_, v)| v).chain(open) {
+        let parse = Arc::new(StdMutex::new(parse));
+        for line in first {
             let _ = tx.send(line);
         }
         tokio::spawn(write_lines(sp.stdin, rx));
@@ -2929,6 +2943,74 @@ pub(crate) mod tests {
         let answer = hook.await??;
         assert_eq!(at(&answer, "/hookSpecificOutput/decision/behavior"), "deny");
         assert_eq!(at(&answer, "/hookSpecificOutput/decision/message"), "not y");
+        Ok(())
+    }
+
+    // An ACP agent that holds a call, then hears why it was denied. Request ids are drover's:
+    // 1 initialize, 2 session/new, 3 the prompt, 4 the prompt that carries the reason.
+    const FAKE_ACP: &str = r#"
+sid=317266eb-32ce-4e67-9457-7a097c828473
+say() { printf '%s\n' "$1"; }
+read -r l; say '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+read -r l; say '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"'$sid'"}}'
+read -r l
+say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"'$sid'","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"`touch x`","kind":"execute","status":"pending","rawInput":{"command":"touch x"}}}}'
+say '{"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{"sessionId":"'$sid'","toolCall":{"toolCallId":"c1","title":"`touch x`","kind":"execute"},"options":[{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject-once","kind":"reject_once"}]}}'
+read -r l; case $l in *reject-once*) ;; *) exit 3 ;; esac
+read -r l; case $l in *session/cancel*) ;; *) exit 4 ;; esac
+say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"'$sid'","update":{"sessionUpdate":"tool_call_update","toolCallId":"c1","status":"failed"}}}'
+say '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}'
+read -r l; case $l in *REASON-XYZZY*) ;; *) exit 5 ;; esac
+say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"'$sid'","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"denied: REASON-XYZZY"}}}}'
+say '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
+read -r l
+"#;
+
+    #[tokio::test]
+    async fn an_acp_call_waits_for_its_answer_and_a_deny_says_why() -> Result<()> {
+        let app = app()?;
+        let mut r = run("r-0000a1", Role::Task)?;
+        (r.harness, r.mode, r.cwd) = (crate::run::HarnessName::Pi, Mode::Headless, "/".into());
+        app.store.save(&r)?;
+        let h = harness::get(r.harness).ok_or("no pi")?;
+        let argv = ["sh", "-c", FAKE_ACP].map(String::from);
+        let sp = harness::spawn(&argv, Path::new("/"), &[], None, &[])?;
+        let mut parse = Parse::default();
+        let spec = app.spec(&r, &Value::Null, "", None, &[]);
+        let first = h.open(&spec, &mut parse);
+        app.serve_proc(&r, h, sp, first, parse)?;
+
+        request(&app, None, "send r-0000a1 go").await?;
+        let n = needs(&app, &r.id).await?;
+        assert_eq!(
+            (at(&n, "/perm"), at(&n, "/tool"), at(&n, "/input/command")),
+            (&json!("p1"), &json!("Shell"), &json!("touch x"))
+        );
+        // no deadline: it waits past any hook's
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(phase(&app, "r-0000a1"), Some(Phase::Needs));
+        request(&app, None, "deny r-0000a1 p1 --reason REASON-XYZZY").await?;
+        for _ in 0..200 {
+            if phase(&app, "r-0000a1") == Some(Phase::Idle) {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        let reply = app.store.last(&r.id, Kind::Reply)?.unwrap_or_default();
+        assert_eq!(at(&reply, "/full"), "denied: REASON-XYZZY");
+        // one reply: the cancelled turn's is not one
+        assert_eq!(
+            app.store
+                .events_after(0, Some(&r.id), None)?
+                .iter()
+                .filter(|e| e.get("kind") == Some(&json!("reply")))
+                .count(),
+            1
+        );
+        assert_eq!(
+            app.get(&r.id)?.session.map(|s| s.as_str().to_string()),
+            Some("317266eb-32ce-4e67-9457-7a097c828473".into())
+        );
         Ok(())
     }
 

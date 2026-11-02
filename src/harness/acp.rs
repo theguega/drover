@@ -225,11 +225,19 @@ impl Conn {
     }
 
     fn update(&mut self, u: &Value, turn_cost: &mut f64) -> Vec<Out> {
-        if self.loading {
-            return Vec::new();
-        }
         let id = || text(u, "toolCallId").unwrap_or_default().to_string();
         match text(u, "sessionUpdate").unwrap_or_default() {
+            "usage_update" => {
+                if let Some(c) = u.get("cost").filter(|c| text(c, "currency") == Some("USD")) {
+                    self.cost = c.get("amount").and_then(Value::as_f64).unwrap_or(self.cost);
+                    // a cost reported between turns, as on load, is no turn's
+                    if !self.asked.values().any(|a| *a == Asked::Prompt) {
+                        *turn_cost = self.cost;
+                    }
+                }
+                Vec::new()
+            }
+            _ if self.loading => Vec::new(),
             "agent_message_chunk" => match u.pointer("/content/text").and_then(Value::as_str) {
                 Some(t) => {
                     self.text.push_str(t);
@@ -256,16 +264,6 @@ impl Conn {
                 self.tool_end(&id(), text(u, "status"))
                     .into_iter()
                     .collect()
-            }
-            "usage_update" => {
-                if let Some(c) = u.get("cost").filter(|c| text(c, "currency") == Some("USD")) {
-                    self.cost = c.get("amount").and_then(Value::as_f64).unwrap_or(self.cost);
-                    // a cost reported between turns, as on load, is no turn's
-                    if !self.asked.values().any(|a| *a == Asked::Prompt) {
-                        *turn_cost = self.cost;
-                    }
-                }
-                Vec::new()
             }
             _ => Vec::new(),
         }
@@ -502,5 +500,503 @@ fn question(questions: Option<&Value>, reason: Option<&str>) -> Value {
         json!({"outcome": {"outcome": "skipped", "reason": reason}})
     } else {
         json!({"outcome": {"outcome": "answered", "answers": answers}})
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SID: &str = "317266eb-32ce-4e67-9457-7a097c828473";
+
+    fn spec<'a>(
+        profile: Profile,
+        model: Option<&'a str>,
+        resume: Option<&'a SessionId>,
+    ) -> StartSpec<'a> {
+        StartSpec {
+            headless: true,
+            profile,
+            model,
+            permission_mode: None,
+            resume,
+            cwd: std::path::Path::new("/w"),
+            hooks: "",
+            hook_timeout: 600,
+            forwarded: &[],
+        }
+    }
+
+    // What the agent writes, one value a line.
+    fn feed(h: &Acp, p: &mut Parse, lines: &[Value]) -> Vec<Out> {
+        lines
+            .iter()
+            .flat_map(|l| h.events(&l.to_string(), p))
+            .collect()
+    }
+
+    fn ok(id: u64, result: Value) -> Value {
+        json!({"jsonrpc": "2.0", "id": id, "result": result})
+    }
+
+    fn update(u: Value) -> Value {
+        json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": SID, "update": u}})
+    }
+
+    fn chunk(text: &str) -> Value {
+        update(
+            json!({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}),
+        )
+    }
+
+    fn written(outs: &[Out]) -> Vec<Value> {
+        outs.iter()
+            .filter_map(|o| match o {
+                Out::Write(l) => serde_json::from_str(l).ok(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn at(v: &Value, path: &str) -> Value {
+        v.pointer(path).cloned().unwrap_or_default()
+    }
+
+    fn line(l: &str) -> Value {
+        serde_json::from_str(l).unwrap_or_default()
+    }
+
+    // A cursor run, past its setup, with one prompt in flight as request 3.
+    fn cursor() -> Result<Parse, &'static str> {
+        let mut p = Parse::default();
+        CURSOR.open(&spec(Profile::Actor, None, None), &mut p);
+        assert!(CURSOR.send("go", &mut p).is_empty());
+        feed(
+            &CURSOR,
+            &mut p,
+            &[ok(1, json!({})), ok(2, json!({"sessionId": SID}))],
+        );
+        if !p.acp.ready {
+            return Err("not ready");
+        }
+        Ok(p)
+    }
+
+    #[test]
+    fn a_reader_asks_and_the_model_is_picked_before_the_first_prompt() -> Result<(), &'static str> {
+        let mut p = Parse::default();
+        let open = CURSOR.open(&spec(Profile::Reader, Some("auto"), None), &mut p);
+        assert_eq!(
+            open.first().map(|l| at(&line(l), "/method")),
+            Some(json!("initialize"))
+        );
+        assert!(CURSOR.send("hi", &mut p).is_empty());
+        let new = written(&feed(
+            &CURSOR,
+            &mut p,
+            &[ok(1, json!({"authMethods": [{"id": "cursor_login"}]}))],
+        ));
+        assert_eq!(
+            new.first()
+                .map(|l| (at(l, "/method"), at(l, "/params/cwd"))),
+            Some((json!("session/new"), json!("/w")))
+        );
+        let models = json!({"availableModels": [{"modelId": "default[]", "name": "Auto"}, {"modelId": "gpt-5.5[fast=false]", "name": "gpt-5.5"}]});
+        let outs = feed(
+            &CURSOR,
+            &mut p,
+            &[ok(2, json!({"sessionId": SID, "models": models}))],
+        );
+        assert_eq!(
+            outs.first(),
+            Some(&Out::Session(SessionId::parse(SID).ok_or("sid")?))
+        );
+        let setup = written(&outs);
+        assert_eq!(
+            setup.iter().map(|l| at(l, "/method")).collect::<Vec<_>>(),
+            [json!("session/set_mode"), json!("session/set_model")]
+        );
+        assert_eq!(
+            (
+                setup.first().map(|l| at(l, "/params/modeId")),
+                setup.get(1).map(|l| at(l, "/params/modelId"))
+            ),
+            (Some(json!("ask")), Some(json!("default[]")))
+        );
+        // the prompt waits for the whole setup
+        assert!(feed(&CURSOR, &mut p, &[ok(3, json!({}))]).is_empty());
+        let prompt = written(&feed(&CURSOR, &mut p, &[ok(4, json!({}))]));
+        assert_eq!(
+            prompt.first().map(|l| at(l, "/params/prompt/0/text")),
+            Some(json!("hi"))
+        );
+
+        let mut p = Parse::default();
+        CURSOR.open(&spec(Profile::Actor, Some("nope"), None), &mut p);
+        feed(&CURSOR, &mut p, &[ok(1, json!({}))]);
+        assert_eq!(
+            feed(
+                &CURSOR,
+                &mut p,
+                &[ok(2, json!({"sessionId": SID, "models": models}))]
+            ),
+            [Out::Fail("the agent has no model nope".into())]
+        );
+        Ok(())
+    }
+
+    // Lines as cursor-agent acp 2026.10.22 writes them, shortened.
+    #[test]
+    fn a_turn_becomes_events_and_its_last_message_the_reply() -> Result<(), &'static str> {
+        let mut p = cursor()?;
+        let outs = feed(
+            &CURSOR,
+            &mut p,
+            &[
+                update(
+                    json!({"sessionUpdate": "agent_thought_chunk", "content": {"type": "text", "text": "hm"}}),
+                ),
+                chunk("Running."),
+                update(
+                    json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "`ls`", "kind": "execute", "status": "pending", "rawInput": {"command": "ls"}}),
+                ),
+                update(
+                    json!({"sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "in_progress"}),
+                ),
+                update(
+                    json!({"sessionUpdate": "tool_call_update", "toolCallId": "c1", "status": "completed"}),
+                ),
+                update(
+                    json!({"sessionUpdate": "tool_call", "toolCallId": "c2", "title": "Edit File", "kind": "edit", "status": "pending"}),
+                ),
+                update(
+                    json!({"sessionUpdate": "tool_call_update", "toolCallId": "c2", "status": "failed"}),
+                ),
+                chunk("PO"),
+                chunk("NG"),
+                ok(3, json!({"stopReason": "end_turn"})),
+            ],
+        );
+        let shell = || "Shell".to_string();
+        assert_eq!(
+            outs,
+            [
+                Out::Text("Running.".into()),
+                Out::ToolStart { tool: shell() },
+                Out::ToolEnd {
+                    tool: shell(),
+                    ok: true
+                },
+                Out::ToolStart {
+                    tool: "Edit".into()
+                },
+                Out::ToolEnd {
+                    tool: "Edit".into(),
+                    ok: false
+                },
+                Out::Text("PO".into()),
+                Out::Text("NG".into()),
+                Out::Reply {
+                    text: "PONG".into(),
+                    usage: None,
+                    error: false
+                },
+            ]
+        );
+        CURSOR.send("again", &mut p);
+        assert_eq!(
+            feed(
+                &CURSOR,
+                &mut p,
+                &[
+                    json!({"jsonrpc": "2.0", "id": 4, "error": {"code": -32603, "message": "Internal error", "data": {"message": "rate limited"}}})
+                ]
+            ),
+            [Out::Reply {
+                text: "Internal error: rate limited".into(),
+                usage: None,
+                error: true
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn what_the_agent_asks_is_a_needs_answered_on_stdin() -> Result<(), &'static str> {
+        let mut p = cursor()?;
+        let options = json!([{"optionId": "allow-once", "kind": "allow_once"}, {"optionId": "allow-always", "kind": "allow_always"}, {"optionId": "reject-once", "kind": "reject_once"}]);
+        let outs = feed(
+            &CURSOR,
+            &mut p,
+            &[
+                update(
+                    json!({"sessionUpdate": "tool_call", "toolCallId": "c1", "title": "`touch x`", "kind": "execute", "status": "pending", "rawInput": {"command": "touch x"}}),
+                ),
+                json!({"jsonrpc": "2.0", "id": 0, "method": "session/request_permission", "params": {"sessionId": SID, "toolCall": {"toolCallId": "c1", "title": "`touch x`", "kind": "execute"}, "options": options}}),
+            ],
+        );
+        let Some(Out::Permission { tool, input, call }) = outs.last() else {
+            return Err("no permission");
+        };
+        assert_eq!(
+            (tool.as_str(), input),
+            (
+                "Shell",
+                &json!({"command": "touch x", "title": "`touch x`"})
+            )
+        );
+        let allow = CURSOR.answer(
+            &Decision {
+                allow: true,
+                reason: None,
+            },
+            call,
+            &mut p,
+        );
+        assert_eq!(
+            allow.iter().map(|l| line(l)).collect::<Vec<_>>(),
+            [
+                json!({"jsonrpc": "2.0", "id": 0, "result": {"outcome": {"outcome": "selected", "optionId": "allow-once"}}})
+            ]
+        );
+
+        // a deny's reason: the call is rejected, the turn cancelled, and the reason is the next prompt
+        let deny = CURSOR.answer(
+            &Decision {
+                allow: false,
+                reason: Some("not now".into()),
+            },
+            call,
+            &mut p,
+        );
+        let deny: Vec<Value> = deny.iter().map(|l| line(l)).collect();
+        assert_eq!(
+            deny.first().map(|l| at(l, "/result/outcome/optionId")),
+            Some(json!("reject-once"))
+        );
+        assert_eq!(
+            deny.get(1).map(|l| at(l, "/method")),
+            Some(json!("session/cancel"))
+        );
+        let next = written(&feed(
+            &CURSOR,
+            &mut p,
+            &[ok(3, json!({"stopReason": "cancelled"}))],
+        ));
+        assert_eq!(
+            next.first().map(|l| at(l, "/params/prompt/0/text")),
+            Some(json!("drover: the user denied `touch x`: not now"))
+        );
+        let reply = feed(
+            &CURSOR,
+            &mut p,
+            &[
+                chunk("not now, then."),
+                ok(4, json!({"stopReason": "end_turn"})),
+            ],
+        );
+        assert_eq!(
+            reply.last(),
+            Some(&Out::Reply {
+                text: "not now, then.".into(),
+                usage: None,
+                error: false
+            })
+        );
+
+        // an edit names its file
+        let edit = feed(
+            &CURSOR,
+            &mut p,
+            &[
+                json!({"jsonrpc": "2.0", "id": 1, "method": "session/request_permission", "params": {"sessionId": SID, "toolCall": {"toolCallId": "c9", "title": "Write /w/.cursor/a.json", "kind": "edit", "content": [{"type": "diff", "path": "/w/.cursor/a.json", "oldText": null, "newText": "{}"}]}, "options": options}}),
+            ],
+        );
+        assert!(
+            matches!(edit.last(), Some(Out::Permission { tool, input, .. }) if tool == "Edit" && at(input, "/path") == json!("/w/.cursor/a.json"))
+        );
+
+        // a question takes your text: an option's label picks it, other text is the answer as written
+        let questions = json!([{"id": "q1", "prompt": "Which?", "options": [{"id": "a", "label": "Agent"}, {"id": "p", "label": "Plan"}]}]);
+        let asked = feed(
+            &CURSOR,
+            &mut p,
+            &[
+                json!({"jsonrpc": "2.0", "id": 2, "method": "cursor/ask_question", "params": {"toolCallId": "q", "questions": questions}}),
+            ],
+        );
+        let Some(Out::Permission { tool, call, .. }) = asked.last() else {
+            return Err("no question");
+        };
+        assert_eq!(tool, QUESTION);
+        let said = |text: &str, p: &mut Parse| {
+            CURSOR
+                .answer(
+                    &Decision {
+                        allow: true,
+                        reason: Some(text.into()),
+                    },
+                    call,
+                    p,
+                )
+                .first()
+                .map(|l| at(&line(l), "/result/outcome"))
+        };
+        assert_eq!(
+            said("plan", &mut p),
+            Some(
+                json!({"outcome": "answered", "answers": [{"questionId": "q1", "selectedOptionIds": ["p"]}]})
+            )
+        );
+        assert_eq!(
+            said("neither, use ask", &mut p),
+            Some(json!({"outcome": "skipped", "reason": "neither, use ask"}))
+        );
+
+        let plan = feed(
+            &CURSOR,
+            &mut p,
+            &[
+                json!({"jsonrpc": "2.0", "id": 3, "method": "cursor/create_plan", "params": {"toolCallId": "p", "plan": "1. go", "todos": []}}),
+            ],
+        );
+        let Some(Out::Permission { tool, call, .. }) = plan.last() else {
+            return Err("no plan");
+        };
+        assert_eq!(tool, "CreatePlan");
+        let rejected = CURSOR.answer(
+            &Decision {
+                allow: false,
+                reason: Some("smaller".into()),
+            },
+            call,
+            &mut p,
+        );
+        assert_eq!(
+            rejected
+                .iter()
+                .map(|l| at(&line(l), "/result"))
+                .collect::<Vec<_>>(),
+            [json!({"outcome": {"outcome": "rejected", "reason": "smaller"}})]
+        );
+
+        // anything else it asks for, drover does not serve
+        let fs = written(&feed(
+            &CURSOR,
+            &mut p,
+            &[json!({"jsonrpc": "2.0", "id": 4, "method": "fs/read_text_file", "params": {}})],
+        ));
+        assert_eq!(
+            fs.first().map(|l| (at(l, "/id"), at(l, "/error/code"))),
+            Some((json!(4), json!(-32601)))
+        );
+        assert!(
+            matches!(CURSOR.abort(&mut p), Abort::Stdin(l) if at(&line(&l), "/method") == json!("session/cancel"))
+        );
+        Ok(())
+    }
+
+    // pi-acp's session is pi's: it loads, its history replayed as updates that are no turn's.
+    #[test]
+    fn a_resumed_session_loads_without_its_history() -> Result<(), &'static str> {
+        let sid = SessionId::parse(SID).ok_or("sid")?;
+        let mut p = Parse::default();
+        PI.open(&spec(Profile::Actor, None, Some(&sid)), &mut p);
+        PI.send("again", &mut p);
+        let load = written(&feed(
+            &PI,
+            &mut p,
+            &[ok(1, json!({"agentCapabilities": {"loadSession": true}}))],
+        ));
+        assert_eq!(
+            load.first()
+                .map(|l| (at(l, "/method"), at(l, "/params/sessionId"))),
+            Some((json!("session/load"), json!(SID)))
+        );
+        let outs = feed(
+            &PI,
+            &mut p,
+            &[
+                chunk("old text"),
+                update(
+                    json!({"sessionUpdate": "usage_update", "used": 10, "size": 100, "cost": {"amount": 0.5, "currency": "USD"}}),
+                ),
+                ok(2, json!({})),
+            ],
+        );
+        assert_eq!(outs.first(), Some(&Out::Session(sid.clone())));
+        let prompt = written(&outs);
+        assert_eq!(
+            prompt.first().map(|l| at(l, "/params/prompt/0/text")),
+            Some(json!("again"))
+        );
+        let reply = feed(
+            &PI,
+            &mut p,
+            &[
+                chunk("new"),
+                update(
+                    json!({"sessionUpdate": "usage_update", "used": 20, "size": 100, "cost": {"amount": 0.75, "currency": "USD"}}),
+                ),
+                ok(
+                    3,
+                    json!({"stopReason": "end_turn", "usage": {"totalTokens": 12, "inputTokens": 10, "outputTokens": 2}}),
+                ),
+            ],
+        );
+        assert_eq!(
+            reply.last(),
+            Some(&Out::Reply {
+                text: "new".into(),
+                usage: Some(Usage {
+                    input: 10,
+                    output: 2,
+                    cache_read: 0,
+                    cache_write: 0,
+                    cost_usd: 0.25
+                }),
+                error: false,
+            })
+        );
+
+        let mut p = Parse::default();
+        PI.open(&spec(Profile::Actor, None, Some(&sid)), &mut p);
+        assert_eq!(
+            feed(&PI, &mut p, &[ok(1, json!({}))]),
+            [Out::Fail("the agent cannot load a session".into())]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_lines() -> Result<(), &'static str> {
+        let sid = SessionId::parse(SID).ok_or("sid")?;
+        assert_eq!(
+            CURSOR.start(&spec(Profile::Actor, None, None)),
+            ["cursor-agent", "acp"]
+        );
+        let keyed = StartSpec {
+            forwarded: &["CURSOR_API_KEY"],
+            ..spec(Profile::Actor, None, None)
+        };
+        assert_eq!(
+            CURSOR.start(&keyed),
+            [
+                "env",
+                "AGENT_CLI_CREDENTIAL_STORE=memory",
+                "cursor-agent",
+                "acp"
+            ]
+        );
+        let pane = |h: &Acp| {
+            h.start(&StartSpec {
+                headless: false,
+                ..spec(Profile::Actor, None, Some(&sid))
+            })
+        };
+        assert_eq!(pane(&CURSOR), ["cursor-agent", "--resume", SID]);
+        assert_eq!(pane(&PI), ["pi", "--session", SID]);
+        assert_eq!(PI.start(&spec(Profile::Reader, None, None)), ["pi-acp"]);
+        Ok(())
     }
 }
