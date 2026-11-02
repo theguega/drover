@@ -2,7 +2,13 @@
 name = "drover"
 version = "0.1.17"
 edition = "2024"
-publish = false
+rust-version = "1.91"
+description = "Agent runtime for coding agents: runs Claude Code, Cursor and pi in git worktrees, in herdr panes or headless, and carries their approvals"
+license = "MIT"
+repository = "https://github.com/theguega/drover"
+readme = "README.md"
+keywords = ["agents", "claude", "herdr", "worktree", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 clap = { version = "4", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context", "suggestions"] }
