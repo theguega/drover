@@ -975,7 +975,12 @@ impl App {
                 p.busy = true;
             }
             Mode::Pane { pane: Some(pane) } => {
-                herdr::prompt(self.host(&r.machine)?, pane, text).await?
+                herdr::prompt(self.host(&r.machine)?, pane, text).await?;
+                // a command the TUI runs itself (/context, /model) posts no hook: the prompt hook
+                // marks the run working if the command is a turn (a skill, a custom command)
+                if text.starts_with('/') {
+                    return Ok(());
+                }
             }
             Mode::Pane { pane: None } => bail!("{} has no pane", r.id),
         }
