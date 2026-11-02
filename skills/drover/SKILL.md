@@ -1,11 +1,11 @@
 ---
 name: drover
-description: "Drive drover, the agent runtime: start coding agents (runs) in git worktrees on the host or SSH remotes, read their replies, send them the next prompt, approve runs a mate asked for, start a mate, answer its escalations, and close runs. Use when the user mentions drover, a run (r-xxxxxx), a mate or crew, or asks to start, read, send to, approve, or close an agent through drover. For raw herdr panes, tabs and layout, use the herdr skill instead."
+description: "Drive drover, the agent runtime: start coding agents (runs) in git worktrees, plain folders or scratch dirs on the host or SSH remotes, read their replies, send them the next prompt, approve runs a mate asked for, start a mate, answer its escalations, and close runs. Use when the user mentions drover, a run (r-xxxxxx), a mate or crew, or asks to start, read, send to, approve, or close an agent through drover. For raw herdr panes, tabs and layout, use the herdr skill instead."
 ---
 
 # drover
 
-drover runs coding agents and has no model. `drover run` opens a git worktree (`$REPOS_ROOT/<repo>.<branch>`) and starts the agent's TUI in a herdr pane, or headless with `--headless`, on the host or an SSH remote. Each agent session is a **run**, `r-` and six hex digits. drover follows a run through the agent's hooks and stream, so its phase is always current: `pending`, `starting`, `working`, `needs`, `idle`, `done`, `failed`.
+drover runs coding agents and has no model. `drover run` opens a place (see below), by default a git worktree (`$REPOS_ROOT/<repo>.<branch>`), and starts the agent's TUI in a herdr pane, or headless with `--headless`, on the host or an SSH remote. Each agent session is a **run**, `r-` and six hex digits. drover follows a run through the agent's hooks and stream, so its phase is always current: `pending`, `starting`, `working`, `needs`, `idle`, `done`, `failed`.
 
 Before any other command, read the home view:
 
@@ -15,6 +15,21 @@ drover
 
 It prints the runs per phase, the runs that need the user (pending approval, a dialog), and the next commands. It only reads. If it prints `error: drover is not running`, say so and stop. Do not start the service yourself.
 
+## Where a run works
+
+Pick the place from the job. Each run's `place` (in `show` and `ls`) is `worktree`, `dir` or `scratch`.
+
+| Job | Place | Command | What `done` does to the folder |
+|---|---|---|---|
+| a code change you will review, merge or throw away as a branch | worktree | `drover run --repo myapp --branch fix-retry --prompt …` | keeps it; `done --remove` removes the checkout (kept while dirty, branch only when merged) |
+| work in a folder that is not a branch: notes, a data dir, a repo you want edited in place | `--dir` | `drover run --dir ~/notes --prompt "Tidy the headings in todo.md"` | never deletes it; `done --remove` is refused |
+| a throwaway experiment, no repo | `--scratch` | `drover run --scratch --prompt "Try the regex crate on this sample"` | always removes the temp dir, with or without `--remove` |
+| a lookup or a question about files, changing nothing | reader scout | `drover run --profile reader --dir ~/papers --prompt "Which of these mention JEPA?"` or `drover run --profile reader --repo myapp --prompt "Where is the retry policy set?"` | never deletes it |
+
+- `--dir` takes an existing folder on the machine (absolute or `~/…`, git or not; over ssh for `--machine`). It cannot be combined with `--repo`, `--branch` or `--scratch`.
+- One actor per folder: a second actor in the same `--dir` on the same machine is refused with the run that has it open. Readers change nothing, so any number may read one folder.
+- A reader scout is headless and has Read and the config's `reader_allow` commands only. `--repo` without `--branch` reads that repo's main checkout, with no worktree. An actor still needs `--branch`. A reader with neither `--dir` nor `--repo` runs on the host only, in the state dir's `reader/`. A pi reader takes neither.
+
 ## The CLI
 
 The binary is the authority for syntax: `drover --help`, `drover <command> --help`. Do not guess flags.
@@ -22,9 +37,6 @@ The binary is the authority for syntax: `drover --help`, `drover <command> --hel
 ```bash
 drover run --repo <repo> --branch <branch> --prompt <prompt> [--key <k>]   # starts now; - reads the prompt from stdin; a retry with the same key returns the first run
 drover run … --permission-mode <mode>   # Claude only; default auto: harmless calls run unasked, only what auto mode escalates is a `needs`. `default` asks for every call outside the allowlist
-drover run --dir <path> --prompt <prompt>   # an existing folder, git or not; never deleted, `done --remove` refused; one actor per folder
-drover run --scratch --prompt <prompt>      # a fresh temp dir, removed by `done`
-drover run --profile reader --dir <path>|--repo <repo> --prompt <question>   # read-only scouting; --repo alone is the main checkout
 drover run --role mate --repo <repo> --branch <branch> --headless --prompt <goal>   # a mate, see below
 drover run --harness cursor|pi …   # over ACP, always headless; `attach` opens the agent's own TUI on the session
 drover ls [--role --machine --phase --all]
