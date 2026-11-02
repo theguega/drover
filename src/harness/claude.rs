@@ -1,6 +1,6 @@
 // Claude Code: `claude -p` with stream-json both ways for headless runs, the TUI for pane runs.
 // Both get `http` hooks to drover through --settings: a pane run all of its events, a headless
-// run only PermissionRequest, since its stream carries the rest. See SPIKE.md.
+// run only PermissionRequest, since its stream carries the rest.
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -44,7 +44,7 @@ impl Harness for Claude {
                 .map(String::from),
             );
         }
-        // auto: the classifier runs harmless calls and drover's hook gets what it escalates (SPIKE.md §8)
+        // auto: the classifier runs harmless calls and drover's hook gets what it escalates, such as an ask rule's
         let profile: Vec<&str> = match spec.profile {
             Profile::Actor => vec!["--permission-mode", spec.permission_mode.unwrap_or("auto")],
             // --restricted drops your own settings files, so your allowlists do not reach a

@@ -44,7 +44,8 @@ const REPLY_EXCERPT: usize = 300;
 const GRACE: Duration = Duration::from_secs(5);
 // Text deltas of a headless turn go out at most this often.
 const TEXT_BATCH: Duration = Duration::from_millis(500);
-// What a tool call hears when you have not answered before its hook times out (SPIKE.md q2).
+// What a tool call hears when you have not answered before its hook times out; a hook that
+// times out is a deny with Claude's own text, so drover answers first.
 const AWAITING: &str = "awaiting approval: the user has not answered yet. Do not retry this call; you will be told when it is approved.";
 // What a tool call from a session that is not the run's hears.
 const FOREIGN: &str = "drover: this session is not the run's";

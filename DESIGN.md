@@ -111,7 +111,6 @@ How it works for Claude, decided: a `PermissionRequest` `http` hook in both mode
 - In headless mode (`claude -p`) there's no terminal for the permission dialog. A tool call outside the allowlist would just be denied, unless you pass `--dangerously-skip-permissions`.
 - So drover injects a `PermissionRequest` hook with `--settings`. Claude POSTs `{session_id, tool_name, tool_input}` to `serve`, and the request blocks until drover returns `allow` or `deny`, with an optional reason.
 - Pane runs use the same hook, so approving works the same in both modes, and one code path covers them.
-- Fallback, if the spike shows a gap: `--permission-prompt-tool` pointed at a small MCP tool drover provides.
 
 The approval flow:
 
@@ -119,7 +118,7 @@ The approval flow:
 2. The owner answers with `drover approve|deny <run> <perm>`, or the dashboard calls `POST /runs/:id/permissions/:perm`.
 3. A crew run's approvals go to its mate when the mate owns it. Otherwise they go to you.
 4. Nothing is approved automatically. Approval rules live in the harness's own settings (its allowlists), not in drover.
-   - Claude actors run in permission mode `auto` (the desk's choice), pane and headless; `drover run --permission-mode <mode>` picks another, and a non-Claude harness refuses it. Auto mode runs harmless calls without asking, so the hook fires only for what it escalates: an `ask` rule from any settings file (tested), and perhaps a classifier denial (not tested, SPIKE.md §8). Without auto (`--permission-mode default`), every call outside the allowlist is a `needs`.
+   - Claude actors run in permission mode `auto` (the desk's choice), pane and headless; `drover run --permission-mode <mode>` picks another, and a non-Claude harness refuses it. Auto mode runs harmless calls without asking, so the hook fires only for what it escalates: an `ask` rule from any settings file (tested), and perhaps a classifier denial (not tested). Without auto (`--permission-mode default`), every call outside the allowlist is a `needs`.
 5. Long waits: if you answer after the hook's timeout, drover returns `deny` with the reason "awaiting approval". When you approve later, drover resumes the session (`--resume`) with the approval in the prompt, so an approval given an hour later from the phone isn't lost.
 
 ## Claude features
@@ -143,7 +142,7 @@ What of Claude Code (2.1.316) a run reaches through drover's Claude path: the un
 | Compaction | yes | yes | `send "/compact"`, and auto-compaction, run. A `/compact` is a turn with an empty reply, headless (its `result`) and in a pane (`PreCompact` to `PostCompact`, trigger `manual`); auto-compaction inside a turn has no event | probe: `compact_boundary`, `pre_tokens` 29939 to `post_tokens` 11122 |
 | Usage and cost, subagents included | yes | no | each `reply`'s usage is what the session's `modelUsage` and `total_cost_usd` grew by. A resumed process reports from the session's start, so drover counts from the run's own usage | unit test; live: the turn after the resume costs only itself |
 | MCP servers, plugins, skills, agents, CLAUDE.md from your config | yes | yes | actors read your settings and `~/.claude.json` as they are; a reader has `--restricted` | probe `init`: 22 MCP servers, 7 plugins, 52 skills, 6 agents |
-| Your own hooks (`~/.claude/settings.json`, plugins) | yes | yes | `--settings` adds drover's hooks next to yours: hooks merge across settings levels, and so do `permissions` lists | probe: your `SessionStart` command hook and a plugin's `UserPromptSubmit` ran in the run where drover's `http` hooks fired; SPIKE.md §8 for an `ask` rule from the worktree |
+| Your own hooks (`~/.claude/settings.json`, plugins) | yes | yes | `--settings` adds drover's hooks next to yours: hooks merge across settings levels, and so do `permissions` lists | probe: your `SessionStart` command hook and a plugin's `UserPromptSubmit` ran in the run where drover's `http` hooks fired; an `ask` rule in the worktree's `.claude/settings.local.json` puts a call to the hook |
 | Images and files in a prompt | yes | yes | by path in the text (`send "Look at /path/x.png"`): the Read tool reads images. A base64 image block cannot be sent | probe: a red PNG by path, reply `RED` |
 | `--add-dir` | no | `/add-dir` | not exposed; `permissions.additionalDirectories` in a settings file works | — |
 | Output styles | yes | yes | `send "/output-style <name>"`, or your `outputStyle` setting | docs (headless.md) |
@@ -233,15 +232,14 @@ Everything lives in `~/.local/state/drover/`. Config is in `~/.config/drover/con
 ## Decided
 
 - Pane and headless are both first-class (D4). The terminal workflow stays.
-- One adapter per protocol: Claude's own (stream-json and hooks; the Claude ACP adapter is built on the Agent SDK, which needs an API key), and ACP for Cursor and pi (Q13, SPIKE.md §9).
+- One adapter per protocol: Claude's own (stream-json and hooks; the Claude ACP adapter is built on the Agent SDK, which needs an API key), and ACP for Cursor and pi (Q13).
 - Nothing runs without your approval: `autostart = "never"`, and actor runs requested by mates, chat or the planner wait in `pending`.
-- Claude approvals go through a `PermissionRequest` `http` hook in both modes. The fallback is an MCP permission tool.
+- Claude approvals go through a `PermissionRequest` `http` hook in both modes. `-p` fires the hook; no cap on its timeout was found, and drover answers before it runs out; a deny's reason reaches the turn; session allows do not survive `--resume`, so drover allows a late-approved call itself.
 - Mates are a skill plus `role: mate`. drover stores and streams the graph (D11, C16).
 - The S7 restricted agent ssh key was cut. Agents use your key, and the reader/actor split is what keeps untrusted text away from the fleet.
 
 ## Open (design level)
 
-- The spike's four questions are answered in SPIKE.md: `-p` fires `PermissionRequest`; no timeout cap was found, and drover answers before it; a deny's reason reaches the turn; session allows do not survive `--resume`, so drover allows a late-approved call itself.
 - Pane runs stream `reply` and tool events, not text deltas: the hooks carry no deltas.
 - Pane runs have no per-run usage yet: hooks carry none (the transcript does).
 - Claude events drover does not read yet: compaction (`compact_boundary`, `PreCompact`), subagent text, `Notification`. Each would be a new event kind.

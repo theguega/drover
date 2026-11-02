@@ -292,7 +292,7 @@ done
 [[ $needs_perm == false ]] || fail "pane $a: ls reached drover as needs: $(jq -c .data <<<"$event")"
 grep -q LS-DONE <<<"$(text)" || fail "pane $a: no LS-DONE reply: $(text)"
 ok "pane $a in auto mode ran ls with no needs"
-# an ask rule is what makes auto mode put a call to the user (SPIKE.md §8)
+# an ask rule is what makes auto mode put a call to the user
 mkdir -p "$("$bin" show "$a" | field cwd)/.claude"
 echo '{"permissions":{"ask":["Bash(touch *)"]}}' >"$("$bin" show "$a" | field cwd)/.claude/settings.local.json"
 "$bin" send "$a" "Run this exact bash command with the Bash tool: touch asked.txt. Then reply with exactly: TOUCH-DONE" >/dev/null

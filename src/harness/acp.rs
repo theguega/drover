@@ -2,7 +2,7 @@
 // over the agent's stdio. Cursor (`cursor-agent acp`) and pi (`pi-acp`) speak it. One warm
 // process per run: initialize, session/new or session/load, the reader's mode and the model, then
 // a session/prompt per turn, whose session/update notifications are the turn's events. What the
-// agent asks the user is a request on its stdout, answered on its stdin. See SPIKE.md §9.
+// agent asks the user is a request on its stdout, answered on its stdin.
 
 use std::collections::HashMap;
 
@@ -22,7 +22,7 @@ pub struct Acp {
     reader_mode: Option<&'static str>,
     forward: &'static [(&'static str, &'static str)],
     // `env` words for a remote's agent: the login is in a file, since a mac's keychain is locked
-    // to an ssh session, and an API key in the remote's login shell must not override it (SPIKE.md §9)
+    // to an ssh session, and an API key in the remote's login shell must not override it
     remote_env: &'static [&'static str],
 }
 
