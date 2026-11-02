@@ -121,10 +121,9 @@ Its output is added to every session's context, so each session pays for those t
 host = "meerkat"                        # this machine's name, as herdr's machine label (default "host")
 remotes = ["chicken"]                   # ssh names whose herdr server already runs
 repos_root = "~/.drover-workspace"      # REPOS_ROOT for drover-wt on this machine
-v1_state = "~/Developer/drover/state.json"   # a v1 state.json, migrated into a new drover.db once
 ```
 
-The installer writes it. drover v1's `.env` is not read: copy `HOST_NAME`, `REMOTES` and `REPOS_ROOT` into this file by hand, and drop the Discord keys. `--config` or `DROVER_CONFIG` names another file, and `--state-dir` or `DROVER_STATE_DIR` another state directory, for a test service next to the real one.
+The installer writes it. An unknown key is ignored with a warning. `--config` or `DROVER_CONFIG` names another file, and `--state-dir` or `DROVER_STATE_DIR` another state directory, for a test service next to the real one.
 
 Your desk is yours: keybindings, shell aliases, `REPOS_ROOT` and `HERDR_WORKTREE_PREFIX` belong in your dotfiles, and they point at `drover-wt`. Clone your repositories under the repos root. Worktrees are created next to their main clone as `<repo>.<branch>`.
 

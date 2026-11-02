@@ -61,8 +61,6 @@ if [[ ! -f "$config" ]]; then
     echo "host = \"$host\""
     echo "remotes = [${list%, }]"
     echo "repos_root = \"$repos\""
-    # a v1 checkout's tasks become runs on the first start
-    if [[ -f "$root/state.json" ]]; then echo "v1_state = \"$root/state.json\""; fi
   } >"$config"
   echo "wrote $config"
 fi

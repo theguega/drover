@@ -5,7 +5,6 @@
 //   remotes = ["chicken", "dog"]     # ssh names whose herdr server already runs
 //   repos_root = "~/.drover-workspace"   # given to drover-wt on this machine as REPOS_ROOT
 //   remote_repos_root = "/tmp/repos" # given to drover-wt on every remote, absolute (default: its own)
-//   v1_state = "~/Developer/drover/state.json"   # migrated into a new drover.db, once
 //   http_port = 7341                 # hooks, events and approvals, on 127.0.0.1 only
 //   hook_timeout = 600               # seconds a tool call waits for your approve or deny
 //   idle_kill = 900                  # seconds a headless process stays warm after its last turn
@@ -55,7 +54,6 @@ pub struct Config {
     pub remotes: Vec<Machine>,
     pub repos_root: Option<PathBuf>,
     pub remote_repos_root: Option<PathBuf>,
-    pub v1_state: Option<PathBuf>,
     pub http_port: u16,
     pub hook_timeout: u64,
     pub idle_kill: u64,
@@ -78,7 +76,6 @@ impl Config {
             remotes: Vec::new(),
             repos_root: None,
             remote_repos_root: None,
-            v1_state: None,
             http_port: 7341,
             hook_timeout: 600,
             idle_kill: 900,
@@ -123,12 +120,12 @@ impl Config {
                     }
                     c.remote_repos_root = Some(root.into());
                 }
-                "v1_state" => c.v1_state = Some(expand(string(value).ok_or_else(bad)?)),
                 "http_port" => c.http_port = value.parse().map_err(|_| bad())?,
                 "hook_timeout" => c.hook_timeout = value.parse().map_err(|_| bad())?,
                 "idle_kill" => c.idle_kill = value.parse().map_err(|_| bad())?,
                 "background_kill" => c.background_kill = Some(value.parse().map_err(|_| bad())?),
-                k => bail!("line {}: unknown key {k}", n + 1),
+                // a key an older or newer drover reads must not stop this one from starting
+                k => eprintln!("config line {}: unknown key {k}, ignored", n + 1),
             }
         }
         Ok(c)
@@ -153,7 +150,7 @@ mod tests {
     #[test]
     fn reads_the_flat_subset() -> Result<()> {
         let c = Config::parse(
-            "# drover\nhost = \"meerkat\"\nremotes = [\"chicken\", \"dog\"]  # two\nv1_state = \"/x/state.json\"\nhttp_port = 7342\n",
+            "# drover\nhost = \"meerkat\"\nremotes = [\"chicken\", \"dog\"]  # two\nhttp_port = 7342\n",
         )?;
         assert_eq!((c.http_port, c.hook_timeout), (7342, 600));
         assert!(Config::parse("http_port = \"7342\"").is_err());
@@ -162,16 +159,22 @@ mod tests {
             c.remotes.iter().map(Machine::as_str).collect::<Vec<_>>(),
             ["chicken", "dog"]
         );
-        assert_eq!(c.v1_state, Some("/x/state.json".into()));
         assert_eq!(Config::parse("")?.host.as_str(), "host");
         assert!(Config::parse("remotes = [\"-oProxyCommand=x\"]").is_err());
-        assert!(Config::parse("hots = \"x\"").is_err());
         assert!(Config::parse("host = meerkat").is_err());
         assert_eq!(
             Config::parse("remote_repos_root = \"/tmp/r\"")?.remote_repos_root,
             Some("/tmp/r".into())
         );
         assert!(Config::parse("remote_repos_root = \"~/r\"").is_err());
+        Ok(())
+    }
+
+    // An older config's key, such as v1_state, warns and starts anyway.
+    #[test]
+    fn an_unknown_key_is_ignored() -> Result<()> {
+        let c = Config::parse("v1_state = \"/x/state.json\"\nhttp_port = 7342\n")?;
+        assert_eq!(c, Config::parse("http_port = 7342")?);
         Ok(())
     }
 }

@@ -1,23 +1,8 @@
-# drover v2: design
+# drover: design
 
 drover runs coding agents. It starts them in git worktrees, on this machine or over ssh. It runs them either in a herdr pane, for you to pair with, or headless, for the dashboard and for other agents. It carries their approvals and streams their events. It calls no model and holds no knowledge: when a task ends, its journal entry goes to `brain log`.
 
-Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude adapter (pane and headless) and one ACP adapter for Cursor and pi (headless; pi's not yet run live), events and SSE, approvals, profiles, per-run usage. Mates: `--role mate`, `goal`, `wait`, `escalate`. Not yet: plan-window usage, the dashboard.
-
-## What changes from v1
-
-| v1 | v2 | Why |
-|---|---|---|
-| herdr panes are the bus; screens are scraped | Panes are one run mode. Events come from harness hooks or a headless stream | Typed events, approvals as data (D4) |
-| Discord relay, serenity, `format.rs` | Removed once the dashboard PWA and Web Push exist | ~800 lines, and the action layer was coupled to it |
-| `journal.db` | `brain log` | drover holds no knowledge (D8) |
-| Resident mates (inbox injection, 3-mate cap, mate tabs) | A mate is any session following the mates skill, `role: mate` | The harness already does dispatch; drover supplies worktrees, hosts and the graph (D11) |
-| Scouts as a special case | A run with `--scratch` (temp dir, no repo) | One concept fewer |
-| Usage from shell scripts | Per-run usage from `turn_end`; plan windows in one isolated module | D12 |
-| Hand-written `Spec` tables (`cli.rs`, 1112 lines) | clap derive | About 800 lines and the completion scripts go away |
-| State in the checkout | `~/.local/state/drover/drover.db` | S1 |
-
-Kept: `drover-wt`, the AXI output rules, the owner concept (now enforced by drover inside `send`), the typed newtypes, the clippy lint set, and remote hosts over ssh.
+Status: requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude adapter (pane and headless) and one ACP adapter for Cursor and pi (headless; pi's not yet run live), events and SSE, approvals, profiles, per-run usage. Mates: `--role mate`, `goal`, `wait`, `escalate`. Not yet: plan-window usage, the dashboard.
 
 ## Layers
 
@@ -50,7 +35,7 @@ struct Run {
 }
 ```
 
-- **Pane mode** opens a herdr pane running the harness's interactive TUI, the way `drover new` does today. drover gets its events through hooks the harness posts to `serve` (Claude: `http` hooks injected with `--settings`). The screen is never scraped. `attach`, `screen` and `keys` are kept for you.
+- **Pane mode** opens a herdr pane running the harness's interactive TUI. drover gets its events through hooks the harness posts to `serve` (Claude: `http` hooks injected with `--settings`). The screen is never scraped. `attach`, `screen` and `keys` are for you.
 - **Headless mode** spawns the harness with its streaming interface and reads stdout. The process stays warm and takes the next prompt on stdin. It's killed after it has been idle for `idle_kill` (15 min for `role: chat`).
 - **Takeover:** `drover attach <run>` on a headless run opens a pane with `--resume <session>` and sets the owner to `User`. The headless process is stopped first, so two processes never share a session.
 - **Owner** is checked inside `send` and `respond`. A run that isn't the owner can read, but can't type.
@@ -219,9 +204,9 @@ Output follows C4 (shared with brain). `--help` is the only place flags are docu
 
 ## Serve
 
-- **CLI path:** a unix socket at `~/.local/state/drover/drover.sock`, mode 600, with one JSON line per request (kept from v1).
+- **CLI path:** a unix socket at `~/.local/state/drover/drover.sock`, mode 600, with one JSON line per request.
 - **Dashboard path:** HTTP and SSE on `127.0.0.1:7341`, behind the BFF and oauth2-proxy. It never listens on a public interface.
-- **Remote machines:** a client on another host is `drover-ssh`, which runs the CLI on the host in `DROVER_HOST`. A headless run on a remote machine is `ssh <machine> <harness headless cmd>`, and its stdio is the stream. A remote Cursor logs in with its OAuth login file (`AGENT_CLI_CREDENTIAL_STORE=file`), never a key from drover. A pane run on a remote machine uses that machine's herdr, as today.
+- **Remote machines:** a client on another host is `drover-ssh`, which runs the CLI on the host in `DROVER_HOST`. A headless run on a remote machine is `ssh <machine> <harness headless cmd>`, and its stdio is the stream. A remote Cursor logs in with its OAuth login file (`AGENT_CLI_CREDENTIAL_STORE=file`), never a key from drover. A pane run on a remote machine uses that machine's herdr.
 
 ## Storage
 
@@ -236,13 +221,6 @@ The archive runs at start and daily: events older than 30 days move to `events.j
 Two event kinds beyond C9 are stored, never streamed: `requested` (repo, branch and the first prompt, kept so a pending run can start after a restart) and `started` (the first prompt went out). A pending pane run has no pane yet: `Mode::Pane { pane: Option<PaneId> }`, the `pane` column NULL.
 
 Everything lives in `~/.local/state/drover/`. Config is in `~/.config/drover/config.toml` (machines, repos root, harness paths), with credentials alongside at mode 600.
-
-## Migration from v1
-
-1. `state.json` tasks become `runs` rows with `mode: pane` and `role: task` (or `mate` or `crew`).
-2. The 13 `journal.db` entries are exported once with `brain log --at`. After that `journal.db` is deleted.
-3. `mates/state/*/goal.md` is converted by hand into C16 for any mate still running. Otherwise it's archived.
-4. Discord keeps running until the PWA and Web Push exist (D5), then serenity is removed in one commit.
 
 ## Non-goals
 

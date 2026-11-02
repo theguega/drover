@@ -18,7 +18,6 @@ mod goal;
 mod harness;
 mod herdr;
 mod http;
-mod migrate;
 mod run;
 mod serve;
 mod socket;

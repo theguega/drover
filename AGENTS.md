@@ -14,13 +14,11 @@ src/goal.rs     a mate's goal graph (C16): its shape, checked once when set
 src/harness/    the Harness trait (C12) and its adapters: claude.rs, acp.rs (cursor and pi)
 src/run.rs      Run and its types: RunId, Machine, Mode, Role, Profile, Owner, Phase, Usage
 src/store.rs    drover.db: runs, events, goals, and each run's `wait` cursor
-src/migrate.rs  v1 state.json into runs, once
 src/unswap.rs   gives back the .cursor/hooks.json swaps the pre-ACP cursor adapter recorded, at start
 src/config.rs   state dir, config.toml (a flat TOML subset)
 src/socket.rs   herdr socket: requests and `events.subscribe` (direct locally, one ssh relay per remote)
 src/herdr.rs    herdr calls per machine, drover-wt over sh / ssh
 src/toon.rs     JSON to TOON, what the terminal prints
-fixtures/       v1-state.json, the live v1 state with reply text scrubbed, for the migration test
 bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not from dotfiles)
 bin/drover-ssh  the client on a non-host machine: runs drover on DROVER_HOST
 skills/drover/  the drover skill, copied by hand into ~/.agents/skills
@@ -135,7 +133,6 @@ Enforced by the lints in `Cargo.toml`:
 - Five dependencies: tokio, serde, serde_json, rusqlite, clap. Prefer a few lines over a crate: config.toml is read by a 30-line parser.
 - The owner check lives in the service: `send`, `keys`, `stop`, `approve` and `deny` need the run's owner (a crew run's approvals go to its mate), `approve-run`, `drop-run` and `attach` need you (no `DROVER_RUN`).
 - HTTP listens on 127.0.0.1 only, closes a connection whose request has not arrived within 5 s, and refuses a request with an `Origin` header or a `Host` that is not its address, so a browser page cannot reach it.
-- `state.json` from v1, and from the TypeScript version before it, still migrates. There are tests for both.
 
 Repo and branch names are checked (letters, digits, `# . _ / -`), machine names likewise, and session ids must be uuids before they reach a shell. drover adds no sandbox.
 

@@ -200,20 +200,6 @@ impl Store {
         write(&self.db(), "INSERT OR REPLACE", r)
     }
 
-    // New runs with their first events, all or none. An id taken already fails the lot.
-    pub fn insert_all(&self, runs: &[(Run, Vec<(Kind, Value)>)]) -> Result<()> {
-        let mut db = self.db();
-        let tx = db.transaction()?;
-        for (r, events) in runs {
-            write(&tx, "INSERT", r)?;
-            for (kind, data) in events {
-                add_event(&tx, &r.id, *kind, data)?;
-            }
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
     pub fn get(&self, id: &RunId) -> Result<Option<Run>> {
         let row = self
             .db()
@@ -632,25 +618,6 @@ mod tests {
             store.open_replies()?.keys().collect::<Vec<_>>(),
             ["r-0000e2"]
         );
-        Ok(())
-    }
-
-    // A taken id fails the whole batch loudly, and nothing of it stays.
-    #[test]
-    fn insert_all_is_all_or_none() -> Result<()> {
-        let store = Store::open(Path::new(":memory:"))?;
-        let a = run("r-00000c")?;
-        let b = run("r-00000d")?;
-        let events = vec![(Kind::Reply, json!({ "id": "x" }))];
-        let twice = [
-            (a.clone(), events.clone()),
-            (b, vec![]),
-            (a.clone(), vec![]),
-        ];
-        assert!(store.insert_all(&twice).is_err());
-        assert!(store.list()?.is_empty() && store.last(&a.id, Kind::Reply)?.is_none());
-        store.insert_all(&[(a.clone(), events)])?;
-        assert_eq!(store.list()?, vec![a]);
         Ok(())
     }
 }

@@ -30,7 +30,7 @@ use crate::{
     goal::{Graph, Update},
     harness::{self, Abort, Decision, Harness, Ident, Out, Parse, StartSpec},
     herdr::{self, Code, Host, Name, PaneId, Reach, SessionId},
-    http, migrate,
+    http,
     run::{Machine, Mode, Owner, Phase, Profile, Role, Run, RunId, Usage, now},
     socket::{self, SSH_OPTS},
     store::{Kind, Store, c9},
@@ -133,12 +133,6 @@ pub async fn run(paths: &Paths) -> Result<()> {
     let _lock = lock(&paths.state)?;
     let db = paths.db();
     let store = Store::open(&db)?;
-    if let Some(v1) = &config.v1_state
-        && let Some(n) = migrate::migrate(&store, v1, now())
-            .map_err(|e| err!("migrate {}: {e}", v1.display()))?
-    {
-        println!("migrated {n} runs from {}", v1.display());
-    }
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.http_port))
         .await
         .map_err(|e| err!("bind 127.0.0.1:{}: {e}", config.http_port))?;
@@ -2166,7 +2160,7 @@ impl App {
                         Err(e) => notes.push(format!("kept the checkout: {e}")),
                     }
                 }
-                // v1 mates share one workspace, so only their pane goes
+                // a mate keeps its workspace: only its pane goes
                 let closed = match (removed, r.role) {
                     (true, _) => Ok(()),
                     (false, Role::Mate) => herdr::close_pane(h, &pane).await,
