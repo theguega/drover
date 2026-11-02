@@ -968,20 +968,7 @@ impl App {
             )
             .into());
         };
-        let mut child = Command::new("sh")
-            .args(["-c", cmd])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin.write_all(entry.as_bytes()).await?;
-        }
-        let out = child.wait_with_output().await?;
-        if !out.status.success() {
-            bail!("{cmd}: {}", String::from_utf8_lossy(&out.stderr).trim());
-        }
-        Ok(())
+        run_journal(cmd, entry, JOURNAL_TIMEOUT).await
     }
 
     // The next prompt into a run, under the turns lock: typed into its pane, or written to its
@@ -2610,6 +2597,64 @@ async fn watch_session(app: &App, h: &Host) -> Result<()> {
     }
 }
 
+const JOURNAL_TIMEOUT: Duration = Duration::from_secs(30);
+
+// Kills journal_cmd's process group when dropped: on a timeout, and when the client that asked
+// for `done` goes away and the request is dropped.
+struct KillGroup(u32);
+
+impl Drop for KillGroup {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", self.0)])
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+async fn run_journal(cmd: &str, entry: &str, limit: Duration) -> Result<()> {
+    let mut child = Command::new("sh")
+        .args(["-c", cmd])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .kill_on_drop(true)
+        .spawn()?;
+    let _group = child.id().map(KillGroup);
+    let mut stdin = child.stdin.take();
+    let feed = async {
+        match &mut stdin {
+            Some(stdin) => stdin.write_all(entry.as_bytes()).await,
+            None => Ok(()),
+        }
+    };
+    let fed = tokio::time::timeout(limit, feed).await;
+    drop(stdin);
+    let out = tokio::time::timeout(limit, child.wait_with_output())
+        .await
+        .map_err(|_| err!("journal_cmd did not exit in {limit:?}: killed"))??;
+    let said = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        match out.status.code() {
+            Some(code) => bail!("journal_cmd exited {code}: {}", said.trim()),
+            None => bail!("journal_cmd was killed by a signal: {}", said.trim()),
+        }
+    }
+    // a command that never reads stdin closes it: the write fails with EPIPE
+    match fed {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => bail!(
+            "journal_cmd exited 0 without reading the entry ({e}): {}",
+            said.trim()
+        ),
+        Err(_) => bail!(
+            "journal_cmd did not read the entry in {} s",
+            limit.as_secs()
+        ),
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -3735,6 +3780,45 @@ cat >/dev/null
         assert_eq!(std::fs::read_to_string(&log)?, "shipped");
         std::fs::remove_file(log)?;
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn journal_failures_name_the_command_status() {
+        let ms = Duration::from_millis;
+        let said = |cmd: &'static str, limit| async move {
+            run_journal(cmd, &"x".repeat(1 << 20), limit)
+                .await
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
+        };
+        assert!(run_journal("cat >/dev/null", "x", ms(5000)).await.is_ok());
+        assert_eq!(
+            said("echo boom >&2; exit 3", ms(5000)).await,
+            "journal_cmd exited 3: boom"
+        );
+        // never reads stdin, and exits 0 at once: EPIPE on a 1 MiB entry
+        assert!(
+            said("true", ms(5000))
+                .await
+                .starts_with("journal_cmd exited 0 without reading")
+        );
+        // a child that outlives sh is killed with the group
+        let canary = std::env::temp_dir().join(format!("drover-jt-{}", std::process::id()));
+        let cmd: &'static str = Box::leak(
+            format!(
+                "cat >/dev/null; (sleep 1; touch {}) & sleep 30",
+                canary.display()
+            )
+            .into_boxed_str(),
+        );
+        assert!(
+            said(cmd, ms(300))
+                .await
+                .starts_with("journal_cmd did not exit in 300ms")
+        );
+        tokio::time::sleep(ms(1500)).await;
+        assert!(!canary.exists());
     }
 
     // An ended run takes no hooks and no approvals: its waiting call is denied, nothing of it

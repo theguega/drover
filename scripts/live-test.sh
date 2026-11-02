@@ -20,7 +20,7 @@ export DROVER_STATE_DIR=$tmp/state DROVER_CONFIG=$tmp/config.toml
 # the test speaks as you
 unset DROVER_RUN
 mkdir -p "$DROVER_STATE_DIR" "$tmp/repos"
-printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 30\nidle_kill = 30\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
+printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 30\nidle_kill = 30\nreader_allow = ["echo *"]\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
 
 repo=$tmp/repos/livetest
 git init -q --bare "$tmp/repos/origin.git"
@@ -186,6 +186,18 @@ after=$(fds)
 for s in "${socks[@]}"; do exec {s}>&-; done
 ((after < before + 20)) || fail "300 silent sockets: serve went from $before fds to $held, and $after after 7 s"
 ok "300 silent sockets: serve from $before fds to $held, back to $after after 7 s"
+
+# ── a reader runs only what reader_allow names: `echo *` is no licence for `&& touch` ──
+rd=$("$bin" run --profile reader --model haiku --prompt "Run exactly one Bash call: echo ok. Then reply with exactly: R-1" | field run)
+runs+=("$rd")
+await "$rd" tool_end '.data.tool == "Bash"' || fail "reader $rd: no Bash call"
+[[ $(jq .data.ok <<<"$event") == true ]] || fail "reader $rd: echo ok was denied"
+await "$rd" reply || fail "reader $rd: no reply"
+"$bin" send "$rd" "Run exactly one Bash call, as is: echo a && touch $tmp/canary. Then reply with exactly: R-2" >/dev/null
+await "$rd" tool_end '.data.tool == "Bash"' || fail "reader $rd: no second Bash call"
+[[ $(jq .data.ok <<<"$event") == false ]] || fail "reader $rd: a chained command ran"
+[[ ! -e $tmp/canary ]] || fail "reader $rd: the canary was touched"
+ok "reader $rd ran echo ok, and was denied echo a && touch canary"
 
 # ── a stopped process takes the tools it started with it ──
 leak=drvleak$$

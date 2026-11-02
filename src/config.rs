@@ -13,6 +13,7 @@
 //   reader_allow = ["notes find *"]  # Bash commands a reader may run, as Claude rules (default: none)
 //
 // Only that flat subset of TOML is read: `key = "string"`, `key = ["a", "b"]` and `key = 7`.
+// A `#` or a `,` inside quotes is text. A key given twice is an error; an unknown one a warning.
 
 use std::path::{Path, PathBuf};
 
@@ -87,8 +88,9 @@ impl Config {
             journal_cmd: None,
             reader_allow: Vec::new(),
         };
+        let mut seen: Vec<(&str, usize)> = Vec::new();
         for (n, line) in text.lines().enumerate() {
-            let line = line.split_once('#').map_or(line, |(l, _)| l).trim();
+            let line = strip_comment(line).trim();
             if line.is_empty() {
                 continue;
             }
@@ -100,7 +102,12 @@ impl Config {
             };
             let (key, value) = line.split_once('=').ok_or_else(bad)?;
             let value = value.trim();
-            match key.trim() {
+            let key = key.trim();
+            if let Some((_, first)) = seen.iter().find(|(k, _)| *k == key) {
+                bail!("line {}: {key} is already set on line {first}", n + 1);
+            }
+            seen.push((key, n + 1));
+            match key {
                 "host" => c.host = string(value).ok_or_else(bad)?.parse()?,
                 "remotes" => {
                     c.remotes = list(value)
@@ -110,11 +117,15 @@ impl Config {
                         .collect::<Result<_>>()?;
                 }
                 "reader_allow" => {
-                    c.reader_allow = list(value)
-                        .ok_or_else(bad)?
-                        .into_iter()
-                        .map(String::from)
-                        .collect();
+                    let items = list(value).ok_or_else(bad)?;
+                    // Claude reads a malformed Bash rule as bare Bash: every command allowed
+                    if let Some(item) = items.iter().find(|i| !safe_rule(i)) {
+                        bail!(
+                            "line {}: reader_allow item {item:?} is not a command rule: no empty or wildcard-only item, no parentheses or control characters",
+                            n + 1
+                        );
+                    }
+                    c.reader_allow = items.into_iter().map(String::from).collect();
                 }
                 "journal_cmd" => c.journal_cmd = Some(string(value).ok_or_else(bad)?.into()),
                 "repos_root" => c.repos_root = Some(expand(string(value).ok_or_else(bad)?)),
@@ -134,7 +145,13 @@ impl Config {
                 "idle_kill" => c.idle_kill = value.parse().map_err(|_| bad())?,
                 "background_kill" => c.background_kill = Some(value.parse().map_err(|_| bad())?),
                 // a key an older or newer drover reads must not stop this one from starting
-                k => eprintln!("config line {}: unknown key {k}, ignored", n + 1),
+                k => match KEYS.iter().find(|known| distance(k, known) <= 2) {
+                    Some(known) => eprintln!(
+                        "config line {}: unknown key {k}, ignored: did you mean {known}?",
+                        n + 1
+                    ),
+                    None => eprintln!("config line {}: unknown key {k}, ignored", n + 1),
+                },
             }
         }
         Ok(c)
@@ -145,15 +162,78 @@ fn string(v: &str) -> Option<&str> {
     v.strip_prefix('"')?.strip_suffix('"')
 }
 
-// `["a", "b"]`; no comma inside an item.
+// `["a", "b"]`; commas inside quotes belong to the item.
 fn list(v: &str) -> Option<Vec<&str>> {
-    v.strip_prefix('[')?
-        .strip_suffix(']')?
-        .split(',')
+    let inner = v.strip_prefix('[')?.strip_suffix(']')?;
+    let mut items = Vec::new();
+    let (mut start, mut quoted) = (0, false);
+    for (i, c) in inner.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            ',' if !quoted => {
+                items.push(&inner[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    items.push(&inner[start..]);
+    items
+        .into_iter()
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(string)
         .collect()
+}
+
+// A `#` starts a comment unless it is inside a quoted string.
+fn strip_comment(line: &str) -> &str {
+    let mut quoted = false;
+    for (i, c) in line.char_indices() {
+        match c {
+            '"' => quoted = !quoted,
+            '#' if !quoted => return &line[..i],
+            _ => {}
+        }
+    }
+    line
+}
+
+fn safe_rule(item: &str) -> bool {
+    item.chars().any(|c| !c.is_whitespace() && c != '*')
+        && !item
+            .chars()
+            .any(|c| matches!(c, '(' | ')') || c.is_control())
+}
+
+const KEYS: [&str; 10] = [
+    "host",
+    "remotes",
+    "repos_root",
+    "remote_repos_root",
+    "http_port",
+    "hook_timeout",
+    "idle_kill",
+    "background_kill",
+    "journal_cmd",
+    "reader_allow",
+];
+
+// Levenshtein, for "did you mean".
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let sub = prev.get(j).copied().unwrap_or(0) + usize::from(ca != *cb);
+            let del = prev.get(j + 1).copied().unwrap_or(0) + 1;
+            let ins = cur.last().copied().unwrap_or(0) + 1;
+            cur.push(sub.min(del).min(ins));
+        }
+        prev = cur;
+    }
+    prev.last().copied().unwrap_or(0)
 }
 
 fn expand(p: &str) -> PathBuf {
@@ -201,6 +281,56 @@ mod tests {
     fn an_unknown_key_is_ignored() -> Result<()> {
         let c = Config::parse("retired = \"/x\"\nhttp_port = 7342\n")?;
         assert_eq!(c, Config::parse("http_port = 7342")?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_reader_rule_that_claude_reads_as_bare_bash_is_refused() {
+        for bad in [
+            "",
+            " ",
+            "*",
+            "* *",
+            "true)",
+            "(true",
+            "true) x",
+            "a(b)",
+            "a\tb\u{7}",
+        ] {
+            let e = Config::parse(&format!("reader_allow = [\"ok *\", \"{bad}\"]"))
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            assert!(
+                e.to_string().starts_with("line 1: reader_allow item"),
+                "{bad:?}: {e}"
+            );
+        }
+        assert!(Config::parse("reader_allow = [\"echo *\", \"git log\"]").is_ok());
+    }
+
+    #[test]
+    fn a_duplicate_key_names_both_lines() {
+        let e = Config::parse("http_port = 1\n\nhttp_port = 2")
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert_eq!(e, "line 3: http_port is already set on line 1");
+    }
+
+    #[test]
+    fn close_keys_are_found() {
+        assert_eq!(distance("reader_alow", "reader_allow"), 1);
+        assert_eq!(distance("hook_timeout", "hook_timeout"), 0);
+        assert!(KEYS.iter().all(|k| distance("retired", k) > 2));
+    }
+
+    #[test]
+    fn quotes_hide_comments_and_commas() -> Result<()> {
+        let c =
+            Config::parse("journal_cmd = \"echo a # b\" # real\nreader_allow = [\"a, b\", \"c\"]")?;
+        assert_eq!(c.journal_cmd.as_deref(), Some("echo a # b"));
+        assert_eq!(c.reader_allow, ["a, b", "c"]);
         Ok(())
     }
 }
