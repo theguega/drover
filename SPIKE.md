@@ -1,11 +1,37 @@
 # drover v2 spike: approvals through harness hooks
 
-Run on 2026-10-27, Linux, `claude` 2.1.312 (`--model haiku`), `cursor-agent` 2026.10.22-27dcf5f.
-Scripts are in `spike/`. Every run writes to `/tmp/spike-*`. Rerun from the repo root.
+The scripts were removed after v2 shipped; they are in git history at commit 3dfece9.
 
-- `spike/hook_server.py PORT`: logs each hook POST to `$LOG`, answers by `$MODE` (`allow`, `deny`, `allow-session`, `sleep:<s>` then allow, `silent:<s>` never answers).
-- `spike/settings.sh PORT TIMEOUT`: the `--settings` JSON, with `http` hooks for `PermissionRequest` (`/perm`) and `PreToolUse` (`/pre`).
-- `spike/q1.sh MODE TIMEOUT`: one headless stream-json run. `spike/show.sh OUT` prints its log and stream.
+Run on 2026-10-27, Linux, `claude` 2.1.312 (`--model haiku`), `cursor-agent` 2026.10.22-27dcf5f.
+
+## Setup shared by §1–§5
+
+**Hook server.** A 38-line Python HTTP server on `127.0.0.1:$PORT` logged every hook POST (path, time, body) as a JSON line, and answered `PermissionRequest` by mode:
+
+- `allow`: `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}`
+- `deny`: the same with `"decision":{"behavior":"deny","message":"REASON-XYZZY: blocked by drover spike"}`
+- `allow-session`: `"decision":{"behavior":"allow","updatedPermissions":[{"type":"addRules","rules":[{"toolName":"<tool_name>","ruleContent":"<tool_input.command>"}],"behavior":"allow","destination":"session"}]}`
+- `sleep:<s>`: waits `<s>` seconds, then answers `allow`.
+
+**Settings** (`$OUT/settings.json`), with `PORT` and `TIMEOUT` filled in:
+
+```json
+{"hooks":{
+ "PermissionRequest":[{"hooks":[{"type":"http","url":"http://127.0.0.1:PORT/perm","timeout":TIMEOUT}]}],
+ "PreToolUse":[{"hooks":[{"type":"http","url":"http://127.0.0.1:PORT/pre","timeout":TIMEOUT}]}]}}
+```
+
+**Run.** The prompt goes in as one stream-json line on stdin, from `$OUT/work` (a fresh directory, with `spike-file.txt` removed first):
+
+```sh
+jq -cn --arg p "$PROMPT" '{type:"user",message:{role:"user",content:$p}}' |
+  claude -p --input-format stream-json --output-format stream-json --verbose --model haiku \
+  --settings $OUT/settings.json --permission-mode default > $OUT/stream.jsonl 2> $OUT/stderr
+```
+
+The default prompt was `Run this exact bash command with the Bash tool, then report what happened: touch spike-file.txt`.
+
+**Printed output.** The output lines below are the hook log (`path`, `event`, `tool`, `input`, and the `reply` the server sent) and the stream's `assistant`, `user` and `result` lines. Timing (`t`, `reply_after`) and `sid` are left out.
 
 The answer body used (Claude): `{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"|"deny","message":"..."}}}`.
 
@@ -20,9 +46,8 @@ The answer body used (Claude): `{"hookSpecificOutput":{"hookEventName":"Permissi
 
 ## 1. Does `-p` fire `PermissionRequest`?
 
-```sh
-OUT=/tmp/spike-q1 spike/q1.sh allow 30; spike/show.sh /tmp/spike-q1
-```
+Run the shared setup with `PORT=8791`, `TIMEOUT=30`, hook server mode `allow`, and the default prompt.
+
 ```
 {"path":"/pre","event":"PreToolUse","tool":"Bash","input":{"command":"touch spike-file.txt",...}}
 {"path":"/perm","event":"PermissionRequest","tool":"Bash","input":{"command":"touch spike-file.txt",...}}
@@ -35,13 +60,16 @@ First attempt used `echo spike-$((6*7))`: only `PreToolUse` fired, because a rea
 
 ## 2. Timeout
 
-```sh
-PORT=8801 OUT=/tmp/spike-q2-t5   spike/q1.sh sleep:20 5      # hook times out
-PORT=8802 OUT=/tmp/spike-q2-t100 spike/q1.sh sleep:75 100    # > 60 s
-PORT=8803 OUT=/tmp/spike-q2-t99999 spike/q1.sh sleep:75 99999
-spike/q2_long.sh 650 100000 8811                            # 650 s hold
-spike/q2_long.sh 3700 100000 8812                           # 3700 s hold
+Each row is the shared setup with its own `PORT`, hook server mode and `TIMEOUT`:
+
 ```
+PORT=8801 TIMEOUT=5      MODE=sleep:20   # hook times out
+PORT=8802 TIMEOUT=100    MODE=sleep:75
+PORT=8803 TIMEOUT=99999  MODE=sleep:75
+PORT=8811 TIMEOUT=100000 MODE=sleep:650  # 650 s hold
+PORT=8812 TIMEOUT=100000 MODE=sleep:3700 # 3700 s hold
+```
+The elapsed line is `elapsed = end − start` (seconds, taken before and after the `claude` run), and `file` is whether `spike-file.txt` exists in the work directory.
 ```
 timeout=5     elapsed=10s  file=   tool_result: "touch in '.../spike-file.txt' needs approval. The path is inside the working directories ..." (is_error)
 timeout=100   elapsed=80s  file=spike-file.txt   reply_after 75.0  -> allow honored
@@ -54,8 +82,10 @@ hold=650 timeout=100000 elapsed=654s file=spike-file.txt   reply_after 650.0 -> 
 
 ## 3. Deny with a reason
 
-```sh
-OUT=/tmp/spike-q3 PROMPT="Run this exact bash command with the Bash tool: touch spike-file.txt. If it is denied, quote the denial reason verbatim, then say the word CONTINUED." spike/q1.sh deny 30; spike/show.sh /tmp/spike-q3
+Shared setup with `PORT=8791`, `TIMEOUT=30`, hook server mode `deny`, and the prompt:
+
+```
+Run this exact bash command with the Bash tool: touch spike-file.txt. If it is denied, quote the denial reason verbatim, then say the word CONTINUED.
 ```
 ```
 {"type":"user","c":[{"type":"tool_result","content":"REASON-XYZZY: blocked by drover spike","is_error":true,...}]}
@@ -65,10 +95,11 @@ The file was not created. The `message` is the tool_result text, and the turn en
 
 ## 4. "Allow for this session"
 
-```sh
-spike/q4.sh                                       # allow + updatedPermissions(session)
-OUT=/tmp/spike-q4-plain PORT=8796 spike/q4.sh allow  # control: plain allow
-```
+Two runs of the same Bash call, with the prompt `Run this exact bash command with the Bash tool and say done: touch spike-file.txt`:
+
+1. Hook server mode `allow-session`, `PORT=8795`, `TIMEOUT=30`. Same process: send the prompt, wait 20 s, send it again, wait 15 s, all into one `claude -p` stream. Then `SID` is the `session_id` of the `system` line, `spike-file.txt` is removed, and the prompt goes into a new `claude -p ... --resume $SID` process.
+2. Control: the same with hook server mode `allow` and `PORT=8796`.
+
 ```
 allow-session: same process, 2 identical calls: PermissionRequest count = 1
                after --resume <sid>, 3rd identical call: PermissionRequest count = 2
@@ -79,8 +110,15 @@ The rule sent: `"updatedPermissions":[{"type":"addRules","rules":[{"toolName":"B
 
 ## 5. Interactive pane session
 
+Hook server mode `deny`, `PORT=8797`, `TIMEOUT=30`, settings as above. Claude runs in a tmux pane, with no `-p`:
+
 ```sh
-spike/q5.sh
+tmux new-session -d -s spike5 -x 150 -y 50 -c $OUT/work \
+  "claude --model haiku --permission-mode default --settings $OUT/settings.json"
+tmux send-keys -t spike5 Down Enter   # trust prompt defaults to "No, exit"
+tmux send-keys -t spike5 'Run this exact bash command with the Bash tool: touch spike-file.txt. If denied, quote the reason.'
+tmux send-keys -t spike5 Enter
+tmux capture-pane -t spike5 -p > $OUT/pane.txt
 ```
 ```
 {"path":"/pre","event":"PreToolUse","tool":"Bash"}
@@ -94,18 +132,39 @@ Needed `--permission-mode default`: this machine's default is auto mode, which i
 
 ## 6. cursor-agent `beforeShellExecution`
 
-```sh
-spike/q6.sh 3     # hook holds 3 s then denies
-spike/q6.sh 20    # holds 20 s
+Run from a fresh git repo in `$OUT/work`, with the hook config written there as `.cursor/hooks.json`:
+
+```json
+{"version":1,"hooks":{"beforeShellExecution":[{"command":"env LOG=$OUT/hook.log HOLD=3 $HOOK"}]}}
 ```
-Config written by the script: `.cursor/hooks.json` = `{"version":1,"hooks":{"beforeShellExecution":[{"command":"env ... spike/cursor_hook.sh"}]}}`. The hook gets JSON on stdin and prints `{"permission":"deny","user_message":...,"agent_message":...}`.
+
+`$HOOK` is a shell script that appends its stdin to `$LOG` with a timestamp, sleeps `HOLD` seconds, appends its end time, and prints the deny answer:
+
+```sh
+echo "start $(date +%s.%N) $(cat)" >> $LOG
+sleep ${HOLD:-3}
+echo "end   $(date +%s.%N)" >> $LOG
+echo '{"permission":"deny","user_message":"blocked by drover spike","agent_message":"REASON-XYZZY: blocked by drover spike"}'
+```
+
+The agent run:
+
+```sh
+date +%s.%N > $OUT/start
+cursor-agent -p --output-format stream-json --force --trust \
+  "Run this exact shell command and quote any denial reason verbatim: touch spike-file.txt" > $OUT/stream.jsonl
+date +%s.%N > $OUT/end
+```
+
+The hook gets JSON on stdin and prints `{"permission":"deny","user_message":...,"agent_message":...}`. Output with `HOLD=3`:
+
 ```
 start 1793165691.01 {"conversation_id":...,"model":...,"command":"touch spike-file.txt","cwd":"","sandbox":false,"tool_use_id":...,"session_id":...}
 end   1793165694.01
 file:                                   # not created
 {"type":"assistant",...,"text":"The command was denied with the following message:\n\n```text\nRejected: Command execution was blocked by a hook: blocked by drover spike ..."}
 ```
-With HOLD=20: `start ...707.64`, `end ...727.64`, total run 30.1 s, against 15.7 s with the 3 s hold, so the call waits for the hook. Run with `--force --trust`: the hook still denies, so a hook outranks `--force`. The `agent_message` text was not what the model quoted; it quoted the `user_message`.
+With `HOLD=20`: `start ...707.64`, `end ...727.64`, total run 30.1 s, against 15.7 s with the 3 s hold, so the call waits for the hook. Run with `--force --trust`: the hook still denies, so a hook outranks `--force`. The `agent_message` text was not what the model quoted; it quoted the `user_message`.
 
 ## 7. cursor-agent, found building the adapter
 
