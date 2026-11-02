@@ -147,7 +147,7 @@ What of Claude Code (2.1.316) a run reaches through drover's Claude path: the un
 | Effort | yes | yes | `send "/effort low"`; your `effortLevel` setting. No `run --effort` | probe: "Set effort level to low (this session only)" |
 | Permission modes, plan included | yes | yes | `run --permission-mode` (default `auto`) | live: the plan run, the pane in auto mode |
 | Leaving plan mode (ExitPlanMode) | yes | yes | a `needs` with tool `ExitPlanMode` and the plan as input; `approve` leaves plan mode, `deny --reason` keeps planning | live: `planned.txt` exists after approve |
-| AskUserQuestion | yes | yes | a `needs` with tool `AskUserQuestion`; `approve --answer <label or text>`, one per question in order; plain `approve` is refused | live, headless and pane |
+| AskUserQuestion | yes | yes | a `needs` with tool `AskUserQuestion`; `approve --answer <label or text>`, one per question in order, or `send <text>` for one question; plain `approve` is refused | live, headless and pane |
 | Resume | yes | yes | drover resumes its own session: a cold `send`, a restart, `attach` | live: after kill -9, attach |
 | Continue, fork, a session started outside drover | no | in the TUI (`/resume`, `/branch`) | not exposed: `run` always starts a new session | — |
 | Built-in commands (`/compact`, `/context`, `/cost`, `/clear`, `/model`, `/effort`) | yes | yes | `send "/context"`: headless, the output is the reply (`/compact` and `/clear` reply empty; `/clear` moves the run to the new session). In a pane a command the TUI runs itself posts no hook, so the run stays idle | live: `/context` in the pane; probe: each one headless |

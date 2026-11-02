@@ -241,9 +241,10 @@ ok "pane $p: /context kept it idle, and /livepong replied: $(text)"
 
 "$bin" send "$p" "Use the AskUserQuestion tool to ask me one question: 'Which color?' with the options Red and Blue. Then reply with exactly the label I picked, prefixed ANSWER:" >/dev/null
 await "$p" needs '.data.tool == "AskUserQuestion"' || fail "pane $p: AskUserQuestion did not reach drover"
-"$bin" approve "$p" "$(jq -r .data.perm <<<"$event")" --answer Red >/dev/null
+# send answers the question that waits, as it does cursor's
+"$bin" send "$p" Red >/dev/null
 await "$p" reply '.data.text | test("ANSWER: ?Red")' || fail "pane $p: the answer did not reach the reply"
-ok "pane $p: AskUserQuestion answered through drover: $(text)"
+ok "pane $p: AskUserQuestion answered through drover send: $(text)"
 
 # ── a pane in the user's own mode (auto): harmless calls never reach drover, an escalated one does ──
 a=$("$bin" run --repo livetest --branch live-a --model haiku --prompt "Run this exact bash command with the Bash tool: ls. Then reply with exactly: LS-DONE" | field run)
