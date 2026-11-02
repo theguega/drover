@@ -210,18 +210,19 @@ reply_after_approving() {
 dir=$tmp/folder
 mkdir -p "$dir"
 echo "the secret word is PELICAN" >"$dir/note.txt"
-f=$("$bin" run --dir "$dir" --headless --permission-mode default --model haiku --prompt "Run this exact bash command with the Bash tool: touch made.txt. Then reply with exactly: DIR-DONE" | field run)
+f=$("$bin" run --dir "$dir" --key "dir-$$" --headless --permission-mode default --model haiku --prompt "Run this exact bash command with the Bash tool: touch made.txt. Then reply with exactly: DIR-DONE" | field run)
 runs+=("$f")
 reply_after_approving "$f" || fail "dir $f: no reply"
 [[ $("$bin" show "$f" | field place) == dir && $("$bin" show "$f" | field cwd) == "$dir" ]] || fail "dir $f: not a dir run in $dir"
 [[ -f $dir/made.txt ]] || fail "dir $f: made.txt was not written in $dir"
 out=$("$bin" run --dir "$dir" --headless --prompt "second" 2>&1 || true)
 grep -q "open already, in run $f" <<<"$out" || fail "a second actor in $dir was not refused: $out"
+[[ $("$bin" run --dir "$dir" --key "dir-$$" --headless --prompt "retry" | field run) == "$f" ]] || fail "dir $f: a retry with its key started another run"
 out=$("$bin" done "$f" --remove 2>&1 || true)
 grep -q "never deletes" <<<"$out" || fail "done --remove on a dir run was not refused: $out"
 "$bin" done "$f" >/dev/null
 [[ -f $dir/made.txt && -f $dir/note.txt ]] || fail "dir $f: done touched $dir"
-ok "actor --dir $f wrote made.txt there, a second actor and done --remove were refused, and done left the folder"
+ok "actor --dir $f wrote made.txt there, a second actor and done --remove were refused, a retry with its --key returned it, and done left the folder"
 
 rf=$("$bin" run --profile reader --dir "$dir" --model haiku --prompt "Read note.txt and reply with exactly the secret word in it, nothing else" | field run)
 runs+=("$rf")

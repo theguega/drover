@@ -27,6 +27,7 @@ Pick the place from the job. Each run's `place` (in `show` and `ls`) is `worktre
 | a lookup or a question about files, changing nothing | reader scout | `drover run --profile reader --dir ~/papers --prompt "Which of these mention JEPA?"` or `drover run --profile reader --repo myapp --prompt "Where is the retry policy set?"` | never deletes it |
 
 - `--dir` takes an existing folder on the machine (absolute or `~/…`, git or not; over ssh for `--machine`). It cannot be combined with `--repo`, `--branch` or `--scratch`.
+- `--key <k>` works with every place: a retry with the same key returns the first run, before any folder check, so a retried `--dir` run is not refused as a second actor.
 - One actor per folder: a second actor in the same `--dir` on the same machine is refused with the run that has it open. Readers change nothing, so any number may read one folder.
 - A reader scout is headless and has Read and the config's `reader_allow` commands only. `--repo` without `--branch` reads that repo's main checkout, with no worktree. An actor still needs `--branch`. A reader with neither `--dir` nor `--repo` runs on the host only, in the state dir's `reader/`. A pi reader takes neither.
 
