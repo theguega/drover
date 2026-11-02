@@ -28,6 +28,7 @@ drover ls [--role --machine --phase --all]
 drover show <run>                  # phase, owner, last reply (first and last 300 chars), children, a mate's goal graph and question
 drover reply <run>                 # the whole last reply
 drover doctor [--json]             # each machine: tools, herdr's server, drover-wt at this build, cursor's login; a fix per failing check
+drover machine ls · add <ssh> · rm <ssh>   # add: herdr machine add, drover installed over ssh, remotes updated, service restarted. Not from a run
 drover send <run> <text> [--wait] [--key <k>]   # the next prompt, only while idle; or the answer to a cursor run's question (`needs` with tool AskQuestion). --wait blocks until the turn ends; --key: a retry with the same key sends nothing new and returns the first result
 drover approve <run> <perm> · deny <run> <perm> --reason <why>   # a tool call in `needs`; `show` lists perms
 drover approve <run> <perm> --answer Blue   # a question (AskUserQuestion): one --answer per question, a label or your own text; `send <run> Blue` answers a single one

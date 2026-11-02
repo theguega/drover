@@ -11,6 +11,7 @@ src/control.rs  unix socket the service listens on, and the client side; `watch`
 src/http.rs     127.0.0.1 HTTP: hook endpoints, GET /events (SSE), POST /runs/:id/permissions/:perm
 src/serve.rs    the service: commands, headless processes, hooks and approvals, a herdr watcher per machine
 src/goal.rs     a mate's goal graph (C16): its shape, checked once when set
+src/machine.rs  `drover machine`: ls, add (herdr, drover over ssh, remotes, restart), rm; runs here, not through serve
 src/harness/    the Harness trait (C12) and its adapters: claude.rs, acp.rs (cursor and pi)
 src/run.rs      Run and its types: RunId, Machine, Mode, Role, Profile, Owner, Phase, Usage
 src/store.rs    drover.db: runs, events, goals, and each run's `wait` cursor
