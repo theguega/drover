@@ -20,7 +20,7 @@ export DROVER_STATE_DIR=$tmp/state DROVER_CONFIG=$tmp/config.toml
 # the test speaks as you
 unset DROVER_RUN
 mkdir -p "$DROVER_STATE_DIR" "$tmp/repos"
-printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 300\nidle_kill = 30\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
+printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 30\nidle_kill = 30\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
 
 repo=$tmp/repos/livetest
 git init -q --bare "$tmp/repos/origin.git"
@@ -150,6 +150,23 @@ await "$bg" reply '.data.text | test("BG-FINISHED")' || fail "headless $bg: no r
 [[ -f $("$bin" show "$bg" | field cwd)/bg.txt ]] || fail "headless $bg: the background shell was ended early"
 ok "$bg's background shell outlived idle_kill (30 s), and Claude's own next turn replied: $(text)"
 
+# ── a permission no hook decides ends with a deny, never a hang ──
+# a run drover does not know: the hook answers with a deny, not {}
+unknown=$(curl -s -X POST -H 'Content-Type: application/json' "http://127.0.0.1:$port/hooks/r-ffffff" \
+  -d '{"hook_event_name":"PermissionRequest","session_id":"317266eb-32ce-4e67-9457-7a097c828473","tool_name":"Bash","tool_input":{"command":"true"}}')
+[[ $(jq -r .hookSpecificOutput.decision.behavior <<<"$unknown") == deny ]] || fail "a permission hook for an unknown run got: $unknown"
+# drover frozen past claude's hook timeout (30 s): the hook gives no decision, claude waits on its
+# stdin, and drover's backstop denies the call there once it runs again
+"$bin" send "$h" "Run this exact bash command with the Bash tool: touch frozen.txt. If it is denied, reply with exactly: FROZEN-DENIED" >/dev/null
+await "$h" needs '.data.perm != null' || fail "headless $h: no needs for frozen.txt"
+kill -STOP "$serve"
+sleep 37
+kill -CONT "$serve"
+await "$h" reply || fail "headless $h: the call no hook decided hung the turn"
+[[ ! -e $cwd/frozen.txt ]] || fail "headless $h: frozen.txt was created with no decision"
+grep -q "left unanswered, denied" "$tmp/serve.log" || fail "headless $h: the backstop did not deny the call"
+ok "a hook for an unknown run is denied, and a call no hook decided was denied on stdin: $(text | tr '\n' ' ' | cut -c1-100)"
+
 # ── a custom command as a prompt ──
 "$bin" send "$h" "/livepong" >/dev/null
 await "$h" reply '.data.text | test("CUSTOM-PONG")' || fail "headless $h: /livepong did not run"
@@ -235,9 +252,24 @@ ok "pane $p replied through its hooks: $(text)"
 sleep 3
 [[ $("$bin" show "$p" | field phase) == idle ]] || fail "pane $p: /context left it $("$bin" show "$p" | field phase)"
 "$bin" keys "$p" esc >/dev/null
+# one that is a turn makes it working until its reply: a custom command, and /compact, whose
+# hooks are PreCompact and PostCompact
+seen_working() {
+  for _ in $(seq 100); do
+    [[ $("$bin" show "$p" | field phase) == working ]] && return 0
+    sleep 0.1
+  done
+  return 1
+}
 "$bin" send "$p" "/livepong" >/dev/null
+seen_working || fail "pane $p: /livepong never made it working"
 await "$p" reply '.data.text | test("CUSTOM-PONG")' || fail "pane $p: /livepong did not run after /context"
-ok "pane $p: /context kept it idle, and /livepong replied: $(text)"
+[[ $("$bin" show "$p" | field phase) == idle ]] || fail "pane $p: not idle after /livepong replied"
+"$bin" send "$p" "/compact" >/dev/null
+seen_working || fail "pane $p: /compact never made it working"
+await "$p" reply || fail "pane $p: /compact ended with no reply"
+[[ $("$bin" show "$p" | field phase) == idle ]] || fail "pane $p: not idle after /compact"
+ok "pane $p: /context kept it idle; /livepong and /compact were working until their replies"
 
 "$bin" send "$p" "Use the AskUserQuestion tool to ask me one question: 'Which color?' with the options Red and Blue. Then reply with exactly the label I picked, prefixed ANSWER:" >/dev/null
 await "$p" needs '.data.tool == "AskUserQuestion"' || fail "pane $p: AskUserQuestion did not reach drover"
