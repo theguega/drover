@@ -372,7 +372,6 @@ impl App {
     // Headless processes end with the service, and their runs wait for the next send, which
     // resumes them. One the service left running (it was killed) is ended now, and before a resume.
     fn orphans(&self) -> Result<()> {
-        crate::unswap::all(&self.state.join("hooks"));
         if !self.store.procs(None)?.is_empty() {
             let me = Weak::clone(&self.me);
             tokio::spawn(async move {

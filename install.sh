@@ -16,9 +16,6 @@ for cmd in git jq herdr ssh; do
 done
 
 ln -sfn "$root/bin/drover-wt" "$bin/drover-wt"
-# the pi extension earlier versions linked: pi now runs through pi-acp
-old=~/.pi/agent/extensions/drover.ts
-if [[ -L $old && $(readlink "$old") == "$root/harness/pi.ts" ]]; then rm "$old"; fi
 
 # /dev/tty can exist yet refuse to open (macOS over ssh without -t), so try it
 has_tty() { (exec </dev/tty) 2>/dev/null; }

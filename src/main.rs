@@ -23,7 +23,6 @@ mod serve;
 mod socket;
 mod store;
 mod toon;
-mod unswap;
 
 #[tokio::main]
 async fn main() {

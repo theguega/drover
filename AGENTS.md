@@ -14,7 +14,6 @@ src/goal.rs     a mate's goal graph (C16): its shape, checked once when set
 src/harness/    the Harness trait (C12) and its adapters: claude.rs, acp.rs (cursor and pi)
 src/run.rs      Run and its types: RunId, Machine, Mode, Role, Profile, Owner, Phase, Usage
 src/store.rs    drover.db: runs, events, goals, and each run's `wait` cursor
-src/unswap.rs   gives back the .cursor/hooks.json swaps the pre-ACP cursor adapter recorded, at start
 src/config.rs   state dir, config.toml (a flat TOML subset)
 src/socket.rs   herdr socket: requests and `events.subscribe` (direct locally, one ssh relay per remote)
 src/herdr.rs    herdr calls per machine, drover-wt over sh / ssh
