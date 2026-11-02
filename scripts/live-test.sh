@@ -20,13 +20,17 @@ export DROVER_STATE_DIR=$tmp/state DROVER_CONFIG=$tmp/config.toml
 # the test speaks as you
 unset DROVER_RUN
 mkdir -p "$DROVER_STATE_DIR" "$tmp/repos"
-printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 300\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
+printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 300\nidle_kill = 30\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
 
 repo=$tmp/repos/livetest
 git init -q --bare "$tmp/repos/origin.git"
 git clone -q "$tmp/repos/origin.git" "$repo" 2>/dev/null
 git -C "$repo" switch -q -c main
-git -C "$repo" commit -q --allow-empty -m init
+# a custom command, there before Claude starts: it reads them once
+mkdir -p "$repo/.claude/commands"
+printf -- '---\ndescription: drover live test\n---\nReply with exactly: CUSTOM-PONG\n' >"$repo/.claude/commands/livepong.md"
+git -C "$repo" add .claude
+git -C "$repo" commit -q -m init
 git -C "$repo" push -q origin main
 
 "$bin" serve >"$tmp/serve.log" 2>&1 &
@@ -116,6 +120,41 @@ sse=$(curl -sN --max-time 3 "http://127.0.0.1:$port/events?run=$h&since=0" || tr
 [[ $(grep -c '^event: reply' <<<"$sse") -ge 4 ]] || fail "SSE: fewer than 4 replies"
 ok "GET /events streams the same events: $(grep -c '^event: ' <<<"$sse") of them"
 
+# ── a question: AskUserQuestion is a needs, and approve takes the answer ──
+"$bin" send "$h" "Use the AskUserQuestion tool to ask me one question: 'Which color?' with the options Red and Blue. Then reply with exactly the label I picked, prefixed ANSWER:" >/dev/null
+await "$h" needs '.data.tool == "AskUserQuestion"' || fail "headless $h: AskUserQuestion did not reach drover"
+perm=$(jq -r .data.perm <<<"$event")
+! "$bin" approve "$h" "$perm" >/dev/null 2>&1 || fail "headless $h: a question was approved with no answer"
+"$bin" approve "$h" "$perm" --answer Blue >/dev/null
+await "$h" reply '.data.text | test("ANSWER: ?Blue")' || fail "headless $h: the answer did not reach the reply"
+ok "AskUserQuestion $perm answered through approve --answer: $(text)"
+
+# ── plan mode: ExitPlanMode is a needs, and approve leaves plan mode ──
+pl=$("$bin" run --repo livetest --branch live-plan --headless --permission-mode plan --model haiku --prompt "Plan to create the file planned.txt containing hi, in one line, then call ExitPlanMode with it. Once it is approved, create the file and reply with exactly: PLAN-DONE" | field run)
+runs+=("$pl")
+await "$pl" needs '.data.tool == "ExitPlanMode"' || fail "headless $pl: ExitPlanMode did not reach drover"
+"$bin" approve "$pl" "$(jq -r .data.perm <<<"$event")" >/dev/null
+# out of plan mode, the write may ask too
+while await "$pl" 'needs|reply' '.kind == "reply" or .data.perm != null'; do
+  [[ $(jq -r .kind <<<"$event") == reply ]] && break
+  "$bin" approve "$pl" "$(jq -r .data.perm <<<"$event")" >/dev/null
+done
+[[ -f $("$bin" show "$pl" | field cwd)/planned.txt ]] || fail "headless $pl: planned.txt was not created after the plan was approved"
+ok "plan approved through drover, and $pl wrote planned.txt"
+
+# ── a background shell: the process stays warm past idle_kill, and its turn after reaches drover ──
+bg=$("$bin" run --repo livetest --branch live-bg --headless --model haiku --prompt "Run this exact command with the Bash tool, with run_in_background set to true: sleep 45 && touch bg.txt. Do not wait for it: end your turn now. When it has finished, reply with exactly: BG-FINISHED" | field run)
+runs+=("$bg")
+await "$bg" reply || fail "headless $bg: no first reply"
+await "$bg" reply '.data.text | test("BG-FINISHED")' || fail "headless $bg: no reply when its background shell ended"
+[[ -f $("$bin" show "$bg" | field cwd)/bg.txt ]] || fail "headless $bg: the background shell was ended early"
+ok "$bg's background shell outlived idle_kill (30 s), and Claude's own next turn replied: $(text)"
+
+# ── a custom command as a prompt ──
+"$bin" send "$h" "/livepong" >/dev/null
+await "$h" reply '.data.text | test("CUSTOM-PONG")' || fail "headless $h: /livepong did not run"
+ok "headless $h ran the custom command /livepong"
+
 # ── a client that sends nothing does not hold a socket ──
 fds() { ls "/proc/$serve/fd" | wc -l; }
 before=$(fds)
@@ -172,6 +211,10 @@ await "$h" reply '.data.text | test("AFTER-RESTART")' || fail "headless $h: no r
 [[ $(on_session) == 1 ]] || fail "headless $h: $(on_session) processes on its session after the restart"
 ! leaking || fail "the restarted service left the old process's tool running"
 ok "after kill -9 of serve, one process on the session, and the old one's tool is gone"
+# the resumed process reports the session's totals from its start, which the run counted already
+awk -v t="$(jq .usage.cost_usd <<<"$event")" -v all="$("$bin" show "$h" | field cost_usd)" 'BEGIN { exit !(t < all / 2) }' ||
+  fail "headless $h: the resumed turn counted the whole session again: $(jq -c .usage <<<"$event")"
+ok "the turn after the resume cost only itself: $(jq .usage.cost_usd <<<"$event") of $("$bin" show "$h" | field cost_usd)"
 
 # ── pane ──
 p=$("$bin" run --repo livetest --branch live-p --model haiku --prompt "Reply with exactly: PANE-PONG" | field run)
@@ -186,6 +229,21 @@ ok "pane $p started"
 await "$p" reply '.data.text | test("PANE-PONG")' || fail "pane $p: no reply from its Stop hook"
 [[ $("$bin" show "$p" | field session) =~ ^[0-9a-f-]{36}$ ]] || fail "pane $p: no session from its hooks"
 ok "pane $p replied through its hooks: $(text)"
+
+# a command the TUI runs itself posts no hook: the run stays idle for the next send
+"$bin" send "$p" "/context" >/dev/null
+sleep 3
+[[ $("$bin" show "$p" | field phase) == idle ]] || fail "pane $p: /context left it $("$bin" show "$p" | field phase)"
+"$bin" keys "$p" esc >/dev/null
+"$bin" send "$p" "/livepong" >/dev/null
+await "$p" reply '.data.text | test("CUSTOM-PONG")' || fail "pane $p: /livepong did not run after /context"
+ok "pane $p: /context kept it idle, and /livepong replied: $(text)"
+
+"$bin" send "$p" "Use the AskUserQuestion tool to ask me one question: 'Which color?' with the options Red and Blue. Then reply with exactly the label I picked, prefixed ANSWER:" >/dev/null
+await "$p" needs '.data.tool == "AskUserQuestion"' || fail "pane $p: AskUserQuestion did not reach drover"
+"$bin" approve "$p" "$(jq -r .data.perm <<<"$event")" --answer Red >/dev/null
+await "$p" reply '.data.text | test("ANSWER: ?Red")' || fail "pane $p: the answer did not reach the reply"
+ok "pane $p: AskUserQuestion answered through drover: $(text)"
 
 # ── a pane in the user's own mode (auto): harmless calls never reach drover, an escalated one does ──
 a=$("$bin" run --repo livetest --branch live-a --model haiku --prompt "Run this exact bash command with the Bash tool: ls. Then reply with exactly: LS-DONE" | field run)
