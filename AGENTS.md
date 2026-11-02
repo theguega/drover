@@ -29,6 +29,7 @@ install.sh      host: config.toml, build, links, user service. --remote: links o
 bootstrap.sh    curl entry point: clones into ~/.local/share/drover, runs install.sh
 scripts/live-test.sh  headless, approvals, pane and attach against a real claude (haiku) and herdr
 scripts/live-test-mates.sh  a mate's crew, wait, goal and escalate against a real claude (haiku)
+scripts/live-test-tunnel.sh  REMOTE=<ssh name>: serve killed with SIGKILL and SIGTERM, the hooks tunnel binds again within 60 s
 scripts/live-test-cursor.sh  cursor over ACP: warm turns, approve, deny with a reason, stop, resume after kill -9; REMOTE=<ssh name> runs it there
 ```
 
@@ -102,7 +103,7 @@ pending ──approve-run──▶ starting ──first prompt──▶ working 
 - Turn handling, hooks and commands take one lock (`turns`). `send` refuses while a turn runs (Claude would queue the prompt).
 - Approvals: a call an ACP agent asks about on its stdout is a `needs` that waits for the owner, with no deadline. A `PermissionRequest` hook is a `needs` event with a perm id (`p1`, `p2`, …) and blocks until the owner's `approve` or `deny`. With no answer `min(10, hook_timeout/2)` s before `hook_timeout`, drover denies it with "awaiting approval" and the run goes back to working; the call stays approvable for a day (at most 16 per run, in memory). A late approve follows `send`'s rule: refused while a turn runs, else it is the run's next prompt, and that turn may make the same call (same tool and input, Bash description aside) once without asking, since session allows do not survive `--resume`; the allowance ends with the turn. An ended run takes no hooks and no approvals: its waiting calls hear "the run has ended" and nothing of it stays approvable.
 - Sessions: a hook must carry the run's session. A new one is taken when the run has none yet (a pane's first hook), and once after a resume drover started in a pane (attach: claude may resume under a copy's id) or after `SessionEnd` with reason `clear`. Any other hook is ignored and its permission request denied. A headless run's session comes from its own stream (`system/init`), which is drover's child, so it is always taken.
-- Remote: a headless run is `ssh <machine> 'cd … && exec claude …'`, and each remote has one `ssh -N -R` tunnel carrying its hooks back to the host's port. A remote's worktrees go under its own `REPOS_ROOT`, or `remote_repos_root` from the config (absolute: a path on the remotes).
+- Remote: a headless run is `ssh <machine> 'cd … && exec claude …'`, and each remote has one `ssh -N -R` tunnel carrying its hooks back to the host's port. The tunnel's ssh runs under a `sh` that kills it when its stdin pipe, held by serve, closes: serve dying by SIGKILL or SIGTERM must not leave an ssh holding the remote's port over a live connection. ServerAliveInterval 10 s x 3 ends it on a dead peer; the remote's sshd notices a silent dead client only with its own `ClientAliveInterval` (macOS sshd has none), so after a network drop the bind can fail until then: retried with backoff (max 10 s), logged once per change. A remote's worktrees go under its own `REPOS_ROOT`, or `remote_repos_root` from the config (absolute: a path on the remotes).
 
 ## Mates
 

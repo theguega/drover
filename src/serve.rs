@@ -2481,12 +2481,21 @@ async fn read_proc(
 }
 
 // A remote's agents post their hooks to 127.0.0.1 on their own machine; this carries them here.
+// ssh runs under a `sh` (a background job's stdin is /dev/null, hence fd 3) that kills it when its stdin, a pipe held by serve, reaches EOF. The OS
+// closes that pipe when serve dies by SIGKILL or SIGTERM too, where an orphaned ssh would keep
+// the remote's port bound over a healthy connection. ServerAliveInterval 10 s (the first -o
+// wins) x 3: a dead peer ends it in 30 s.
 async fn tunnel(host: String, port: u16) {
+    const WATCH: &str =
+        r#"exec 3<&0; ssh "$@" & p=$!; { read -r _ <&3; kill $p; } 2>/dev/null & wait $p"#;
     let forward = format!("127.0.0.1:{port}:127.0.0.1:{port}");
     let mut backoff = Duration::from_secs(1);
+    // logged once per change: a port held by a stale sshd fails the same way every retry
+    let mut last = String::new();
     loop {
         let started = Instant::now();
-        let status = Command::new("ssh")
+        let spawned = Command::new("sh")
+            .args(["-c", WATCH, "sh", "-o", "ServerAliveInterval=10"])
             .args(SSH_OPTS)
             .args([
                 "-N",
@@ -2501,17 +2510,31 @@ async fn tunnel(host: String, port: u16) {
                 &forward,
                 &host,
             ])
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .kill_on_drop(true)
-            .status()
-            .await;
-        eprintln!("hooks tunnel to {host} ended: {status:?}");
+            .stderr(Stdio::piped())
+            .spawn();
+        let outcome = match spawned {
+            Ok(mut child) => {
+                let mut stderr = String::new();
+                if let Some(mut e) = child.stderr.take() {
+                    let _ = e.read_to_string(&mut stderr).await;
+                }
+                let status = child.wait().await;
+                format!("{status:?}: {}", stderr.trim())
+            }
+            Err(e) => format!("{e}"),
+        };
+        if outcome != last {
+            eprintln!("hooks tunnel to {host} ended: {outcome}");
+            last = outcome;
+        }
         if started.elapsed() > Duration::from_secs(60) {
             backoff = Duration::from_secs(1);
+            last.clear();
         }
         sleep(backoff).await;
-        backoff = backoff.saturating_mul(2).min(Duration::from_secs(30));
+        backoff = backoff.saturating_mul(2).min(Duration::from_secs(10));
     }
 }
 
