@@ -20,6 +20,9 @@ ln -sfn "$root/bin/drover-wt" "$bin/drover-wt"
 old=~/.pi/agent/extensions/drover.ts
 if [[ -L $old && $(readlink "$old") == "$root/harness/pi.ts" ]]; then rm "$old"; fi
 
+# /dev/tty can exist yet refuse to open (macOS over ssh without -t), so try it
+has_tty() { (exec </dev/tty) 2>/dev/null; }
+
 # ask on the terminal, so this also works when the script arrives through curl
 ask() {
   local value default=${2:-}
@@ -30,12 +33,15 @@ ask() {
 default_repos=$HOME/.drover-workspace
 
 if ((remote)); then
-  repos=$default_repos
-  [[ -r /dev/tty ]] && repos=$(ask "REPOS_ROOT: where repositories and worktrees live" "$default_repos")
-  mkdir -p "${repos/#\~/$HOME}"
+  if has_tty; then
+    repos=$(ask "REPOS_ROOT: where repositories and worktrees live" "$default_repos")
+    mkdir -p "${repos/#\~/$HOME}"
+    [[ "$repos" == "$default_repos" ]] || echo "set REPOS_ROOT=$repos in your shell environment"
+  elif [[ -z ${REPOS_ROOT:-} ]]; then
+    echo "no terminal to ask on: set REPOS_ROOT=<where repositories and worktrees live> in your shell environment"
+  fi
   ln -sfn "$root/bin/drover-ssh" "$bin/drover"
   echo "linked drover-wt and drover (set DROVER_HOST to the host's ssh name)"
-  [[ "$repos" == "$default_repos" ]] || echo "set REPOS_ROOT=$repos in your shell environment"
   echo "this machine needs herdr, python3 and ssh from the host"
   # the keychain is locked to an ssh session, so cursor keeps its login in a file here
   [[ $(uname) != Darwin ]] || echo "for cursor runs, log in once (from the host: ssh -t <this machine> '...'): AGENT_CLI_CREDENTIAL_STORE=file NO_OPEN_BROWSER=1 ~/.local/bin/cursor-agent login"
@@ -44,7 +50,7 @@ fi
 
 config=~/.config/drover/config.toml
 if [[ ! -f "$config" ]]; then
-  [[ -r /dev/tty ]] || { echo "no $config: write it by hand, see README, Configuration" >&2; exit 1; }
+  has_tty || { echo "no $config: write it by hand, see README, Configuration" >&2; exit 1; }
   host=$(ask "this machine's name, as herdr's machine label" "$(hostname -s)")
   remotes=$(ask "remotes (ssh names, space-separated, empty for none)")
   repos=$(ask "where repositories and worktrees live" "$default_repos")
