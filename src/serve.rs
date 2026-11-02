@@ -809,7 +809,7 @@ impl App {
         asked: &'a Value,
         hooks: &'a str,
         resume: Option<&'a SessionId>,
-        forwarded: &'a [&'a str],
+        remote: bool,
     ) -> StartSpec<'a> {
         StartSpec {
             headless: r.mode == Mode::Headless,
@@ -820,7 +820,7 @@ impl App {
             cwd: &r.cwd,
             hooks,
             hook_timeout: self.hook_timeout,
-            forwarded,
+            remote,
         }
     }
 
@@ -835,7 +835,7 @@ impl App {
         self.save(run)?;
         self.wake.notify_waiters();
         let (asked, hooks) = (self.asked(run)?, self.hook_url(&run.id));
-        let argv = harness.start(&self.spec(run, &asked, &hooks, None, &[]));
+        let argv = harness.start(&self.spec(run, &asked, &hooks, None, false));
         let prompt = asked
             .get("prompt")
             .and_then(Value::as_str)
@@ -1019,7 +1019,7 @@ impl App {
             .collect();
         let names: Vec<&str> = forwarded.iter().map(|(k, _)| *k).collect();
         let (asked, hooks) = (self.asked(r)?, self.hook_url(&r.id));
-        let spec = self.spec(r, &asked, &hooks, resume, &names);
+        let spec = self.spec(r, &asked, &hooks, resume, h.ssh().is_some());
         let argv = harness.start(&spec);
         let state = self.state.to_string_lossy();
         let env = self.env(h, &r.id, &state);
@@ -2037,7 +2037,7 @@ impl App {
             r.mode = Mode::Pane {
                 pane: Some(wt.pane_id.clone()),
             };
-            let argv = harness.start(&self.spec(&r, &asked, &hooks, Some(&session), &[]));
+            let argv = harness.start(&self.spec(&r, &asked, &hooks, Some(&session), false));
             r.phase = Phase::Idle;
             r.owner = Owner::User;
             self.save(&r)?;
@@ -3240,7 +3240,7 @@ read -r l
         let argv = ["sh", "-c", FAKE_ACP].map(String::from);
         let sp = harness::spawn(&argv, Path::new("/"), &[], None, &[])?;
         let mut parse = Parse::default();
-        let spec = app.spec(&r, &Value::Null, "", None, &[]);
+        let spec = app.spec(&r, &Value::Null, "", None, false);
         let first = h.open(&spec, &mut parse);
         app.serve_proc(&r, h, sp, first, parse)?;
 
@@ -3287,7 +3287,7 @@ read -r l
         let argv = ["sh", "-c", script].map(String::from);
         let sp = harness::spawn(&argv, Path::new("/"), &[], None, &[])?;
         let mut parse = Parse::default();
-        let first = h.open(&app.spec(&r, &Value::Null, "", None, &[]), &mut parse);
+        let first = h.open(&app.spec(&r, &Value::Null, "", None, false), &mut parse);
         app.serve_proc(&r, h, sp, first, parse)?;
         request(app, None, &format!("send {id} go")).await?;
         Ok(r)

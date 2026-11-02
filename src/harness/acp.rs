@@ -21,22 +21,18 @@ pub struct Acp {
     // the session mode a reader runs in; pi's reader is its cwd's .pi/settings.json instead
     reader_mode: Option<&'static str>,
     forward: &'static [(&'static str, &'static str)],
-    // when the first is forwarded to a remote, the agent runs with the second set
-    keyed: Option<(&'static str, &'static str)>,
+    // set on a remote's agent: the login is in a file, since a mac's keychain is locked to an
+    // ssh session (SPIKE.md §9)
+    remote_env: Option<&'static str>,
 }
 
-// The key is the login on a remote: a mac's keychain is locked to an ssh session, and the
-// memory store skips it (SPIKE.md §9).
 pub static CURSOR: Acp = Acp {
     agent: &["cursor-agent", "acp"],
     tui: &["cursor-agent", "--resume"],
     reader_mode: Some("ask"),
     // a config dir on the remote is named apart from this machine's own
-    forward: &[
-        ("CURSOR_API_KEY", "CURSOR_API_KEY"),
-        ("DROVER_REMOTE_CURSOR_CONFIG_DIR", "CURSOR_CONFIG_DIR"),
-    ],
-    keyed: Some(("CURSOR_API_KEY", "AGENT_CLI_CREDENTIAL_STORE=memory")),
+    forward: &[("DROVER_REMOTE_CURSOR_CONFIG_DIR", "CURSOR_CONFIG_DIR")],
+    remote_env: Some("AGENT_CLI_CREDENTIAL_STORE=file"),
 };
 
 // pi-acp runs `pi --mode rpc`; its session id is pi's own.
@@ -45,8 +41,11 @@ pub static PI: Acp = Acp {
     tui: &["pi", "--session"],
     reader_mode: None,
     forward: &[],
-    keyed: None,
+    remote_env: None,
 };
+
+// cursor answers session/new and session/load with -32000 "Authentication required" when it has no login.
+const NOT_LOGGED_IN: &str = "cursor-agent is not logged in. Log in once on that machine; on a macOS remote: ssh -t <machine> 'AGENT_CLI_CREDENTIAL_STORE=file NO_OPEN_BROWSER=1 ~/.local/bin/cursor-agent login'";
 
 // A question the agent asks is answered with `drover send`.
 pub const QUESTION: &str = "AskQuestion";
@@ -212,6 +211,9 @@ impl Conn {
                 out
             }
             (Asked::Init, Some(e)) => vec![Out::Fail(format!("initialize: {e}"))],
+            (Asked::Session, Some(e)) if e.starts_with("Authentication required") => {
+                vec![Out::Fail(NOT_LOGGED_IN.into())]
+            }
             (Asked::Session, Some(e)) => vec![Out::Fail(format!("session: {e}"))],
             (Asked::Setup, Some(e)) => vec![Out::Fail(format!("session setup: {e}"))],
             (Asked::Init, None) => {
@@ -425,8 +427,8 @@ impl Harness for Acp {
             return argv;
         }
         let mut argv = Vec::new();
-        if let Some((key, set)) = self.keyed
-            && spec.forwarded.contains(&key)
+        if let Some(set) = self.remote_env
+            && spec.remote
         {
             argv.extend(words(&["env", set]));
         }
@@ -588,7 +590,7 @@ mod tests {
             cwd: std::path::Path::new("/w"),
             hooks: "",
             hook_timeout: 600,
-            forwarded: &[],
+            remote: false,
         }
     }
 
@@ -708,6 +710,19 @@ mod tests {
             [Out::Fail("the agent has no model nope".into())]
         );
         Ok(())
+    }
+
+    // cursor-agent acp 2026.10.22 without a login, on session/new
+    #[test]
+    fn no_login_fails_the_run_with_the_login_command() {
+        let mut p = Parse::default();
+        CURSOR.open(&spec(Profile::Actor, None, None), &mut p);
+        feed(&CURSOR, &mut p, &[ok(1, json!({}))]);
+        let e = json!({"jsonrpc": "2.0", "id": 2, "error": {"code": -32000, "message": "Authentication required", "data": {"message": "Authentication required. Please run 'agent login' first."}}});
+        assert_eq!(
+            feed(&CURSOR, &mut p, &[e]),
+            [Out::Fail(NOT_LOGGED_IN.into())]
+        );
     }
 
     // Lines as cursor-agent acp 2026.10.22 writes them, shortened.
@@ -1088,19 +1103,20 @@ mod tests {
             CURSOR.start(&spec(Profile::Actor, None, None)),
             ["cursor-agent", "acp"]
         );
-        let keyed = StartSpec {
-            forwarded: &["CURSOR_API_KEY"],
+        let remote = StartSpec {
+            remote: true,
             ..spec(Profile::Actor, None, None)
         };
         assert_eq!(
-            CURSOR.start(&keyed),
+            CURSOR.start(&remote),
             [
                 "env",
-                "AGENT_CLI_CREDENTIAL_STORE=memory",
+                "AGENT_CLI_CREDENTIAL_STORE=file",
                 "cursor-agent",
                 "acp"
             ]
         );
+        assert_eq!(PI.start(&remote), ["pi-acp"]);
         let pane = |h: &Acp| {
             h.start(&StartSpec {
                 headless: false,

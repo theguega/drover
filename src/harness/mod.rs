@@ -41,8 +41,8 @@ pub struct StartSpec<'a> {
     pub hooks: &'a str,
     // seconds a permission hook may wait for drover's answer
     pub hook_timeout: u64,
-    // the names a remote process has the variables of `Harness::forward` drover sends it under
-    pub forwarded: &'a [&'a str],
+    // the process runs on a remote machine
+    pub remote: bool,
 }
 
 // A harness's output or hook, as drover reads it.

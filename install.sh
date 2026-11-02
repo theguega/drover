@@ -37,6 +37,8 @@ if ((remote)); then
   echo "linked drover-wt and drover (set DROVER_HOST to the host's ssh name)"
   [[ "$repos" == "$default_repos" ]] || echo "set REPOS_ROOT=$repos in your shell environment"
   echo "this machine needs herdr, python3 and ssh from the host"
+  # the keychain is locked to an ssh session, so cursor keeps its login in a file here
+  [[ $(uname) != Darwin ]] || echo "for cursor runs, log in once (from the host: ssh -t <this machine> '...'): AGENT_CLI_CREDENTIAL_STORE=file NO_OPEN_BROWSER=1 ~/.local/bin/cursor-agent login"
   exit 0
 fi
 

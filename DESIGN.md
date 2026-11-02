@@ -221,7 +221,7 @@ Output follows C4 (shared with brain). `--help` is the only place flags are docu
 
 - **CLI path:** a unix socket at `~/.local/state/drover/drover.sock`, mode 600, with one JSON line per request (kept from v1).
 - **Dashboard path:** HTTP and SSE on `127.0.0.1:7341`, behind the BFF and oauth2-proxy. It never listens on a public interface.
-- **Remote machines:** a client on another host is `drover-ssh`, which runs the CLI on the host in `DROVER_HOST`. A headless run on a remote machine is `ssh <machine> <harness headless cmd>`, and its stdio is the stream. A key the harness needs there (`CURSOR_API_KEY`) goes first on that stdin, never on a command line. A pane run on a remote machine uses that machine's herdr, as today.
+- **Remote machines:** a client on another host is `drover-ssh`, which runs the CLI on the host in `DROVER_HOST`. A headless run on a remote machine is `ssh <machine> <harness headless cmd>`, and its stdio is the stream. A remote Cursor logs in with its OAuth login file (`AGENT_CLI_CREDENTIAL_STORE=file`), never a key from drover. A pane run on a remote machine uses that machine's herdr, as today.
 
 ## Storage
 

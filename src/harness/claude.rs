@@ -463,7 +463,7 @@ mod tests {
             cwd: std::path::Path::new("/w"),
             hooks: "http://127.0.0.1:7341/hooks/r-00000a",
             hook_timeout: 600,
-            forwarded: &[],
+            remote: false,
         }
     }
 

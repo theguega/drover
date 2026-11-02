@@ -4,7 +4,7 @@
 #   scripts/live-test-cursor.sh            on this machine
 #   REMOTE=chicken scripts/live-test-cursor.sh   the run on that ssh remote, drover here
 # LIVE_PORT (default 7381), WAIT seconds per event (default 180), MODEL (default auto).
-# A remote needs CURSOR_API_KEY in this environment: drover sends it on the agent's stdin.
+# A remote needs cursor's OAuth login in a file there (README: Remote machines).
 # Each check prints `ok` or `FAIL`; exit 0 when all pass.
 set -euo pipefail
 
@@ -15,8 +15,9 @@ for cmd in cursor-agent herdr jq git python3; do
   command -v "$cmd" >/dev/null || { echo "live-test-cursor needs $cmd on PATH" >&2; exit 1; }
 done
 remote=${REMOTE:-}
-if [[ -n $remote && -z ${CURSOR_API_KEY:-} ]]; then
-  echo "a remote run needs CURSOR_API_KEY: a mac's keychain is locked to ssh" >&2
+# env -i: an API key in the remote's environment must not stand in for the login
+if [[ -n $remote ]] && ! ssh -o BatchMode=yes "$remote" 'env -i HOME="$HOME" PATH="$PATH" AGENT_CLI_CREDENTIAL_STORE=file cursor-agent status' 2>&1 | grep -q 'Logged in'; then
+  echo "cursor is not logged in on $remote: ssh -t $remote 'AGENT_CLI_CREDENTIAL_STORE=file NO_OPEN_BROWSER=1 ~/.local/bin/cursor-agent login'" >&2
   exit 1
 fi
 
