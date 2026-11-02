@@ -598,6 +598,7 @@ impl App {
             Cmd::Stop { run } => self.cmd_stop(from, &run).await,
             Cmd::Done { run, remove } => self.cmd_done(from, &run, remove).await,
             Cmd::Snapshot { all } => self.snapshot(all),
+            Cmd::Doctor { .. } => Ok(self.doctor().await),
             Cmd::Home => self.home(),
             Cmd::Wait {
                 any: _,
@@ -2281,6 +2282,15 @@ impl App {
         Ok(
             json!({ "run": id, "phase": r.phase, "removed": removed, "note": (!note.trim().is_empty()).then_some(note.trim()) }),
         )
+    }
+
+    // Every machine's checks: the service's own machine first.
+    async fn doctor(&self) -> Value {
+        let mut checks = Vec::new();
+        for h in &self.hosts {
+            checks.extend(herdr::doctor(h, env!("DROVER_GIT_SHA")).await);
+        }
+        json!({ "checks": checks })
     }
 
     // Open runs, or with `all` every run, each with its last reply.

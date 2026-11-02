@@ -253,6 +253,79 @@ async fn sh(m: &Host, script: &str, timeout: Duration) -> Result<Out> {
     })
 }
 
+// One row per check on a machine: its tools, herdr's server, drover-wt at this build, cursor's login.
+pub async fn doctor(m: &Host, build: &str) -> Vec<serde_json::Value> {
+    let probe = concat!(
+        "for c in herdr drover-wt git jq claude cursor-agent; do ",
+        "command -v \"$c\" >/dev/null 2>&1 && echo \"bin $c yes\" || echo \"bin $c no\"; done; ",
+        "echo \"sha $(drover-wt --version 2>/dev/null)\"; ",
+        "herdr status server >/dev/null 2>&1 && echo 'herdr-server yes' || echo 'herdr-server no'; ",
+        "test -f ~/.cursor/auth.json && echo 'cursor-login yes' || echo 'cursor-login no'",
+    );
+    let out = match sh(m, probe, SHORT).await {
+        Ok(o) if o.code == Some(0) => o.out,
+        Ok(o) => {
+            let fix = format!(
+                "ssh -o BatchMode=yes {} must log in without a prompt",
+                m.name
+            );
+            return vec![check(m, "reach", false, o.err.trim(), &fix)];
+        }
+        Err(e) => {
+            let fix = format!(
+                "ssh -o BatchMode=yes {} must log in without a prompt",
+                m.name
+            );
+            return vec![check(m, "reach", false, &e.to_string(), &fix)];
+        }
+    };
+    let mut rows = vec![check(m, "reach", true, "", "")];
+    for line in out.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let row = match fields.as_slice() {
+            ["bin", name, ok] => check(
+                m,
+                name,
+                *ok == "yes",
+                "",
+                &format!("install {name} on {}", m.name),
+            ),
+            ["herdr-server", ok] => check(
+                m,
+                "herdr server",
+                *ok == "yes",
+                "",
+                &format!("start herdr on {}", m.name),
+            ),
+            ["cursor-login", ok] => check(
+                m,
+                "cursor login",
+                *ok == "yes",
+                "",
+                "cursor runs there need a login: install.sh --remote prints it",
+            ),
+            ["sha", ..] => {
+                // no sha: a drover-wt from before --version
+                let sha = line.trim_start_matches("sha").trim();
+                let detail = if sha.is_empty() { "no --version" } else { sha };
+                let fix = format!(
+                    "update the drover clone on {} to this build, then install.sh --remote",
+                    m.name
+                );
+                check(m, "drover-wt build", sha == build, detail, &fix)
+            }
+            _ => continue,
+        };
+        rows.push(row);
+    }
+    rows
+}
+
+fn check(m: &Host, name: &str, ok: bool, detail: &str, fix: &str) -> serde_json::Value {
+    let fix = if ok { "" } else { fix };
+    serde_json::json!({ "machine": m.name, "check": name, "ok": ok, "detail": detail, "fix": fix })
+}
+
 fn failure(o: &Out) -> Error {
     let text = if o.err.trim().is_empty() {
         &o.out

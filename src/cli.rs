@@ -135,6 +135,12 @@ pub enum Cmd {
         #[arg(long)]
         all: bool,
     },
+    /// Each machine: its tools, herdr's server, drover-wt at this build, and cursor's login
+    Doctor {
+        /// JSON for programs
+        #[arg(long)]
+        json: bool,
+    },
     /// The service: the unix socket, HTTP on 127.0.0.1 for hooks and events, and one herdr watcher per machine
     Serve,
     #[command(hide = true)]
@@ -302,14 +308,14 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
     };
     control::check_build(&paths)?;
     let watch = matches!(cmd, Cmd::Watch { .. });
-    let snapshot = matches!(cmd, Cmd::Snapshot { .. });
+    let json_out = matches!(cmd, Cmd::Snapshot { .. } | Cmd::Doctor { json: true });
     let request = Request { from, cmd };
     if watch {
         return control::watch(&paths, &request).await.map(|()| Value::Null);
     }
     let reply = control::send(&paths, &request).await?;
     // JSON for programs, one line
-    if snapshot {
+    if json_out {
         println!("{reply}");
         return Ok(Value::Null);
     }
