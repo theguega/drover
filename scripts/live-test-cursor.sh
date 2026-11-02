@@ -53,6 +53,8 @@ runs=()
 cleanup() {
   for r in "${runs[@]}"; do "$bin" done "$r" >/dev/null 2>&1 || true; done
   kill "$serve" 2>/dev/null || true
+  # serve's hooks tunnel outlives a SIGTERM to it
+  [[ -z $remote ]] || pkill -f -- "-R 127.0.0.1:$port:127.0.0.1:$port $remote" || true
   on "herdr workspace list" 2>/dev/null | jq -r --arg t "$tmp/" '.result.workspaces[] | select(.worktree.checkout_path // "" | contains($t)) | .workspace_id' |
     while read -r ws; do on "herdr workspace close $ws" >/dev/null || true; done
   on "pkill -f '^sleep 2717$'" 2>/dev/null || true

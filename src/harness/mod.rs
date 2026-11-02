@@ -259,9 +259,11 @@ pub async fn terminate(ssh: Option<&str>, ident: &Ident, grace: Duration) -> std
         .replace("START", &quote(&ident.start))
         .replace("GRACE", &grace.as_secs().max(1).to_string());
     let mut cmd = match ssh {
+        // under sh: a login shell such as zsh does not split `$ids` into words
         Some(host) => {
             let mut c = Command::new("ssh");
-            c.args(SSH_OPTS).args([host, &script]);
+            c.args(SSH_OPTS)
+                .args([host, &format!("exec sh -c {}", quote(&script))]);
             c
         }
         None => {
