@@ -317,12 +317,15 @@ impl Feed {
 
 impl App {
     fn new(config: &Config, store: Store, state: PathBuf) -> Arc<Self> {
-        let root = config.repos_root.clone();
-        let host = Host::new(config.host.to_string(), Reach::Local, root.clone());
+        let host = Host::new(
+            config.host.to_string(),
+            Reach::Local,
+            config.repos_root.clone(),
+        );
         let remotes = config
             .remotes
             .iter()
-            .map(|m| Host::new(m.to_string(), Reach::Ssh, root.clone()));
+            .map(|m| Host::new(m.to_string(), Reach::Ssh, config.remote_repos_root.clone()));
         Self::with(
             std::iter::once(host).chain(remotes).collect(),
             config,

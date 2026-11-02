@@ -1,38 +1,51 @@
 #!/usr/bin/env bash
-# Live test against a real cursor-agent, through its own drover serve: a temp state dir, its own
-# HTTP port, a throwaway repo. Cleans up after itself.
-#   scripts/live-test-cursor.sh      LIVE_PORT (default 7381), WAIT seconds per event (default 180),
-#                                    MODEL (default auto)
-# Each check prints `ok` or `FAIL`; exit 0 when all pass. Headless only: cursor runs a process per
-# turn, resumed by session id, and holds shell calls with the hooks drover puts in the run's cwd.
+# Live test against a real cursor-agent over ACP, through its own drover serve: a temp state dir,
+# its own HTTP port, a throwaway repo. Cleans up after itself.
+#   scripts/live-test-cursor.sh            on this machine
+#   REMOTE=chicken scripts/live-test-cursor.sh   the run on that ssh remote, drover here
+# LIVE_PORT (default 7381), WAIT seconds per event (default 180), MODEL (default auto).
+# A remote needs CURSOR_API_KEY in this environment: drover sends it on the agent's stdin.
+# Each check prints `ok` or `FAIL`; exit 0 when all pass.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cargo build -q --manifest-path "$root/Cargo.toml"
 bin=$root/target/debug/drover
-for cmd in cursor-agent herdr jq git; do
+for cmd in cursor-agent herdr jq git python3; do
   command -v "$cmd" >/dev/null || { echo "live-test-cursor needs $cmd on PATH" >&2; exit 1; }
 done
+remote=${REMOTE:-}
+if [[ -n $remote && -z ${CURSOR_API_KEY:-} ]]; then
+  echo "a remote run needs CURSOR_API_KEY: a mac's keychain is locked to ssh" >&2
+  exit 1
+fi
 
 # short: a unix socket path is capped at 108 bytes
 tmp=$(mktemp -d /tmp/drover-cur.XXXX)
 port=${LIVE_PORT:-7381}
 export DROVER_STATE_DIR=$tmp/state DROVER_CONFIG=$tmp/config.toml
+# cursor's own config, in allowlist mode so shell calls ask; your approvalMode may run everything.
+# Forwarded to a remote with the key, so the same path exists there.
+export CURSOR_CONFIG_DIR=$tmp/cursor
 # the test speaks as you
 unset DROVER_RUN
-mkdir -p "$DROVER_STATE_DIR" "$tmp/repos"
-printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\nhook_timeout = 20\n' "$tmp/repos" "$port" >"$DROVER_CONFIG"
+mkdir -p "$DROVER_STATE_DIR"
+{
+  printf 'host = "live"\nrepos_root = "%s"\nhttp_port = %s\n' "$tmp/repos" "$port"
+  [[ -z $remote ]] || printf 'remotes = ["%s"]\nremote_repos_root = "%s"\n' "$remote" "$tmp/repos"
+} >"$DROVER_CONFIG"
 
-repo=$tmp/repos/livetest
-git init -q --bare "$tmp/repos/origin.git"
-git clone -q "$tmp/repos/origin.git" "$repo" 2>/dev/null
-git -C "$repo" switch -q -c main
-# a repo with hooks of its own: they keep running, and come back as they were
-mkdir "$repo/.cursor"
-echo '{"version":1,"hooks":{}}' >"$repo/.cursor/hooks.json"
-git -C "$repo" add .cursor
-git -C "$repo" commit -q -m init
-git -C "$repo" push -q origin main
+# a shell command on the run's machine
+on() {
+  if [[ -n $remote ]]; then ssh -o BatchMode=yes "$remote" "$1"; else sh -c "$1"; fi
+}
+on "set -e
+mkdir -p $tmp/repos $tmp/cursor
+echo '{\"version\":1,\"permissions\":{\"allow\":[],\"deny\":[]},\"approvalMode\":\"allowlist\"}' >$tmp/cursor/cli-config.json
+git init -q --bare $tmp/repos/origin.git
+git clone -q $tmp/repos/origin.git $tmp/repos/livetest 2>/dev/null
+cd $tmp/repos/livetest && git switch -q -c main
+echo live >README && git add README && git -c user.name=live -c user.email=live@test commit -q -m init && git push -q origin main"
 
 "$bin" serve >"$tmp/serve.log" 2>&1 &
 serve=$!
@@ -40,8 +53,10 @@ runs=()
 cleanup() {
   for r in "${runs[@]}"; do "$bin" done "$r" >/dev/null 2>&1 || true; done
   kill "$serve" 2>/dev/null || true
-  herdr workspace list | jq -r --arg t "$tmp/" '.result.workspaces[] | select(.worktree.checkout_path // "" | startswith($t)) | .workspace_id' |
-    while read -r ws; do herdr workspace close "$ws" >/dev/null || true; done
+  on "herdr workspace list" 2>/dev/null | jq -r --arg t "$tmp/" '.result.workspaces[] | select(.worktree.checkout_path // "" | contains($t)) | .workspace_id' |
+    while read -r ws; do on "herdr workspace close $ws" >/dev/null || true; done
+  on "pkill -f '^sleep 2717$'" 2>/dev/null || true
+  [[ -z $remote ]] || on "rm -rf $tmp" || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -58,6 +73,13 @@ fail() {
 }
 # one field of drover's TOON output
 field() { awk -v k="$1:" '$1 == k { $1 = ""; sub(/^ /, ""); print; exit }'; }
+# the agent process drover keeps for a run, as drover.db records it
+pid_of() {
+  python3 -I -c 'import sqlite3, sys
+c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
+r = c.execute("SELECT pid FROM procs WHERE run = ?", (sys.argv[2],)).fetchone()
+print(r[0] if r else "")' "$DROVER_STATE_DIR/drover.db" "$1"
+}
 
 # The next event of a run whose kind matches a regex and that passes a jq condition, read from
 # `drover watch` after the run's cursor. Sets $event and moves the cursor past it.
@@ -80,106 +102,73 @@ await() {
 }
 text() { jq -r .data.text <<<"$event"; }
 
-h=$("$bin" run --harness cursor --repo livetest --branch live-c --headless --model "${MODEL:-auto}" --prompt "Reply with exactly: PONG-1" | field run)
+where=${remote:+--machine $remote}
+# shellcheck disable=SC2086
+h=$("$bin" run --harness cursor $where --repo livetest --branch live-c --model "${MODEL:-auto}" --prompt "Reply with exactly: PONG-1" | field run)
 runs+=("$h")
 await "$h" reply '.data.text | test("PONG-1")' || fail "cursor $h: first reply"
-ok "cursor $h replied: $(text)"
+ok "cursor $h on ${remote:-this machine} replied: $(text)"
 
 cwd=$("$bin" show "$h" | field cwd)
 session=$("$bin" show "$h" | field session)
 [[ $session =~ ^[0-9a-f-]{36}$ ]] || fail "cursor $h: no session"
-[[ $("$bin" show "$h" | field input) -gt 0 ]] || fail "cursor $h: no usage"
-ok "session $session, and the turn's tokens are on the run"
+[[ $("$bin" show "$h" | field mode) == headless ]] || fail "cursor $h: not headless"
+pid=$(pid_of "$h")
+[[ -n $pid ]] || fail "cursor $h: no process recorded"
 
-# no warm process: the second turn is a second process, resumed by the session
 "$bin" send "$h" "Reply with exactly: PONG-2" >/dev/null
 await "$h" reply '.data.text | test("PONG-2")' || fail "cursor $h: second reply"
+[[ $(pid_of "$h") == "$pid" ]] || fail "cursor $h: the second turn ran in another process"
 [[ $("$bin" show "$h" | field session) == "$session" ]] || fail "cursor $h: the session changed"
-ok "the second turn resumed the session: $(text)"
-
-[[ $(jq -r '.hooks.beforeShellExecution | length' "$cwd/.cursor/hooks.json") == 1 ]] || fail "cursor $h: no hooks installed in $cwd"
+ok "the second turn ran in the same warm process $pid: $(text)"
 
 "$bin" send "$h" "Run this exact shell command: touch approved.txt. Then reply with exactly: DONE-3" >/dev/null
 await "$h" needs '.data.perm != null' || fail "cursor $h: no needs for touch"
 perm=$(jq -r .data.perm <<<"$event")
+[[ $(jq -r .data.tool <<<"$event") == Shell ]] || fail "cursor $h: the needs is not a shell call: $event"
 [[ $("$bin" show "$h" | field phase) == needs ]] || fail "cursor $h: phase is not needs"
-[[ ! -e $cwd/approved.txt ]] || fail "cursor $h: approved.txt exists before the approval"
+on "test ! -e '$cwd/approved.txt'" || fail "cursor $h: approved.txt exists before the approval"
 ok "needs $perm: $(jq -c .data.input.command <<<"$event")"
 "$bin" approve "$h" "$perm" >/dev/null
 await "$h" reply || fail "cursor $h: no reply after approve"
-[[ -f $cwd/approved.txt ]] || fail "cursor $h: approved.txt was not created"
-ok "approved, and $cwd/approved.txt exists"
+on "test -f '$cwd/approved.txt'" || fail "cursor $h: approved.txt was not created"
+ok "approved, and approved.txt exists"
 
-"$bin" send "$h" "Run this exact shell command: touch denied.txt. If it is denied, quote the denial reason verbatim." >/dev/null
-await "$h" needs '.data.perm != null' || fail "cursor $h: no needs for the denied touch"
+# an edit under .cursor/ asks, even in the worktree
+"$bin" send "$h" "Use your file edit tool, not the shell, to create the file .cursor/notes.json containing {\"a\": 1}. If it is denied, quote the denial reason verbatim." >/dev/null
+await "$h" needs '.data.perm != null' || fail "cursor $h: no needs for the edit"
 perm=$(jq -r .data.perm <<<"$event")
+[[ $(jq -r .data.tool <<<"$event") == Edit ]] || fail "cursor $h: the needs is not an edit: $event"
 "$bin" deny "$h" "$perm" --reason "REASON-XYZZY no files today" >/dev/null
 await "$h" reply '.data.text | test("REASON-XYZZY")' || fail "cursor $h: the reason did not reach the reply"
-[[ ! -e $cwd/denied.txt ]] || fail "cursor $h: denied.txt was created"
-ok "denied $perm, and the reply quotes the reason: $(text | tr '\n' ' ')"
+on "test ! -e '$cwd/.cursor/notes.json'" || fail "cursor $h: notes.json was created"
+ok "denied the edit $perm, and the reply quotes the reason: $(text | tr '\n' ' ' | cut -c1-120)"
 
-# a service that stops answering: cursor's hook timeout would let the call run, so the hook gives up
-# first with a deny
-"$bin" send "$h" "Run this exact shell command: touch stopped.txt. If it is denied, say DENIED-4." >/dev/null
-await "$h" needs '.data.perm != null' || fail "cursor $h: no needs for the stopped touch"
-kill -STOP "$serve"
-sleep 25
-kill -CONT "$serve"
-await "$h" reply || fail "cursor $h: no reply after the service came back"
-[[ ! -e $cwd/stopped.txt ]] || fail "cursor $h: stopped.txt was created while the service was stopped"
-ok "serve stopped past the hook timeout: stopped.txt was not created"
-
-# the file is checked before every process: put back as the repo has it (git checkout .), ours is
-# merged again and holds the call
-git -C "$cwd" show HEAD:.cursor/hooks.json >"$cwd/.cursor/hooks.json"
-"$bin" send "$h" "Run this exact shell command: touch reinstalled.txt. If it is denied, say DENIED-5." >/dev/null
-await "$h" needs '.data.perm != null' || fail "cursor $h: the hooks were not put back for the next turn"
-perm=$(jq -r .data.perm <<<"$event")
-"$bin" deny "$h" "$perm" --reason "not now" >/dev/null
-await "$h" reply || fail "cursor $h: no reply after the reinstalled deny"
-[[ ! -e $cwd/reinstalled.txt ]] || fail "cursor $h: reinstalled.txt was created unheld"
-ok "hooks.json reset mid-run: the next turn held its call"
-
-# drover's file is out of `git add -A`
-git -C "$cwd" add -A
-[[ -z $(git -C "$cwd" diff --cached --name-only | grep -F .cursor) ]] || fail "cursor $h: git add -A took .cursor/hooks.json"
-git -C "$cwd" reset -q
-ok "git add -A leaves the hooks file out"
-
-# a tool the agent started is gone with it
+# stop cancels the turn, and the tool it runs goes with it
 "$bin" send "$h" "Run this exact shell command in the foreground: sleep 2717. It waits on purpose; that is expected." >/dev/null
 await "$h" needs '.data.perm != null' || fail "cursor $h: no needs for sleep"
 "$bin" approve "$h" "$(jq -r .data.perm <<<"$event")" >/dev/null
-for _ in $(seq 60); do pgrep -f '^sleep 2717$' >/dev/null && break; sleep 0.5; done
-pgrep -f '^sleep 2717$' >/dev/null || fail "cursor $h: sleep never ran"
+for _ in $(seq 60); do on "pgrep -f '^sleep 2717$'" >/dev/null && break; sleep 0.5; done
+on "pgrep -f '^sleep 2717$'" >/dev/null || fail "cursor $h: sleep never ran"
 "$bin" stop "$h" >/dev/null
-for _ in $(seq 30); do pgrep -f '^sleep 2717$' >/dev/null || break; sleep 0.5; done
-if pgrep -f '^sleep 2717$' >/dev/null; then
-  pkill -f '^sleep 2717$'
-  fail "stop $h left its tool running"
-fi
-ok "stop $h ended cursor-agent and the sleep it ran"
+await "$h" reply || fail "cursor $h: no reply after stop"
+for _ in $(seq 30); do on "pgrep -f '^sleep 2717$'" >/dev/null || break; sleep 0.5; done
+on "pgrep -f '^sleep 2717$'" >/dev/null && fail "stop $h left its tool running"
+[[ $("$bin" show "$h" | field phase) == idle ]] || fail "cursor $h: not idle after stop"
+[[ $(pid_of "$h") == "$pid" ]] || fail "cursor $h: stop ended the process"
+ok "stop $h cancelled the turn and the sleep, and the process stays warm"
+
+# the agent dies between turns: the next send loads its session in a new process
+on "kill -9 $pid"
+for _ in $(seq 50); do [[ -z $(pid_of "$h") ]] && break; sleep 0.2; done
+[[ -z $(pid_of "$h") ]] || fail "cursor $h: drover did not see the process die"
+[[ $("$bin" show "$h" | field phase) == idle ]] || fail "cursor $h: a process that died idle failed the run"
+"$bin" send "$h" "What exact word did you reply with in your very first reply in this conversation? Reply with that word only." >/dev/null
+await "$h" reply '.data.text | test("PONG-1")' || fail "cursor $h: the resumed session does not know its history"
+[[ $("$bin" show "$h" | field session) == "$session" ]] || fail "cursor $h: the session changed on resume"
+[[ $(pid_of "$h") != "$pid" ]] || fail "cursor $h: no new process"
+ok "kill -9 $pid, then session/load in process $(pid_of "$h"): $(text)"
 
 "$bin" done "$h" >/dev/null
 runs=()
-# the file goes back once the process is gone
-for _ in $(seq 30); do [[ -z $(git -C "$cwd" status --porcelain -- .cursor) ]] && break; sleep 0.5; done
-[[ -z $(git -C "$cwd" status --porcelain -- .cursor) ]] || fail "cursor $h: the repo's .cursor/hooks.json was not restored"
-ok "done $h, and the repo's own .cursor/hooks.json is back as it was"
-
-# hooks.json edited during a run stays edited: yours, without drover's entries
-e=$("$bin" run --harness cursor --repo livetest --branch live-e --headless --model "${MODEL:-auto}" --prompt "Reply with exactly: PONG-E" | field run)
-runs+=("$e")
-await "$e" reply || fail "cursor $e: no reply"
-cwd=$("$bin" show "$e" | field cwd)
-jq '.hooks.afterFileEdit = [{"command": "./fmt.sh"}]' "$cwd/.cursor/hooks.json" >"$tmp/edited.json"
-cp "$tmp/edited.json" "$cwd/.cursor/hooks.json"
-"$bin" done "$e" >/dev/null
-runs=()
-for _ in $(seq 30); do grep -q "kept yours" "$tmp/serve.log" && break; sleep 0.5; done
-[[ $(jq -r '.hooks.afterFileEdit[0].command' "$cwd/.cursor/hooks.json") == ./fmt.sh ]] || fail "cursor $e: the edit was lost on done"
-[[ $(jq -r '.hooks | [.. | strings | select(contains("hook"))] | length' "$cwd/.cursor/hooks.json") == 0 ]] || fail "cursor $e: drover's hooks stayed in the file"
-grep -q "kept yours" "$tmp/serve.log" || fail "cursor $e: the kept file was not reported"
-ok "an edit made during the run is kept on done, and said so"
-
 echo "all checks passed"

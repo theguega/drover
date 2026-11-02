@@ -19,7 +19,8 @@ pub enum Reach {
     Ssh,
 }
 
-// A machine as drover reaches it. Only the host's own shell gets `repos_root`; a remote's comes from its dotfiles.
+// A machine as drover reaches it. The host's shell gets `repos_root`; a remote's comes from its
+// dotfiles, unless the config's `remote_repos_root` names one.
 #[derive(Clone)]
 pub struct Host {
     pub name: String,
@@ -36,7 +37,7 @@ impl Host {
             name,
             reach,
             link: Arc::new(Link::new(host)),
-            repos_root: repos_root.filter(|_| reach == Reach::Local),
+            repos_root,
         }
     }
 
@@ -216,8 +217,15 @@ struct Out {
 async fn sh(m: &Host, script: &str, timeout: Duration) -> Result<Out> {
     let mut cmd = match m.reach {
         Reach::Ssh => {
+            let script = match &m.repos_root {
+                Some(root) => format!(
+                    "export REPOS_ROOT={} && {script}",
+                    quote(&root.to_string_lossy())
+                ),
+                None => script.into(),
+            };
             let mut c = Command::new("ssh");
-            c.args(SSH_OPTS).args([&m.name, script]);
+            c.args(SSH_OPTS).args([&m.name, &script]);
             c
         }
         Reach::Local => {

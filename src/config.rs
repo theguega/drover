@@ -4,6 +4,7 @@
 //   host = "meerkat"                 # this machine's name, as herdr's machine label (default "host")
 //   remotes = ["chicken", "dog"]     # ssh names whose herdr server already runs
 //   repos_root = "~/.drover-workspace"   # given to drover-wt on this machine as REPOS_ROOT
+//   remote_repos_root = "/tmp/repos" # given to drover-wt on every remote, absolute (default: its own)
 //   v1_state = "~/Developer/drover/state.json"   # migrated into a new drover.db, once
 //   http_port = 7341                 # hooks, events and approvals, on 127.0.0.1 only
 //   hook_timeout = 600               # seconds a tool call waits for your approve or deny
@@ -52,6 +53,7 @@ pub struct Config {
     pub host: Machine,
     pub remotes: Vec<Machine>,
     pub repos_root: Option<PathBuf>,
+    pub remote_repos_root: Option<PathBuf>,
     pub v1_state: Option<PathBuf>,
     pub http_port: u16,
     pub hook_timeout: u64,
@@ -73,6 +75,7 @@ impl Config {
             host: "host".parse()?,
             remotes: Vec::new(),
             repos_root: None,
+            remote_repos_root: None,
             v1_state: None,
             http_port: 7341,
             hook_timeout: 600,
@@ -106,6 +109,10 @@ impl Config {
                         .collect::<Result<_>>()?;
                 }
                 "repos_root" => c.repos_root = Some(expand(string(value).ok_or_else(bad)?)),
+                // a path on the remotes, so not expanded here
+                "remote_repos_root" => {
+                    c.remote_repos_root = Some(string(value).ok_or_else(bad)?.into());
+                }
                 "v1_state" => c.v1_state = Some(expand(string(value).ok_or_else(bad)?)),
                 "http_port" => c.http_port = value.parse().map_err(|_| bad())?,
                 "hook_timeout" => c.hook_timeout = value.parse().map_err(|_| bad())?,
