@@ -68,7 +68,7 @@ ln -sfn "$root/target/release/drover" "$bin/drover"
 
 zsh=$(command -v zsh || true)
 [[ -n "$zsh" ]] || { echo "the service starts through zsh: install it first" >&2; exit 1; }
-# zsh -c, so the login dotfiles' PATH and REPOS_ROOT apply
+# a login zsh, so the PATH set in ~/.zshenv or ~/.zprofile (Homebrew's shellenv) applies
 run="exec ./target/release/drover serve"
 
 case "$(uname -s)" in
@@ -81,7 +81,7 @@ After=network-online.target
 
 [Service]
 WorkingDirectory=$root
-ExecStart=$zsh -c '$run'
+ExecStart=$zsh -lc '$run'
 Restart=always
 RestartSec=10
 
@@ -104,7 +104,7 @@ UNIT
 <dict>
   <key>Label</key><string>dev.drover</string>
   <key>WorkingDirectory</key><string>$root</string>
-  <key>ProgramArguments</key><array><string>$zsh</string><string>-c</string><string>$run</string></array>
+  <key>ProgramArguments</key><array><string>$zsh</string><string>-lc</string><string>$run</string></array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$root/drover.log</string>

@@ -44,7 +44,7 @@ dashboard ─ 127.0.0.1:7341 ─▶      │  ▲ hooks (http)
 
 ## Dotfiles
 
-drover ships with its own worktree tool (`bin/drover-wt`), linked to `~/.local/bin` by `install.sh`, and its own skill. Your desk is personal and lives in your dotfiles: herdr's keybindings, a `wt` alias, and the env (`PATH`, `REPOS_ROOT`, `HERDR_WORKTREE_PREFIX`) in your shell's env file. Those point at `drover-wt`. drover reads none of them itself, except `repos_root` from its config, given to drover-wt on the host. The service starts through `zsh -c`, and ssh runs the login shell, so every machine's own dotfiles decide.
+drover ships with its own worktree tool (`bin/drover-wt`), linked to `~/.local/bin` by `install.sh`, and its own skill. Your desk is personal and lives in your dotfiles: herdr's keybindings, a `wt` alias, and the env (`PATH`, `REPOS_ROOT`, `HERDR_WORKTREE_PREFIX`) in your shell's env file. Those point at `drover-wt`. drover reads none of them itself, except `repos_root` from its config, given to drover-wt on the host. The service starts through `zsh -lc`, and ssh runs the login shell, so every machine's own dotfiles decide.
 
 Remotes need `drover-wt` on PATH, so they run `install.sh --remote` too.
 
