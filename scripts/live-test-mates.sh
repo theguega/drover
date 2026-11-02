@@ -32,11 +32,16 @@ git -C "$repo" push -q origin main
 serve=$!
 runs=()
 cleanup() {
+  trap '' INT TERM HUP
   for r in "${runs[@]}"; do "$bin" done "$r" >/dev/null 2>&1 || true; done
   kill "$serve" 2>/dev/null || true
   rm -rf "$tmp"
 }
+# a signal exits, and the EXIT trap cleans up once
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 for _ in $(seq 50); do [[ -S $DROVER_STATE_DIR/drover.sock ]] && break; sleep 0.1; done
 
 ok() { echo "ok   $*"; }

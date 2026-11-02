@@ -13,8 +13,11 @@ for cmd in claude herdr jq curl git; do
   command -v "$cmd" >/dev/null || { echo "live-test needs $cmd on PATH" >&2; exit 1; }
 done
 
+source "$root/scripts/live-lib.sh"
+live_sweep /tmp/drover-live herdr
 # short: a unix socket path is capped at 108 bytes
 tmp=$(mktemp -d /tmp/drover-live.XXXX)
+echo $$ >"$tmp/owner"
 port=${LIVE_PORT:-7399}
 export DROVER_STATE_DIR=$tmp/state DROVER_CONFIG=$tmp/config.toml
 # the test speaks as you
@@ -37,14 +40,18 @@ git -C "$repo" push -q origin main
 serve=$!
 runs=()
 cleanup() {
+  trap '' INT TERM HUP
   for r in "${runs[@]}"; do "$bin" done "$r" >/dev/null 2>&1 || true; done
   kill "$serve" 2>/dev/null || true
   # herdr also opens a workspace on the main clone
-  herdr workspace list | jq -r --arg t "$tmp/" '.result.workspaces[] | select(.worktree.checkout_path // "" | startswith($t)) | .workspace_id' |
-    while read -r ws; do herdr workspace close "$ws" >/dev/null || true; done
+  live_close_workspaces "$tmp" herdr
   rm -rf "$tmp"
 }
+# a signal exits, and the EXIT trap cleans up once
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 for _ in $(seq 50); do [[ -S $DROVER_STATE_DIR/drover.sock ]] && break; sleep 0.1; done
 
 ok() { echo "ok   $*"; }

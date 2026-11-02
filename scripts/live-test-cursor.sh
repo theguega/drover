@@ -21,8 +21,13 @@ if [[ -n $remote ]] && ! ssh -o BatchMode=yes "$remote" 'env -i HOME="$HOME" PAT
   exit 1
 fi
 
+source "$root/scripts/live-lib.sh"
+# the herdr that holds the run's workspaces: here, or on the remote
+herdr_on() { if [[ -n $remote ]]; then ssh -o BatchMode=yes "$remote" herdr "$@"; else herdr "$@"; fi; }
+live_sweep /tmp/drover-cur herdr_on
 # short: a unix socket path is capped at 108 bytes
 tmp=$(mktemp -d /tmp/drover-cur.XXXX)
+echo $$ >"$tmp/owner"
 port=${LIVE_PORT:-7381}
 export DROVER_STATE_DIR=$tmp/state DROVER_CONFIG=$tmp/config.toml
 # cursor's own config, in allowlist mode so shell calls ask; your approvalMode may run everything.
@@ -52,17 +57,21 @@ echo live >README && git add README && git -c user.name=live -c user.email=live@
 serve=$!
 runs=()
 cleanup() {
+  trap '' INT TERM HUP
   for r in "${runs[@]}"; do "$bin" done "$r" >/dev/null 2>&1 || true; done
   kill "$serve" 2>/dev/null || true
   # serve's hooks tunnel outlives a SIGTERM to it
   [[ -z $remote ]] || pkill -f -- "-R 127.0.0.1:$port:127.0.0.1:$port $remote" || true
-  on "herdr workspace list" 2>/dev/null | jq -r --arg t "$tmp/" '.result.workspaces[] | select(.worktree.checkout_path // "" | contains($t)) | .workspace_id' |
-    while read -r ws; do on "herdr workspace close $ws" >/dev/null || true; done
+  live_close_workspaces "$tmp" herdr_on
   on "pkill -f '^sleep 2717$'" 2>/dev/null || true
   [[ -z $remote ]] || on "rm -rf $tmp" || true
   rm -rf "$tmp"
 }
+# a signal exits, and the EXIT trap cleans up once
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 for _ in $(seq 50); do [[ -S $DROVER_STATE_DIR/drover.sock ]] && break; sleep 0.1; done
 
 ok() { echo "ok   $*"; }
