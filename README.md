@@ -7,7 +7,8 @@ drover calls no model itself. The agents are the CLIs you already use.
 ## What you get
 
 - **Runs:** `drover run` opens a worktree and starts the agent in a herdr pane, or `--headless` over its stream. drover follows it through the agent's own hooks and stream, and keeps its phase, owner, usage and last reply in `~/.local/state/drover/drover.db`.
-- **Approvals:** a tool call that needs a permission waits for `drover approve` or `drover deny --reason`, in both modes. Claude runs use permission mode `auto`, so only what auto mode escalates (an `ask` rule) reaches you; `drover run --permission-mode default` asks for every call outside the allowlist.
+- **Harnesses:** Claude Code (`--harness claude`, the default, pane or headless), and Cursor and pi over ACP (`--harness cursor`, `--harness pi`, headless; `attach` opens their TUI). pi needs `pi-acp` on PATH (`npm i -g pi-acp`). A remote Cursor run logs in with `CURSOR_API_KEY` from the service's environment.
+- **Approvals:** a tool call that needs a permission waits for `drover approve` or `drover deny --reason`. Claude runs use permission mode `auto`, so only what auto mode escalates (an `ask` rule) reaches you; `drover run --permission-mode default` asks for every call outside the allowlist. Cursor asks what its own `approvalMode` says to ask; pi asks nothing.
 - **Nothing runs without you:** a run another agent asks for (`--parent`) waits as `pending` until you `drover approve-run` it.
 - **Mates:** a mate is a run that follows the `mates` skill: it plans a goal graph, requests crew, hears them through `drover wait`, approves their tool calls, and asks you only through `drover escalate`.
 - **`drover-wt`:** worktrees for herdr, from a branch, a new name, or a GitHub pull request (`#123`).
@@ -47,6 +48,8 @@ drover keys r-1a2b3c esc enter
 drover run --repo myrepo --branch fix-y --headless --model haiku --prompt "…"   # no pane; warm for the next send
 drover approve r-1a2b3c p1   # allow the tool call it waits on; deny r-1a2b3c p1 --reason "…"
 drover attach r-1a2b3c       # a headless run reopens in a pane, as yours
+drover run --harness cursor --repo myrepo --branch z --model auto --prompt "…"   # cursor over ACP, headless
+drover send r-1a2b3c "Plan"  # answers the question a cursor run asks (an option's label, or your own words)
 drover approve-run r-4d5e6f  # start a run an agent asked for; drop-run removes it
 drover done r-1a2b3c --remove --entry "what, why, outcome"   # brain log, close, remove the worktree
 drover run --role mate --repo myrepo --branch mate-x --headless --prompt "the goal"   # a mate, see Mates

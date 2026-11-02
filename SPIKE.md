@@ -169,7 +169,7 @@ With `HOLD=20`: `start ...707.64`, `end ...727.64`, total run 30.1 s, against 15
 ## 7. cursor-agent, found building the adapter
 
 - No warm process: `--input-format` is unknown, a prompt is argv or stdin to EOF. `--resume <chatId>` keeps the session id, and a hook's `session_id` is the stream's.
-- A hook command with `://` in it is skipped without a word (no error, the call just runs), so `drover hook` takes `host:port/path`. Hooks come from `.cursor/hooks.json` in the project, `~/.cursor/hooks.json`, or `/etc/cursor/hooks.json`; no flag or env.
+- A hook command with `://` in it is skipped without a word (no error, the call just runs), so the hook command drover had then took `host:port/path`. Hooks come from `.cursor/hooks.json` in the project, `~/.cursor/hooks.json`, or `/etc/cursor/hooks.json`; no flag or env.
 - A 75 s hold with `"timeout": 120` was honored. A denied call is a `tool_call` `completed` with `rejected.reason`, and the model quotes the `user_message`.
 - The TUI fires `sessionStart`, `beforeSubmitPrompt`, `afterAgentResponse` (the turn's whole text, once) and `stop`; `-p` fires `sessionStart` and the before hooks, not `stop`. `{}` answers them. Its trust dialog takes the first typed prompt: `--trust`.
 
@@ -204,3 +204,36 @@ Consequences:
 - Auto mode and the hook coexist: `--permission-mode auto --settings <hook>` loads both, and the hook sees what would otherwise go to the user.
 - With auto, drover's `needs` events are the rare calls: ask rules, and (untested) whatever the classifier hands back. A harmless worktree command never reaches drover.
 - The deterministic way to get an escalation in a test is an `ask` rule in the worktree's `.claude/settings.local.json`.
+
+## 9. Cursor and pi over ACP
+
+Run on 2026-11-01, Linux (meerkat) and macOS (chicken, over ssh), `cursor-agent` 2026.10.22-27dcf5f; `pi-acp` 0.0.34 and pi 0.85.1 read, not run (no working provider here). The ACP types are those of `@agentclientprotocol/sdk` 0.26.0 (`dist/schema/types.gen.d.ts`).
+
+**Driver.** A 40-line Python client in a scratch dir spawned `cursor-agent acp` in `/tmp/drover-acp/probe` (a fresh git repo), wrote one JSON-RPC request a line (`initialize` with `clientCapabilities` `fs` and `terminal` off, `authenticate`, `session/new {cwd, mcpServers: []}`, then a `session/prompt` per prompt read from its stdin), logged every line both ways, and answered `session/request_permission` with `allow-once`, or with `reject-once` and then `session/cancel`. A second process sent `session/load` on the first's session id. Cursor's own config dir was `CURSOR_CONFIG_DIR=/tmp/drover-acp/cfg`, holding only `{"version":1,"permissions":{"allow":[],"deny":[]},"approvalMode":"allowlist"}`. The bundle quoted below is `~/.local/share/cursor-agent/versions/2026.10.22-27dcf5f/*.index.js`.
+
+| # | Finding |
+|---|---|
+| 1 | `authenticate` with `cursor_login` starts a browser login even when the CLI is logged in, and fails headless: `{"code":-32602,"message":"Invalid params","data":{"message":"Failed to open browser for login. Please visit: https://cursor.com/loginDeepControl?…"}}`. `session/new` works without it, on the CLI's own login or `CURSOR_API_KEY`. drover does not send it |
+| 2 | Whether a call asks is cursor's own `approvalMode` (`cli-config.json` in `CURSOR_CONFIG_DIR`, default `~/.cursor`). With `unrestricted` (this desk's), no `session/request_permission` ever came: `touch`, `curl`, `git add`, an edit all ran. With `allowlist`, a shell call asks (the request's content says `Shell allowlist is empty`); an edit in the workspace does not; an edit under `.cursor/` does (`checkCursorFileProtection`, a team setting); an edit outside the workspace does unless it is under `/tmp/`, `/var/tmp/` or `/var/folders/` |
+| 3 | The answer has no reason: `RequestPermissionOutcome` is `cancelled` or `selected {optionId}`, and cursor maps a reject to `{approved: false, reason: "User rejected"}` (`requestPermission` in `6136.index.js`); `_meta` is not read. So drover rejects, sends `session/cancel`, and when the prompt returns (`stopReason: cancelled`) sends `drover: the user denied <title>: <reason>` as the next prompt. The model quotes it (§9 live test: `REASON-XYZZY no files today`) |
+| 4 | `allow-always` writes the call to the allowlist in `cli-config.json` (`persistAllowlistEntry`). drover answers `allow_once` only |
+| 5 | Request ids from the agent start at 0. The request carries `toolCall {toolCallId, title, kind, status, content}`, no `rawInput`; the `tool_call` update before it has `rawInput` (`{"command": "touch x"}`), and an edit's request a `diff` block with its `path` |
+| 6 | `session/load` replays the history as `session/update`s (`user_message_chunk`, agent chunks, `tool_call` with ids `replay-0-2`, …) before it answers; afterwards the model knows the conversation (asked for its first reply, it said `PONG-1`) |
+| 7 | No `usage` in the `session/prompt` response and no `usage_update`: cursor reports no tokens or cost over ACP |
+| 8 | `session/cancel` during an approved `sleep 2717` ended the sleep, the prompt returned `stopReason: cancelled`, and the process took the next prompt |
+| 9 | If the client errors on `cursor/ask_question`, cursor asks each single-choice question as a `session/request_permission` whose options are the answers (`ask-question` handler); drover serves `cursor/ask_question` itself |
+| 10 | On a mac over ssh, `cursor-agent` exits at start with `Error: Your macOS login keychain is locked.` (`--version` too). The check is skipped for `AGENT_CLI_CREDENTIAL_STORE=memory` (`credential-store.ts`); with that and `CURSOR_API_KEY`, `cursor-agent acp` on chicken answered `PONG` (`cursor-agent status` still says `Not logged in`) |
+| 11 | pi-acp spawns `pi --mode rpc --no-themes` (only `--session <file>` added; `PI_ACP_PI_COMMAND` replaces the binary, not the arguments). Its ACP session id is pi's own session id, so `pi --session <id>` opens it. Its session modes are pi's thinking levels. It asks `session/request_permission` only for an extension's UI (`confirm`, `select`): pi itself has no permissions. pi reads `defaultTools` from `<cwd>/.pi/settings.json` (`settingsManager.getDefaultTools`), the reader's closest read-only mode |
+
+```
+>> {"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"sessionId":"ac8cef79-…","prompt":[{"type":"text","text":"Run this exact shell command: touch spike.txt. Then say DONE."}]}}
+<< {"jsonrpc":"2.0","method":"session/update","params":{…,"update":{"sessionUpdate":"tool_call","toolCallId":"call-4e19…","title":"`touch spike.txt`","kind":"execute","status":"pending","rawInput":{"command":"touch spike.txt"}}}}
+<< {"jsonrpc":"2.0","id":0,"method":"session/request_permission","params":{…,"toolCall":{"toolCallId":"call-4e19…","title":"`touch spike.txt`","kind":"execute","status":"pending","content":[{"type":"content","content":{"type":"text","text":"Shell allowlist is empty"}}]},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"allow-always","name":"Allow always","kind":"allow_always"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}
+>> {"jsonrpc":"2.0","id":0,"result":{"outcome":{"outcome":"selected","optionId":"allow-once"}}}
+<< {"jsonrpc":"2.0","method":"session/update","params":{…,"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-4e19…","status":"completed","rawOutput":{"exitCode":0,"stdout":"","stderr":""}}}}
+<< {"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}
+```
+
+The live test is `scripts/live-test-cursor.sh` (and `REMOTE=chicken`): a reply, a second turn in the same process, a shell call approved, an edit under `.cursor/` denied with a reason the reply quotes, `stop` during a running tool, and a resume by `session/load` after `kill -9` of the agent. Both pass.
+
+Not tested: pi over ACP live; `cursor/ask_question` and `cursor/create_plan` from a real cursor (the unit tests use the documented shapes); MCP calls.

@@ -23,10 +23,11 @@ The binary is the authority for syntax: `drover --help`, `drover <command> --hel
 drover run --repo <repo> --branch <branch> --prompt <prompt>   # starts now; - reads the prompt from stdin
 drover run … --permission-mode <mode>   # Claude only; default auto: harmless calls run unasked, only what auto mode escalates is a `needs`. `default` asks for every call outside the allowlist
 drover run --role mate --repo <repo> --branch <branch> --headless --prompt <goal>   # a mate, see below
+drover run --harness cursor|pi …   # over ACP, always headless; `attach` opens the agent's own TUI on the session
 drover ls [--role --machine --phase --all]
 drover show <run>                  # phase, owner, last reply (first and last 300 chars), children, a mate's goal graph and question
 drover reply <run>                 # the whole last reply
-drover send <run> <text>           # the next prompt, only while idle
+drover send <run> <text>           # the next prompt, only while idle; or the answer to a cursor run's question (`needs` with tool AskQuestion)
 drover approve <run> <perm> · deny <run> <perm> --reason <why>   # a tool call in `needs`; `show` lists perms
 drover watch [--run --role --since]   # events as JSON lines: started, text, tool_start, tool_end, needs, reply, done, failed
 drover approve-run <run> · drop-run <run>   # a run a mate asked for, pending
@@ -46,7 +47,7 @@ drover escalate --text <question>      # a run asks you; - reads it from stdin
 
 ## Read the output
 
-Output is TOON: `key: value` lines, lists as `name[count]{fields}:` with one row per record. Errors print `error:` and `help:` with exit 1; exit 2 is a usage error. A change prints the run first, then `help:` with the next commands. `not implemented` marks a command a later version builds (`--scratch`, harnesses other than claude).
+Output is TOON: `key: value` lines, lists as `name[count]{fields}:` with one row per record. Errors print `error:` and `help:` with exit 1; exit 2 is a usage error. A change prints the run first, then `help:` with the next commands. `not implemented` marks a command a later version builds (`--scratch`, harnesses other than claude, cursor and pi).
 
 ## Mates
 

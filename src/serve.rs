@@ -1909,6 +1909,11 @@ impl App {
                 if let Some(p) = locked(&self.procs).get(id) {
                     let _ = p.stdin.send(line);
                 }
+                // a needs with nothing waiting would read as an escalation
+                if r.phase == Phase::Needs && self.has_waiting(id) {
+                    r.phase = Phase::Working;
+                    self.save(&r)?;
+                }
                 self.deny_waiting(id, None);
                 return Ok(self.brief(&r));
             }

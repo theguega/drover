@@ -2,7 +2,7 @@
 
 drover runs coding agents. It starts them in git worktrees, on this machine or over ssh. It runs them either in a herdr pane, for you to pair with, or headless, for the dashboard and for other agents. It carries their approvals and streams their events. It calls no model and holds no knowledge: when a task ends, its journal entry goes to `brain log`.
 
-Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude, Cursor and pi adapters (pane and headless; pi's not yet run live), events and SSE, approvals, profiles, per-run usage. Mates: `--role mate`, `goal`, `wait`, `escalate`. Not yet: plan-window usage, the dashboard.
+Status: design, round 3. Replaces the `mates` branch design. Requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude adapter (pane and headless) and one ACP adapter for Cursor and pi (headless; pi's not yet run live), events and SSE, approvals, profiles, per-run usage. Mates: `--role mate`, `goal`, `wait`, `escalate`. Not yet: plan-window usage, the dashboard.
 
 ## What changes from v1
 
@@ -57,30 +57,32 @@ struct Run {
 
 ## Harness adapter (C12)
 
-There is one native adapter per harness behind one trait (Q13). Each adapter maps its harness's own protocol to the shared event type.
+There is one adapter per protocol behind one trait (Q13): Claude's own, and ACP (the Agent Client Protocol) for every harness that speaks it. Each maps its protocol to the shared event type.
 
 ```rust
 trait Harness {
-    fn caps(&self) -> Caps;                          // headless, resume, approvals, usage, hooks: declared, never guessed
-    fn start(&self, spec: &StartSpec) -> Vec<String>; // the command line: pane or headless, profile, model, resume, hooks
-    fn send(&self, text: &str) -> String;            // a prompt, as one stdin line
-    fn respond(&self, d: &Decision) -> Answer;       // to the waiting hook, or onto stdin
-    fn abort(&self) -> Abort;                        // kill, or an interrupt line
-    fn events(&self, line: &str, p: &mut Parse) -> Vec<Out>;  // one stdout line, normalized
-    fn hook_settings(&self, spec: &StartSpec) -> Value;       // what makes the harness post to drover
-    fn hook(&self, body: &Value) -> Vec<Out>;                 // one hook it posted
+    fn caps(&self) -> Caps;                          // headless, pane, resume, approvals, usage, hooks: declared, never guessed
+    fn start(&self, spec: &StartSpec) -> Vec<String>; // the command line: headless, or the pane's TUI; profile, model, resume
+    fn open(&self, spec: &StartSpec, p: &mut Parse) -> Vec<String>;  // lines written first (ACP: initialize)
+    fn send(&self, text: &str, p: &mut Parse) -> Vec<String>;        // a prompt, as stdin lines
+    fn abort(&self, p: &mut Parse) -> Abort;                         // kill, or an interrupt line
+    fn events(&self, line: &str, p: &mut Parse) -> Vec<Out>;         // one stdout line, normalized
+    fn answer(&self, d: &Decision, call: &Value, p: &mut Parse) -> Vec<String>; // a permission asked on stdout
+    fn hook(&self, body: &Value) -> Vec<Out>;        // one hook it posted
+    fn respond(&self, d: &Decision) -> Value;        // to the waiting hook
+    fn forward(&self) -> &'static [&'static str];    // env a remote process reads from its stdin
 }
 ```
 
-The adapter is the protocol only, as pure functions. Spawning the process (here or over ssh), its pipes, idle kill, and what events do to a run are the same for every harness and live in drover once. Cursor's command hook reaches the same endpoint through `drover hook`; pi's extension posts to the same endpoint, so it answers through the hook as Claude does (`Answer::Stdin` is for a harness with no hook).
+The adapter is the protocol only, as pure functions over a per-process state. Spawning the process (here or over ssh), its pipes, idle kill, and what events do to a run are the same for every harness and live in drover once. Claude asks through an `http` hook; an ACP agent asks on its stdout and hears the answer on its stdin.
 
 | Harness | Headless | Approvals | Pane observation | Ships |
 |---|---|---|---|---|
 | Claude Code | `claude -p --input-format stream-json --output-format stream-json --verbose` | `PermissionRequest` `http` hook to drover. Same path as pane mode | `http` hooks via `--settings` | day one |
-| Cursor | `cursor-agent -p --output-format stream-json --stream-partial-output` (`--mode ask` for the reader profile) | `-p` gets every tool with no prompt, so a `beforeShellExecution` / `beforeMCPExecution` command hook calls `drover hook` and blocks on drover's answer (built) | the same hooks.json, `sessionStart`/`stop` | day one |
+| Cursor | `cursor-agent acp` (ACP; mode `ask` for the reader profile) | `session/request_permission`, `cursor/ask_question`, `cursor/create_plan` on stdout, answered on stdin, no deadline | none: headless only; `attach` opens `cursor-agent --resume` in a pane | built |
 | Codex | `codex app-server` (JSON-RPC over stdio) | `requestApproval` server→client requests | hooks.json | when used |
 | opencode | `opencode serve` + SSE `/event` | `POST /session/:id/permissions/:pid` | subscribe to the TUI's own server | when used |
-| pi | `pi --mode rpc` | `tool_call` extension (`harness/pi.ts`) posting to drover | the same extension in the TUI | built |
+| pi | `pi-acp` (ACP over `pi --mode rpc`) | none of its own; an extension's `ctx.ui.confirm` arrives as `session/request_permission` | none: headless only; `attach` opens `pi --session` | built, not run live |
 
 Login: Claude runs the unmodified `claude` binary with your own login (allowed, D6). Other harnesses use API keys or their own providers, never Claude OAuth.
 
@@ -128,7 +130,7 @@ How it works for Claude, decided: a `PermissionRequest` `http` hook in both mode
 
 The approval flow:
 
-1. `permission_request` from the harness becomes a `needs` event, and the phase changes to `needs`.
+1. `permission_request` from the harness becomes a `needs` event, and the phase changes to `needs`. An ACP agent waits for the answer as long as it takes; a hook is answered before its timeout (5).
 2. The owner answers with `drover approve|deny <run> <perm>`, or the dashboard calls `POST /runs/:id/permissions/:perm`.
 3. A crew run's approvals go to its mate when the mate owns it. Otherwise they go to you.
 4. Nothing is approved automatically. Approval rules live in the harness's own settings (its allowlists), not in drover.
@@ -188,7 +190,7 @@ Output follows C4 (shared with brain). `--help` is the only place flags are docu
 
 - **CLI path:** a unix socket at `~/.local/state/drover/drover.sock`, mode 600, with one JSON line per request (kept from v1).
 - **Dashboard path:** HTTP and SSE on `127.0.0.1:7341`, behind the BFF and oauth2-proxy. It never listens on a public interface.
-- **Remote machines:** a client on another host is `drover-ssh`, which runs the CLI on the host in `DROVER_HOST`. A headless run on a remote machine is `ssh <machine> <harness headless cmd>`, and its stdio is the stream. A pane run on a remote machine uses that machine's herdr, as today.
+- **Remote machines:** a client on another host is `drover-ssh`, which runs the CLI on the host in `DROVER_HOST`. A headless run on a remote machine is `ssh <machine> <harness headless cmd>`, and its stdio is the stream. A key the harness needs there (`CURSOR_API_KEY`) goes first on that stdin, never on a command line. A pane run on a remote machine uses that machine's herdr, as today.
 
 ## Storage
 
@@ -222,7 +224,7 @@ Everything lives in `~/.local/state/drover/`. Config is in `~/.config/drover/con
 ## Decided
 
 - Pane and headless are both first-class (D4). The terminal workflow stays.
-- One native adapter per harness. Claude and Cursor on day one (Q13).
+- One adapter per protocol: Claude's own (stream-json and hooks; the Claude ACP adapter is built on the Agent SDK, which needs an API key), and ACP for Cursor and pi (Q13, SPIKE.md §9).
 - Nothing runs without your approval: `autostart = "never"`, and actor runs requested by mates, chat or the planner wait in `pending`.
 - Claude approvals go through a `PermissionRequest` `http` hook in both modes. The fallback is an MCP permission tool.
 - Mates are a skill plus `role: mate`. drover stores and streams the graph (D11, C16).
