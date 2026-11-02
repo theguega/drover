@@ -132,6 +132,7 @@ The approval flow:
 2. The owner answers with `drover approve|deny <run> <perm>`, or the dashboard calls `POST /runs/:id/permissions/:perm`.
 3. A crew run's approvals go to its mate when the mate owns it. Otherwise they go to you.
 4. Nothing is approved automatically. Approval rules live in the harness's own settings (its allowlists), not in drover.
+   - Claude actors run in permission mode `auto` (the desk's choice), pane and headless; `drover run --permission-mode <mode>` picks another, and a non-Claude harness refuses it. Auto mode runs harmless calls without asking, so the hook fires only for what it escalates: an `ask` rule from any settings file (tested), and perhaps a classifier denial (not tested, SPIKE.md §8). Without auto (`--permission-mode default`), every call outside the allowlist is a `needs`.
 5. Long waits: if you answer after the hook's timeout, drover returns `deny` with the reason "awaiting approval". When you approve later, drover resumes the session (`--resume`) with the approval in the prompt, so an approval given an hour later from the phone isn't lost.
 
 ## Profiles

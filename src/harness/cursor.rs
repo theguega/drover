@@ -291,6 +291,7 @@ mod tests {
             headless,
             profile,
             model: Some("auto"),
+            permission_mode: None,
             resume: None,
             hooks: "http://127.0.0.1:7341/hooks/r-00000a",
             hook_timeout: 600,

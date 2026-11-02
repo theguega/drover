@@ -191,6 +191,9 @@ pub struct Start {
     /// The harness's model [default: the harness's own]
     #[arg(long)]
     pub model: Option<String>,
+    /// Claude actor's permission mode [default: auto]
+    #[arg(long, value_parser = ["default", "acceptEdits", "auto", "plan", "dontAsk", "bypassPermissions"])]
+    pub permission_mode: Option<String>,
     /// The run that asks for this one, which then owns it and waits for your approve-run. A run (with $DROVER_RUN) is always the parent of the runs it asks for
     #[arg(long)]
     pub parent: Option<RunId>,

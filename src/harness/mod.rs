@@ -34,6 +34,8 @@ pub struct StartSpec<'a> {
     pub headless: bool,
     pub profile: Profile,
     pub model: Option<&'a str>,
+    // Claude's --permission-mode for an actor, when asked for; the others have no such thing
+    pub permission_mode: Option<&'a str>,
     pub resume: Option<&'a SessionId>,
     // where the harness posts its hooks: one URL per run
     pub hooks: &'a str,

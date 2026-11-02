@@ -548,7 +548,7 @@ impl App {
         format!("http://127.0.0.1:{}/hooks/{run}", self.port)
     }
 
-    // What a run was asked: repo, branch, prompt, model.
+    // What a run was asked: repo, branch, prompt, model, permission mode.
     fn asked(&self, r: &Run) -> Result<Value> {
         Ok(self.store.last(&r.id, Kind::Requested)?.unwrap_or_default())
     }
@@ -602,6 +602,13 @@ impl App {
         let headless = s.headless || s.profile == Profile::Reader;
         if s.scratch || (headless && !h.caps().headless) {
             return Err(not_implemented());
+        }
+        if s.permission_mode.is_some() && s.harness != crate::run::HarnessName::Claude {
+            return Err(Failure::new(
+                "--permission-mode is Claude's",
+                "drover run without --permission-mode, or with --harness claude",
+            )
+            .into());
         }
         let machine = s.machine.unwrap_or_else(|| self.local.clone());
         self.host(&machine)?;
@@ -701,7 +708,7 @@ impl App {
         self.emit(
             &run,
             Kind::Requested,
-            json!({ "repo": repo.as_str(), "branch": branch.as_str(), "prompt": prompt, "model": s.model }),
+            json!({ "repo": repo.as_str(), "branch": branch.as_str(), "prompt": prompt, "model": s.model, "permission_mode": s.permission_mode }),
         )?;
         if !pending {
             self.start(&mut run).await?;
@@ -786,6 +793,7 @@ impl App {
             headless: r.mode == Mode::Headless,
             profile: r.profile,
             model: asked.get("model").and_then(Value::as_str),
+            permission_mode: asked.get("permission_mode").and_then(Value::as_str),
             resume,
             hooks,
             hook_timeout: self.hook_timeout,

@@ -21,6 +21,7 @@ The binary is the authority for syntax: `drover --help`, `drover <command> --hel
 
 ```bash
 drover run --repo <repo> --branch <branch> --prompt <prompt>   # starts now; - reads the prompt from stdin
+drover run … --permission-mode <mode>   # Claude only; default auto: harmless calls run unasked, only what auto mode escalates is a `needs`. `default` asks for every call outside the allowlist
 drover run --role mate --repo <repo> --branch <branch> --headless --prompt <goal>   # a mate, see below
 drover ls [--role --machine --phase --all]
 drover show <run>                  # phase, owner, last reply (first and last 300 chars), children, a mate's goal graph and question

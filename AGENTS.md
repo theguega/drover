@@ -72,7 +72,7 @@ The dotfiles blank native `new_worktree` so `prefix+shift+g` can run `drover-wt 
 Claude (`claude.rs`, see SPIKE.md):
 
 - Headless: `claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages`. `system/init` gives the session, `text_delta`s are text, `tool_use` and `tool_result` blocks are tool_start and tool_end, `result` is the reply with the turn's `usage`; `total_cost_usd` is the process's running total, so a turn's cost is the difference.
-- Both modes get `--settings` with `http` hooks to `127.0.0.1:<http_port>/hooks/<run>`: `PermissionRequest` always, and for a pane `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop` (`last_assistant_message` is the reply) and `SessionEnd`. An actor gets `--permission-mode default`, since your default may be auto.
+- Both modes get `--settings` with `http` hooks to `127.0.0.1:<http_port>/hooks/<run>`: `PermissionRequest` always, and for a pane `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop` (`last_assistant_message` is the reply) and `SessionEnd`. An actor gets `--permission-mode auto` unless `drover run --permission-mode <mode>` asked for another (kept in the run's request, so a resume passes it again): auto mode runs harmless calls itself and the hook gets only what it escalates (SPIKE.md §8).
 - A reader gets `--restricted --tools Bash,Read --permission-mode dontAsk` and allow rules for `brain find|get|pages|code` and `Read`: your own settings files (and allowlists) are not read, and anything else is denied without asking.
 
 Pi (`pi.rs`, `harness/pi.ts`):

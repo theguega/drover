@@ -54,10 +54,10 @@ impl Harness for Claude {
                 .map(String::from),
             );
         }
-        // the user's default may be auto mode, which would answer for them (SPIKE.md q5)
-        let profile: &[&str] = match spec.profile {
-            Profile::Actor => &["--permission-mode", "default"],
-            Profile::Reader => &[
+        // auto: the classifier runs harmless calls and drover's hook gets what it escalates (SPIKE.md §8)
+        let profile: Vec<&str> = match spec.profile {
+            Profile::Actor => vec!["--permission-mode", spec.permission_mode.unwrap_or("auto")],
+            Profile::Reader => vec![
                 "--restricted",
                 "--tools",
                 "Bash,Read",
@@ -293,6 +293,7 @@ mod tests {
             headless,
             profile,
             model: Some("haiku"),
+            permission_mode: None,
             resume: None,
             hooks: "http://127.0.0.1:7341/hooks/r-00000a",
             hook_timeout: 600,
@@ -361,7 +362,15 @@ mod tests {
     fn an_actor_asks_drover() -> Result<(), Box<dyn std::error::Error>> {
         let headless = Claude.start(&spec(true, Profile::Actor));
         assert_eq!(headless.get(1).map(String::as_str), Some("-p"));
-        assert_eq!(flag(&headless, "--permission-mode"), Some("default"));
+        assert_eq!(flag(&headless, "--permission-mode"), Some("auto"));
+        let asked = StartSpec {
+            permission_mode: Some("default"),
+            ..spec(false, Profile::Actor)
+        };
+        assert_eq!(
+            flag(&Claude.start(&asked), "--permission-mode"),
+            Some("default")
+        );
         assert_eq!(flag(&headless, "--model"), Some("haiku"));
         let s: Value = serde_json::from_str(flag(&headless, "--settings").unwrap_or_default())?;
         assert_eq!(

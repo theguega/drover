@@ -178,3 +178,29 @@ With `HOLD=20`: `start ...707.64`, `end ...727.64`, total run 30.1 s, against 15
 - `PermissionRequest` for tools other than Bash.
 - `allow` with `destination: "localSettings"` (would persist across `--resume`).
 - Interactive claude in auto mode (the user's default).
+
+## 8. Auto mode and the `PermissionRequest` hook
+
+Run on 2026-11-01, `claude` 2.1.316 (`--model haiku`); `~/.claude/settings.json` has `"permissions": {"defaultMode": "auto"}`. Everything ran in `/tmp/drover-s8/work` (a fresh git repo), with the §1 hook server (port 7377, answers `allow`, logs `PreToolUse` and `PermissionRequest` with the payload's `permission_mode`) and the same `--settings` with both hooks. Headless as in the shared setup, with `--permission-mode auto`; the prompt was `Run exactly this with the Bash tool: <cmd>`.
+
+| # | Answer |
+|---|---|
+| 1 | In auto mode the hook does **not** fire for `ls`, `cat a.txt`, `touch new.txt`, `curl -s -m 5 https://example.com`, `rm -rf <named /tmp dir>`, `touch` outside the cwd, `git push` (no remote), `pip install`, `sudo -n true`, `chmod -R`, a `Write` into `.claude/`, `touch`/`rm -rf` in `.git/`: each ran, `PreToolUse` only. The payload has `permission_mode: "auto"` |
+| 2 | It **does** fire when something forces a prompt: an `ask` rule (`"permissions":{"ask":["Bash(touch *)"]}`, passed through `--settings` here; a project `.claude/settings.local.json` is the same kind of source). `ls` still ran with no hook; `touch asked.txt` fired `PermissionRequest`, and the `allow` ran it |
+| 3 | Same in a pane (tmux, `claude --permission-mode auto --settings …`, after the trust dialog): `ls` fires `PreToolUse` only; `touch pane-asked.txt` fires `PermissionRequest`, and the pane shows `Allowed by PermissionRequest hook` |
+| 4 | **Not tested**: whether the hook fires when the classifier denies. The command the classifier blocks (`curl … \| sh`, reason `[Code from External]`) is not one to run, even in `/tmp`. Nothing here shows the hook firing for a classifier denial |
+
+```
+### ls                                  -> {"tool_result":"a.txt\ndoomed","is_error":false}
+{"path": "/pre", "event": "PreToolUse", "tool": "Bash", "mode": "auto", "input": "ls"}
+### touch asked.txt   (settings: permissions.ask = ["Bash(touch *)"])
+{"tool_result":"(Bash completed with no output)","is_error":false}
+{"path": "/pre", "event": "PreToolUse", "tool": "Bash", "mode": "auto", "input": "touch asked.txt"}
+{"path": "/perm", "event": "PermissionRequest", "tool": "Bash", "mode": "auto", "input": "touch asked.txt"}
+```
+
+Consequences:
+
+- Auto mode and the hook coexist: `--permission-mode auto --settings <hook>` loads both, and the hook sees what would otherwise go to the user.
+- With auto, drover's `needs` events are the rare calls: ask rules, and (untested) whatever the classifier hands back. A harmless worktree command never reaches drover.
+- The deterministic way to get an escalation in a test is an `ask` rule in the worktree's `.claude/settings.local.json`.

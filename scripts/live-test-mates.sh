@@ -61,7 +61,7 @@ for _ in $(seq 120); do [[ $("$bin" show "$mate" | field phase) == idle ]] && br
 ok "mate $mate: role mate, idle after its first turn"
 
 # ── crew it requests waits for you ──
-crew=$(as_mate run --parent "$mate" --repo livetest --branch crew-a --headless --model haiku --prompt "Reply with exactly: CREW-PONG" | field run)
+crew=$(as_mate run --parent "$mate" --repo livetest --branch crew-a --headless --permission-mode default --model haiku --prompt "Reply with exactly: CREW-PONG" | field run)
 runs+=("$crew")
 [[ $("$bin" show "$crew" | field phase) == pending ]] || fail "crew $crew: not pending"
 "$bin" | grep -q "$crew" || fail "home does not list pending $crew"

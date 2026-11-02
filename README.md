@@ -7,7 +7,7 @@ drover calls no model itself. The agents are the CLIs you already use.
 ## What you get
 
 - **Runs:** `drover run` opens a worktree and starts the agent in a herdr pane, or `--headless` over its stream. drover follows it through the agent's own hooks and stream, and keeps its phase, owner, usage and last reply in `~/.local/state/drover/drover.db`.
-- **Approvals:** a tool call that needs a permission waits for `drover approve` or `drover deny --reason`, in both modes.
+- **Approvals:** a tool call that needs a permission waits for `drover approve` or `drover deny --reason`, in both modes. Claude runs use permission mode `auto`, so only what auto mode escalates (an `ask` rule) reaches you; `drover run --permission-mode default` asks for every call outside the allowlist.
 - **Nothing runs without you:** a run another agent asks for (`--parent`) waits as `pending` until you `drover approve-run` it.
 - **Mates:** a mate is a run that follows the `mates` skill: it plans a goal graph, requests crew, hears them through `drover wait`, approves their tool calls, and asks you only through `drover escalate`.
 - **`drover-wt`:** worktrees for herdr, from a branch, a new name, or a GitHub pull request (`#123`).
@@ -128,7 +128,7 @@ Your desk is yours: keybindings, shell aliases, `REPOS_ROOT` and `HERDR_WORKTREE
 
 ```sh
 cargo test && cargo clippy --all-targets
-scripts/live-test.sh         # headless, approvals, pane and attach, against a real claude (haiku) and herdr
+scripts/live-test.sh         # headless, approvals, pane (auto mode) and attach, against a real claude (haiku) and herdr
 scripts/live-test-mates.sh   # a mate's crew, wait, goal and escalate, the same way
 ```
 

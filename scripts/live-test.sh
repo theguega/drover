@@ -77,7 +77,7 @@ await() {
 text() { jq -r .data.text <<<"$event"; }
 
 # ── headless ──
-h=$("$bin" run --repo livetest --branch live-h --headless --model haiku --prompt "Reply with exactly: PONG-1" | field run)
+h=$("$bin" run --repo livetest --branch live-h --headless --permission-mode default --model haiku --prompt "Reply with exactly: PONG-1" | field run)
 runs+=("$h")
 await "$h" reply '.data.text | test("PONG-1")' || fail "headless $h: first reply"
 ok "headless $h replied: $(text)"
@@ -186,6 +186,30 @@ ok "pane $p started"
 await "$p" reply '.data.text | test("PANE-PONG")' || fail "pane $p: no reply from its Stop hook"
 [[ $("$bin" show "$p" | field session) =~ ^[0-9a-f-]{36}$ ]] || fail "pane $p: no session from its hooks"
 ok "pane $p replied through its hooks: $(text)"
+
+# ── a pane in the user's own mode (auto): harmless calls never reach drover, an escalated one does ──
+a=$("$bin" run --repo livetest --branch live-a --model haiku --prompt "Run this exact bash command with the Bash tool: ls. Then reply with exactly: LS-DONE" | field run)
+runs+=("$a")
+needs_perm=false
+while await "$a" 'needs|reply' '.kind == "reply" or .data.perm != null or .data.dialog != null'; do
+  case $(jq -r '.kind + (.data.dialog // "" | if . == "" then "" else " dialog" end)' <<<"$event") in
+    "needs dialog") "$bin" keys "$a" down enter >/dev/null ;;
+    needs) needs_perm=true; break ;;
+    reply) break ;;
+  esac
+done
+[[ $needs_perm == false ]] || fail "pane $a: ls reached drover as needs: $(jq -c .data <<<"$event")"
+grep -q LS-DONE <<<"$(text)" || fail "pane $a: no LS-DONE reply: $(text)"
+ok "pane $a in auto mode ran ls with no needs"
+# an ask rule is what makes auto mode put a call to the user (SPIKE.md §8)
+mkdir -p "$("$bin" show "$a" | field cwd)/.claude"
+echo '{"permissions":{"ask":["Bash(touch *)"]}}' >"$("$bin" show "$a" | field cwd)/.claude/settings.local.json"
+"$bin" send "$a" "Run this exact bash command with the Bash tool: touch asked.txt. Then reply with exactly: TOUCH-DONE" >/dev/null
+await "$a" needs '.data.perm != null' || fail "pane $a: the escalated touch did not reach drover"
+"$bin" approve "$a" "$(jq -r .data.perm <<<"$event")" >/dev/null
+await "$a" reply '.data.text | test("TOUCH-DONE")' || fail "pane $a: no reply after approve"
+[[ -f $("$bin" show "$a" | field cwd)/asked.txt ]] || fail "pane $a: asked.txt was not created"
+ok "pane $a: an ask rule reached drover as needs, and the call ran after approve"
 
 # ── attach: the headless session goes on in a pane ──
 "$bin" attach "$h" >/dev/null
