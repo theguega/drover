@@ -199,6 +199,68 @@ await "$rd" tool_end '.data.tool == "Bash"' || fail "reader $rd: no second Bash 
 [[ ! -e $tmp/canary ]] || fail "reader $rd: the canary was touched"
 ok "reader $rd ran echo ok, and was denied echo a && touch canary"
 
+# ── folders: --dir, a reader's --dir and --repo scout, --scratch ──
+reply_after_approving() {
+  while await "$1" 'needs|reply' '.kind == "reply" or .data.perm != null'; do
+    [[ $(jq -r .kind <<<"$event") == reply ]] && return 0
+    "$bin" approve "$1" "$(jq -r .data.perm <<<"$event")" >/dev/null
+  done
+  return 1
+}
+dir=$tmp/folder
+mkdir -p "$dir"
+echo "the secret word is PELICAN" >"$dir/note.txt"
+f=$("$bin" run --dir "$dir" --headless --permission-mode default --model haiku --prompt "Run this exact bash command with the Bash tool: touch made.txt. Then reply with exactly: DIR-DONE" | field run)
+runs+=("$f")
+reply_after_approving "$f" || fail "dir $f: no reply"
+[[ $("$bin" show "$f" | field place) == dir && $("$bin" show "$f" | field cwd) == "$dir" ]] || fail "dir $f: not a dir run in $dir"
+[[ -f $dir/made.txt ]] || fail "dir $f: made.txt was not written in $dir"
+out=$("$bin" run --dir "$dir" --headless --prompt "second" 2>&1 || true)
+grep -q "open already, in run $f" <<<"$out" || fail "a second actor in $dir was not refused: $out"
+out=$("$bin" done "$f" --remove 2>&1 || true)
+grep -q "never deletes" <<<"$out" || fail "done --remove on a dir run was not refused: $out"
+"$bin" done "$f" >/dev/null
+[[ -f $dir/made.txt && -f $dir/note.txt ]] || fail "dir $f: done touched $dir"
+ok "actor --dir $f wrote made.txt there, a second actor and done --remove were refused, and done left the folder"
+
+rf=$("$bin" run --profile reader --dir "$dir" --model haiku --prompt "Read note.txt and reply with exactly the secret word in it, nothing else" | field run)
+runs+=("$rf")
+await "$rf" reply '.data.text | test("PELICAN")' || fail "reader $rf: did not read $dir/note.txt"
+"$bin" send "$rf" "Run exactly one Bash call, as is: touch nope.txt. Then reply with exactly: W-DONE" >/dev/null
+await "$rf" tool_end '.data.tool == "Bash"' || fail "reader $rf: no Bash call"
+[[ $(jq .data.ok <<<"$event") == false ]] || fail "reader $rf: touch ran"
+[[ ! -e $dir/nope.txt ]] || fail "reader $rf: wrote into $dir"
+ok "reader --dir $rf answered from $dir/note.txt, and was denied a write there"
+
+sc=$("$bin" run --profile reader --repo livetest --model haiku --prompt "Read .claude/commands/livepong.md and reply with exactly the word after 'Reply with exactly:' in it" | field run)
+runs+=("$sc")
+await "$sc" reply '.data.text | test("CUSTOM-PONG")' || fail "scout $sc: no answer from the repo's main checkout"
+[[ $("$bin" show "$sc" | field cwd) == "$repo" ]] || fail "scout $sc: not in $repo"
+ok "reader --repo scout $sc read the main checkout: $(text)"
+
+sh_run=$("$bin" run --scratch --headless --model haiku --prompt "Reply with exactly: SCRATCH-PONG" | field run)
+runs+=("$sh_run")
+await "$sh_run" reply '.data.text | test("SCRATCH-PONG")' || fail "scratch $sh_run: no reply"
+scratch=$("$bin" show "$sh_run" | field cwd)
+[[ -d $scratch ]] || fail "scratch $sh_run: no folder $scratch"
+"$bin" done "$sh_run" >/dev/null
+[[ ! -e $scratch ]] || fail "scratch $sh_run: $scratch is still there after done"
+ok "headless --scratch $sh_run ran in $scratch, gone after done"
+
+sp=$("$bin" run --scratch --model haiku --prompt "Reply with exactly: SCRATCH-PANE" | field run)
+runs+=("$sp")
+await "$sp" 'needs|started' || fail "scratch pane $sp: neither started nor a startup dialog"
+if [[ $(jq -r .kind <<<"$event") == needs ]]; then
+  "$bin" keys "$sp" down enter >/dev/null
+  await "$sp" started || fail "scratch pane $sp: not started after the dialog"
+fi
+await "$sp" reply '.data.text | test("SCRATCH-PANE")' || fail "scratch pane $sp: no reply"
+scratch=$("$bin" show "$sp" | field cwd)
+[[ -d $scratch ]] || fail "scratch pane $sp: no folder $scratch"
+"$bin" done "$sp" >/dev/null
+[[ ! -e $scratch ]] || fail "scratch pane $sp: $scratch is still there after done"
+ok "pane --scratch $sp ran in $scratch, gone after done"
+
 # ── a stopped process takes the tools it started with it ──
 leak=drvleak$$
 printf 'exec -a %s tail -f /dev/null\n' "$leak" >"$tmp/wait.sh"

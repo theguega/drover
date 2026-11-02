@@ -183,14 +183,17 @@ pub struct Start {
     /// A machine from the config [default: this one]
     #[arg(long)]
     pub machine: Option<Machine>,
-    /// A repo under the repos root [required for an actor]
-    #[arg(long, requires = "branch")]
+    /// A repo under the repos root. With --branch a worktree; a reader alone reads its main checkout
+    #[arg(long)]
     pub repo: Option<String>,
     /// A new name, an existing branch, or #<pr>
     #[arg(long, requires = "repo")]
     pub branch: Option<String>,
-    /// A temp dir and no repo [not implemented]
-    #[arg(long, conflicts_with_all = ["repo", "branch"])]
+    /// An existing folder on the machine, absolute or ~/…: no worktree, and `done` never deletes it
+    #[arg(long, conflicts_with_all = ["repo", "branch", "scratch"])]
+    pub dir: Option<String>,
+    /// A fresh temp dir on the machine, removed by `done`
+    #[arg(long, conflicts_with_all = ["repo", "branch", "dir"])]
     pub scratch: bool,
     /// In a herdr pane [default]
     #[arg(long, conflicts_with = "headless")]
@@ -200,7 +203,7 @@ pub struct Start {
     pub headless: bool,
     #[arg(long, value_enum, default_value_t = HarnessName::Claude)]
     pub harness: HarnessName,
-    /// actor: a worktree and your allowlists. reader: Read and the config's reader_allow only, headless, in the state dir's reader/
+    /// actor: your allowlists, in a worktree, --dir or --scratch. reader: Read and the config's reader_allow only, headless, in --dir, a repo's main checkout, or (this machine only) the state dir's reader/
     #[arg(long, value_enum, default_value_t = Profile::Actor)]
     pub profile: Profile,
     /// The harness's model [default: the harness's own]
@@ -377,9 +380,11 @@ mod tests {
     #[test]
     fn bad_input_is_a_usage_error() {
         for line in [
-            "run --repo x --prompt go",
+            "run --branch y --prompt go",
             "run --scratch --repo x --branch y --prompt go",
-            "run --pane --headless --scratch --prompt go",
+            "run --dir /x --repo y --prompt go",
+            "run --dir /x --scratch --prompt go",
+            "run --pane --headless --dir /x --prompt go",
             "send r-1 hi",
             "keys r-00aa11",
             "ls --phase gone",
@@ -387,6 +392,8 @@ mod tests {
             assert!(parse(line).is_err(), "{line}");
         }
         assert!(parse("ls --role crew --phase pending").is_ok());
+        assert!(parse("run --dir ~/notes --profile reader --prompt go").is_ok());
+        assert!(parse("run --repo x --profile reader --prompt go").is_ok());
         assert!(matches!(parse(""), Ok(Cmd::Home)));
     }
 }

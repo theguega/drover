@@ -63,6 +63,10 @@ Native herdr worktree (0.9.3):
 
 A desk can blank herdr's native `new_worktree` key and bind one to `drover-wt prompt` instead.
 
+## Places
+
+A run's `place` (`Worktree`, `Dir`, `Scratch`) says where its cwd came from. `cmd_run` resolves it once on the run's machine (`Serve::place`, over `herdr::dir`, `main_checkout`; a scratch dir is made at open by `herdr::scratch`) and the folder is kept in the `requested` event. A pane run in a `Dir` or `Scratch` opens a plain `workspace.create`, not drover-wt. `done` never deletes a `Dir` (`--remove` is refused) and always deletes a `Scratch`, which `end` also sweeps for runs that end another way. `Serve::free` keeps two actors out of one folder.
+
 ## Harness adapters
 
 `src/harness/mod.rs` holds the `Harness` trait: an adapter is its harness's protocol, as pure functions over the state it keeps per process (`Parse`). `start` is the command line (headless, or the TUI a pane runs, profile, model, resume), `open` the lines written first, `send` a prompt as stdin lines, `events` one stdout line as `Out`s (`Out::Write` is a protocol line back on stdin, `Out::Fail` a process that cannot serve the run), `answer` a permission asked on stdout, answered on stdin, `hook` and `respond` a hook and its answer, `abort`, `forward` the variables a remote process reads from its stdin, and `caps` (`pane`: runs in a pane, observed by hooks). Spawning the process, here or over ssh, its stdin and stdout, and what the events do to a run are drover's own and the same for every harness. A new harness is one file in `src/harness/`, or a line in `acp.rs` when it speaks ACP.

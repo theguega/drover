@@ -31,7 +31,7 @@ use crate::{
     harness::{self, Abort, Decision, Harness, Ident, Out, Parse, StartSpec},
     herdr::{self, Code, Host, Name, PaneId, Reach, SessionId},
     http,
-    run::{Machine, Mode, Owner, Phase, Profile, Role, Run, RunId, Usage, now},
+    run::{HarnessName, Machine, Mode, Owner, Phase, Place, Profile, Role, Run, RunId, Usage, now},
     socket::{self, SSH_OPTS},
     store::{Kind, Store, c9},
 };
@@ -238,7 +238,7 @@ fn wait_row(e: &Value) -> Value {
 fn row(r: &Run) -> Value {
     json!({
         "run": r.id, "machine": r.machine, "role": r.role, "phase": r.phase,
-        "harness": r.harness, "mode": r.mode.as_str(), "cwd": r.cwd,
+        "harness": r.harness, "mode": r.mode.as_str(), "place": r.place, "cwd": r.cwd,
     })
 }
 
@@ -457,11 +457,31 @@ impl App {
         self.save(r)?;
         self.forget_calls(&r.id);
         let proc = locked(&self.procs).remove(&r.id);
-        if let (Some(p), Some(me)) = (proc, self.me.upgrade()) {
+        // a run that ends any way (a closed pane, a failed start) takes its scratch dir with it
+        let scratch = (r.place == Place::Scratch && !r.cwd.as_os_str().is_empty())
+            .then(|| (r.machine.clone(), r.cwd.clone()));
+        if let Some(me) = self.me.upgrade()
+            && (proc.is_some() || scratch.is_some())
+        {
             let id = r.id.clone();
-            tokio::spawn(async move { me.stop(&id, p).await });
+            tokio::spawn(async move {
+                if let Some(p) = proc {
+                    me.stop(&id, p).await;
+                }
+                if let Some((machine, dir)) = scratch
+                    && let Err(e) = me.sweep(&machine, &dir).await
+                {
+                    eprintln!("run {id}: scratch dir {}: {e}", dir.display());
+                }
+            });
         }
         self.wake.notify_waiters();
+        Ok(())
+    }
+
+    // Removes a scratch dir, once nothing runs in it.
+    async fn sweep(&self, machine: &Machine, dir: &Path) -> Result<()> {
+        herdr::remove_scratch(self.host(machine)?, &dir.to_string_lossy()).await?;
         Ok(())
     }
 
@@ -630,7 +650,7 @@ impl App {
         // a reader acts on nothing, so it needs no pane to pair in; a harness with no pane runs
         // headless, and `attach` opens its TUI
         let headless = s.headless || s.profile == Profile::Reader || !h.caps().pane;
-        if s.scratch || (headless && !h.caps().headless) {
+        if headless && !h.caps().headless {
             return Err(not_implemented());
         }
         if s.pane && headless {
@@ -647,30 +667,12 @@ impl App {
             )
             .into());
         }
-        let machine = s.machine.unwrap_or_else(|| self.local.clone());
+        let machine = s.machine.clone().unwrap_or_else(|| self.local.clone());
         self.host(&machine)?;
-        let (repo, branch) = match (s.profile, &s.repo, &s.branch) {
-            (Profile::Actor, Some(repo), Some(branch)) => {
-                (Name::parse(repo)?, Name::parse(branch)?)
-            }
-            (Profile::Actor, ..) => {
-                return Err(Failure::new(
-                    "an actor runs in a worktree",
-                    "drover run --repo <repo> --branch <branch> …",
-                )
-                .into());
-            }
-            (Profile::Reader, None, None) if machine == self.local => {
-                (Name::parse("reader")?, Name::parse("reader")?)
-            }
-            (Profile::Reader, ..) => {
-                return Err(Failure::new(
-                    "a reader runs on this machine, in the state dir's reader/",
-                    "drover run --profile reader --prompt <prompt>, without --machine, --repo or --branch",
-                )
-                .into());
-            }
-        };
+        let (place, dir) = self.place(&s, &machine).await?;
+        if let (Profile::Actor, Some(dir)) = (s.profile, &dir) {
+            self.free(&machine, None, Path::new(dir))?;
+        }
         // a run that asks for a run is its parent, and the new run waits for you
         let parent = match (from, s.parent) {
             (Some(f), Some(p)) if &p != f => {
@@ -716,6 +718,7 @@ impl App {
             id,
             machine,
             cwd: PathBuf::new(),
+            place,
             harness: s.harness,
             mode: if headless {
                 Mode::Headless
@@ -745,13 +748,73 @@ impl App {
         self.emit(
             &run,
             Kind::Requested,
-            json!({ "repo": repo.as_str(), "branch": branch.as_str(), "prompt": prompt, "model": s.model, "permission_mode": s.permission_mode }),
+            json!({ "repo": s.repo, "branch": s.branch, "dir": dir, "prompt": prompt, "model": s.model, "permission_mode": s.permission_mode }),
         )?;
         if !pending {
             self.start(&mut run).await?;
             run = self.get(&run.id)?;
         }
         Ok(self.brief(&run))
+    }
+
+    // Where a run goes, checked on its machine now: a worktree of --repo and --branch, a folder
+    // (--dir, or a repo's main checkout for a reader), or a fresh temp dir. The folder comes back resolved.
+    async fn place(&self, s: &Start, machine: &Machine) -> Result<(Place, Option<String>)> {
+        let h = self.host(machine)?;
+        let say = |what: &str, help: &str| Err(Failure::new(what, help).into());
+        match (s.profile, &s.repo, &s.branch, &s.dir, s.scratch) {
+            (Profile::Actor, Some(repo), Some(branch), ..) => {
+                Name::parse(repo)?;
+                Name::parse(branch)?;
+                Ok((Place::Worktree, None))
+            }
+            (Profile::Actor, Some(_), None, ..) => say(
+                "an actor needs --branch with --repo",
+                "drover run --repo <repo> --branch <branch> …, or --dir <folder>",
+            ),
+            (Profile::Actor, _, _, None, false) => say(
+                "an actor runs in a worktree, a folder or a scratch dir",
+                "drover run --repo <repo> --branch <branch> …, --dir <folder> or --scratch",
+            ),
+            (Profile::Actor, _, _, _, true) => Ok((Place::Scratch, None)),
+            (Profile::Reader, _, _, _, true) => say(
+                "a reader has nothing to read in a scratch dir",
+                "drover run --profile reader --dir <folder> …",
+            ),
+            (Profile::Reader, Some(_), Some(_), ..) => say(
+                "a reader reads a checkout, it has no branch to open",
+                "drover run --profile reader --repo <repo> …, without --branch",
+            ),
+            // pi reads its tool list from the reader dir's .pi/settings.json, which a folder of yours must not get
+            (Profile::Reader, _, _, Some(_), _) | (Profile::Reader, Some(_), ..)
+                if s.harness == HarnessName::Pi =>
+            {
+                say(
+                    "pi has no read-only mode outside the state dir's reader/",
+                    "drover run --profile reader --harness pi without --dir or --repo, or another harness",
+                )
+            }
+            (Profile::Reader, _, _, Some(dir), _) => {
+                Ok((Place::Dir, Some(herdr::dir(h, dir).await?)))
+            }
+            (Profile::Reader, Some(repo), ..) => Ok((
+                Place::Dir,
+                Some(herdr::main_checkout(h, &Name::parse(repo)?).await?),
+            )),
+            (Profile::Actor, _, _, Some(dir), _) => {
+                let dir = herdr::dir(h, dir).await?;
+                Ok((Place::Dir, Some(dir)))
+            }
+            // the state dir is this machine's
+            (Profile::Reader, None, _, None, _) if *machine == self.local => {
+                let dir = self.reader_dir()?;
+                Ok((Place::Dir, Some(dir.to_string_lossy().into())))
+            }
+            (Profile::Reader, ..) => say(
+                "a reader with no folder runs on this machine, in the state dir's reader/",
+                "drover run --profile reader --dir <folder> --machine <machine> …",
+            ),
+        }
     }
 
     // Opens the run's cwd and starts its agent with the first prompt.
@@ -776,6 +839,56 @@ impl App {
             return Err(e);
         }
         Ok(())
+    }
+
+    // Two actors would write over each other in one folder. A reader writes nothing.
+    fn free(&self, machine: &Machine, id: Option<&RunId>, path: &Path) -> Result<()> {
+        let taken = self.store.list_open()?.into_iter().find(|r| {
+            Some(&r.id) != id
+                && r.phase.live()
+                && &r.machine == machine
+                && r.profile == Profile::Actor
+                && r.cwd == path
+        });
+        match taken {
+            Some(other) => Err(Failure::new(
+                format!("{} is open already, in run {}", path.display(), other.id),
+                format!("drover send {} <text>", other.id),
+            )
+            .into()),
+            None => Ok(()),
+        }
+    }
+
+    // The folder of a run that is not in a worktree: the one it asked for, or its scratch dir,
+    // made on its first open and kept for the run's later ones (attach).
+    async fn folder(&self, h: &Host, run: &Run) -> Result<PathBuf> {
+        let path = match run.place {
+            Place::Scratch if run.cwd.as_os_str().is_empty() => herdr::scratch(h).await?.into(),
+            Place::Scratch => run.cwd.clone(),
+            _ => self
+                .asked(run)?
+                .get("dir")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .ok_or_else(|| err!("{} has no folder", run.id))?,
+        };
+        if run.profile == Profile::Actor {
+            self.free(&run.machine, Some(&run.id), &path)?;
+        }
+        Ok(path)
+    }
+
+    // The pane of a run, in its worktree or its folder.
+    async fn pane_for(&self, h: &Host, run: &Run) -> Result<herdr::Worktree> {
+        match run.place {
+            Place::Worktree => self.worktree(h, run).await,
+            Place::Dir | Place::Scratch => {
+                let path = self.folder(h, run).await?;
+                let wt = herdr::workspace(h, &path.to_string_lossy(), run.id.as_str()).await?;
+                Ok(wt)
+            }
+        }
     }
 
     // The run's worktree, unless another live run or an agent drover does not follow has it.
@@ -844,7 +957,7 @@ impl App {
     async fn open_pane(&self, run: &mut Run) -> Result<()> {
         let h = self.host(&run.machine)?;
         let harness = Self::harness(run)?;
-        let wt = self.worktree(h, run).await?;
+        let wt = self.pane_for(h, run).await?;
         run.mode = Mode::Pane {
             pane: Some(wt.pane_id.clone()),
         };
@@ -939,9 +1052,8 @@ impl App {
 
     async fn open_headless(&self, run: &mut Run) -> Result<()> {
         let h = self.host(&run.machine)?;
-        run.cwd = match run.profile {
-            Profile::Reader => self.reader_dir()?,
-            Profile::Actor => {
+        run.cwd = match run.place {
+            Place::Worktree => {
                 let wt = self.worktree(h, run).await?;
                 // the run has no pane: the workspace drover-wt opened goes, its checkout stays
                 if let Some(ws) = wt.pane_id.workspace() {
@@ -949,6 +1061,7 @@ impl App {
                 }
                 PathBuf::from(wt.path)
             }
+            Place::Dir | Place::Scratch => self.folder(h, run).await?,
         };
         self.save(run)?;
         let prompt = self
@@ -1623,7 +1736,7 @@ impl App {
         };
         json!({
             "run": id, "machine": r.machine, "phase": r.phase, "mode": r.mode.as_str(), "pane": r.mode.pane().map(|p| &p.0),
-            "cwd": r.cwd, "owner": r.owner.to_string(), "help": help,
+            "place": r.place, "cwd": r.cwd, "owner": r.owner.to_string(), "help": help,
         })
     }
 
@@ -2114,7 +2227,7 @@ impl App {
             };
             if r.profile == Profile::Reader {
                 return Err(Failure::new(
-                    format!("{id} is a reader: it has no worktree to open"),
+                    format!("{id} is a reader: it has no pane to open"),
                     format!("drover show {id}"),
                 )
                 .into());
@@ -2122,7 +2235,7 @@ impl App {
             let h = self.host(&r.machine)?;
             let harness = Self::harness(&r)?;
             self.retire(id).await;
-            let wt = self.worktree(h, &r).await?;
+            let wt = self.pane_for(h, &r).await?;
             let asked = self.asked(&r)?;
             let hooks = self.hook_url(id);
             r.mode = Mode::Pane {
@@ -2210,6 +2323,16 @@ impl App {
             if from.is_some() {
                 Self::owned(&r, from)?;
             }
+            if remove && r.place == Place::Dir {
+                return Err(Failure::new(
+                    format!(
+                        "{id} runs in {}, a folder drover never deletes",
+                        r.cwd.display()
+                    ),
+                    format!("drover done {id}, without --remove"),
+                )
+                .into());
+            }
             match r.phase {
                 Phase::Pending => {
                     return Err(Failure::new(
@@ -2233,7 +2356,7 @@ impl App {
         match (self.host(&r.machine), r.mode.pane().cloned(), r.workspace()) {
             (Ok(h), _, _) if r.mode == Mode::Headless => {
                 self.retire(id).await;
-                if remove && r.profile == Profile::Actor {
+                if remove && r.place == Place::Worktree && r.profile == Profile::Actor {
                     match herdr::remove_path(h, &r.cwd.to_string_lossy()).await {
                         Ok(said) => (removed, notes) = (true, vec![said]),
                         Err(e) => notes.push(format!("kept the checkout: {e}")),
@@ -2241,7 +2364,7 @@ impl App {
                 }
             }
             (Ok(h), Some(pane), Some(ws)) => {
-                if remove && r.role != Role::Mate {
+                if remove && r.place == Place::Worktree && r.role != Role::Mate {
                     match herdr::remove(h, &ws).await {
                         Ok(said) => (removed, notes) = (true, vec![said]),
                         Err(e) => notes.push(format!("kept the checkout: {e}")),
@@ -2268,6 +2391,12 @@ impl App {
             // a machine this service does not drive has nothing it could close
             (Err(e), ..) => notes.push(format!("{e}: nothing closed")),
             _ => {}
+        }
+        if r.place == Place::Scratch {
+            match self.sweep(&r.machine, &r.cwd).await {
+                Ok(()) => removed = true,
+                Err(e) => notes.push(format!("kept the scratch dir: {e}")),
+            }
         }
         let _turn = self.turns.lock().await;
         // a hook may have moved it on meanwhile; this end is the record
@@ -2789,6 +2918,7 @@ pub(crate) mod tests {
             id: id.parse()?,
             machine: "box".parse()?,
             cwd: "/w".into(),
+            place: crate::run::Place::Worktree,
             harness: crate::run::HarnessName::Claude,
             mode: Mode::Pane {
                 pane: Some(PaneId("w1:p1".into())),
@@ -3972,10 +4102,7 @@ cat >/dev/null
     #[tokio::test]
     async fn later_nodes_are_stubs() -> Result<()> {
         let app = app()?;
-        for line in [
-            "run --scratch --prompt go",
-            "run --harness codex --repo r --branch b --prompt go",
-        ] {
+        for line in ["run --harness codex --repo r --branch b --prompt go"] {
             assert_eq!(
                 failure(request(&app, None, line).await).as_deref(),
                 Some("not implemented"),
@@ -3987,10 +4114,25 @@ cat >/dev/null
                 "run --machine elsewhere --repo r --branch b --prompt go",
                 "unknown machine elsewhere",
             ),
-            ("run --prompt go", "an actor runs in a worktree"),
+            (
+                "run --prompt go",
+                "an actor runs in a worktree, a folder or a scratch dir",
+            ),
+            (
+                "run --repo r --prompt go",
+                "an actor needs --branch with --repo",
+            ),
             (
                 "run --profile reader --repo r --branch b --prompt go",
-                "a reader runs on this machine, in the state dir's reader/",
+                "a reader reads a checkout, it has no branch to open",
+            ),
+            (
+                "run --profile reader --scratch --prompt go",
+                "a reader has nothing to read in a scratch dir",
+            ),
+            (
+                "run --profile reader --harness pi --dir /tmp --prompt go",
+                "pi has no read-only mode outside the state dir's reader/",
             ),
         ] {
             assert_eq!(
@@ -3999,6 +4141,34 @@ cat >/dev/null
                 "{line}"
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn a_folder_is_never_deleted_and_holds_one_actor() -> Result<()> {
+        let app = app()?;
+        let mut r = run("r-0000d1", Role::Task)?;
+        (r.place, r.cwd) = (Place::Dir, "/tmp/notes".into());
+        app.save(&r)?;
+        let help = |e: crate::Error| e.to_string();
+        let done = request(&app, None, "done r-0000d1 --remove").await;
+        assert!(
+            done.err()
+                .is_some_and(|e| help(e).contains("never deletes"))
+        );
+        assert!(app.get(&r.id)?.phase.live());
+        let taken = app.free(&r.machine, None, Path::new("/tmp/notes"));
+        assert!(
+            taken
+                .err()
+                .is_some_and(|e| help(e).contains("open already, in run r-0000d1"))
+        );
+        // the run itself, a reader's folder and another folder are free
+        app.free(&r.machine, Some(&r.id), Path::new("/tmp/notes"))?;
+        app.free(&r.machine, None, Path::new("/tmp/other"))?;
+        r.profile = Profile::Reader;
+        app.save(&r)?;
+        app.free(&r.machine, None, Path::new("/tmp/notes"))?;
         Ok(())
     }
 }

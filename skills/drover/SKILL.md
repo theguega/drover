@@ -22,6 +22,9 @@ The binary is the authority for syntax: `drover --help`, `drover <command> --hel
 ```bash
 drover run --repo <repo> --branch <branch> --prompt <prompt> [--key <k>]   # starts now; - reads the prompt from stdin; a retry with the same key returns the first run
 drover run … --permission-mode <mode>   # Claude only; default auto: harmless calls run unasked, only what auto mode escalates is a `needs`. `default` asks for every call outside the allowlist
+drover run --dir <path> --prompt <prompt>   # an existing folder, git or not; never deleted, `done --remove` refused; one actor per folder
+drover run --scratch --prompt <prompt>      # a fresh temp dir, removed by `done`
+drover run --profile reader --dir <path>|--repo <repo> --prompt <question>   # read-only scouting; --repo alone is the main checkout
 drover run --role mate --repo <repo> --branch <branch> --headless --prompt <goal>   # a mate, see below
 drover run --harness cursor|pi …   # over ACP, always headless; `attach` opens the agent's own TUI on the session
 drover ls [--role --machine --phase --all]
@@ -54,7 +57,7 @@ A pane run can rewind with Claude's own `/rewind`: `drover send <run> /rewind` o
 
 ## Read the output
 
-Output is TOON: `key: value` lines, lists as `name[count]{fields}:` with one row per record. Errors print `error:` and `help:` with exit 1; exit 2 is a usage error. `send --wait` exits 0 on a reply, 1 when the run failed or ended, 3 when it needs you (`outcome:` says which). A change prints the run first, then `help:` with the next commands. `not implemented` marks a command a later version builds (`--scratch`, harnesses other than claude, cursor and pi).
+Output is TOON: `key: value` lines, lists as `name[count]{fields}:` with one row per record. Errors print `error:` and `help:` with exit 1; exit 2 is a usage error. `send --wait` exits 0 on a reply, 1 when the run failed or ended, 3 when it needs you (`outcome:` says which). A change prints the run first, then `help:` with the next commands. `not implemented` marks a command a later version builds (harnesses other than claude, cursor and pi). Each run's `place` is `worktree`, `dir` or `scratch`.
 
 ## Mates
 

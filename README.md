@@ -11,6 +11,7 @@ run: r-75fedc
 machine: devbox
 phase: working
 mode: headless
+place: worktree
 cwd: /home/you/.drover-workspace/myapp.add-notes
 owner: user
 
@@ -21,8 +22,8 @@ runs:
   working: 0
   needs: 1
   idle: 0
-needs[1]{run,machine,role,phase,harness,mode,cwd}:
-  r-75fedc,devbox,task,needs,claude,headless,/home/you/.drover-workspace/myapp.add-notes
+needs[1]{run,machine,role,phase,harness,mode,place,cwd}:
+  r-75fedc,devbox,task,needs,claude,headless,worktree,/home/you/.drover-workspace/myapp.add-notes
 
 $ drover show r-75fedc         # trimmed
 phase: needs
@@ -129,7 +130,8 @@ A run is one agent session in one directory, with an id such as `r-75fedc`.
 
 - **Mode.** A *pane* run is the agent's TUI in a herdr workspace. drover follows it through the agent's hooks and never reads the screen. You can type into it, and `screen` and `keys` reach it from the CLI. A *headless* run is the agent's streaming interface. The process stays warm between turns, is stopped after `idle_kill`, and resumes its session on the next `send`.
 - **Role.** `task` (the default) is a run you start. `mate` is a dispatcher (see [Mates and crew](#mates-and-crew)). `crew` is a run that a mate requested. `chat` is for read-only conversations.
-- **Profile.** `actor` (the default) works in a worktree with your settings and allowlists. `reader` is headless in `~/.local/state/drover/reader/`, and can use only Read and the `reader_allow` commands.
+- **Profile.** `actor` (the default) works with your settings and allowlists. `reader` is headless and can use only Read and the `reader_allow` commands.
+- **Place.** Where the run's folder came from: a `worktree` (`--repo` and `--branch`; `done --remove` removes the checkout, which `drover-wt rm` keeps while it has changes, and the branch only when merged), a `dir` (`--dir <path>`: an existing folder, absolute or `~/…`, git or not, which drover never deletes and `done --remove` refuses), or a `scratch` dir (`--scratch`: a fresh temp dir on the machine, which `done` always removes). Two actors never share one folder. A reader's folder is `--dir`, or `--repo` alone for that repo's main checkout, and several readers may read the same one. A reader with neither runs on the host, in `~/.local/state/drover/reader/`.
 - **Owner.** Only the owner of a run may `send`, `keys`, `stop`, `approve` or `deny`. Anyone may read. You own the runs you start, and a mate owns the crew it requests. `attach` makes you the owner.
 - **Phase.**
 
@@ -197,16 +199,27 @@ Each name in `remotes` is an ssh name whose herdr server is already running. dro
 
 - drover has no sandbox. Every run acts with your uid, on your files, with your ssh keys and your agent logins.
 - Approvals guard against mistakes, not against an agent set on getting around them. drover identifies the caller only by `$DROVER_RUN`: a run that unsets it speaks as you, and can approve its own calls or start runs. What an agent may run without asking is decided by the agent's own permission settings, not by drover.
-- A `reader` run is the one restricted profile: Claude gets `--restricted`, Read and the `reader_allow` commands only. Cursor runs it in its `ask` mode, and pi with read-only tools.
+- A `reader` run is the one restricted profile: Claude gets `--restricted`, Read and the `reader_allow` commands only. Cursor runs it in its `ask` mode, and pi with read-only tools, which it has only in the state dir's `reader/`: pi readers take no `--dir` or `--repo`.
 - The CLI talks to the service over a unix socket (`drover.sock`, mode 600). The HTTP server, for hooks and events, binds 127.0.0.1 only. It refuses requests that carry an `Origin` header or another `Host`, so a web page cannot reach it. It has no authentication: anyone with a local account on the host can reach it.
 - Repo, branch and machine names are checked before they reach a shell.
+
+### Scouting a folder
+
+A reader answers a question about files without a worktree and cannot change them. It works on remotes too, since `--dir` and `--repo` name a folder there:
+
+```console
+$ drover run --profile reader --dir ~/papers --model haiku --prompt "Which of these mentions JEPA? One line each."
+$ drover run --profile reader --repo myapp --prompt "Where is the retry policy set?"   # myapp's main checkout, not a branch
+$ drover run --dir ~/notes --prompt "Tidy the headings in todo.md"                  # an actor in your own folder
+$ drover run --scratch --prompt "Try the regex crate on this sample"                # a temp dir, removed by done
+```
 
 ## Commands
 
 | Command | Does |
 |---|---|
 | `drover` | home view: runs per phase, and what needs you |
-| `drover run --repo <r> --branch <b> --prompt <p>` | start a run; `--headless`, `--machine`, `--harness`, `--model`, `--permission-mode`, `--role`, `--profile`, `--parent` |
+| `drover run --repo <r> --branch <b> --prompt <p>` | start a run; or `--dir <path>`, `--scratch` instead of a worktree; `--headless`, `--machine`, `--harness`, `--model`, `--permission-mode`, `--role`, `--profile`, `--parent` |
 | `drover ls` | live runs; `--all`, `--phase`, `--role`, `--machine` |
 | `drover show <run>` | one run: phase, owner, usage, waiting perms, last reply, children, goal graph |
 | `drover reply <run>` | the whole last reply |
@@ -279,7 +292,7 @@ CI runs these three on every push and pull request. The live tests start their o
 
 ## Status
 
-drover is early (0.1) and changes without notice. The live tests cover Claude Code (pane and headless, mates) and Cursor (on this machine and over ssh). The pi adapter has unit tests but has not yet run against a live pi. These are not built yet: `--scratch` runs, the `codex` and `opencode` harnesses, per-run usage for pane runs, and the web dashboard that the HTTP endpoints are made for. Approvals that are past their deadline live in memory, so a restart of the service forgets them.
+drover is early (0.1) and changes without notice. The live tests cover Claude Code (pane and headless, mates) and Cursor (on this machine and over ssh). The pi adapter has unit tests but has not yet run against a live pi. These are not built yet: the `codex` and `opencode` harnesses, per-run usage for pane runs, and the web dashboard that the HTTP endpoints are made for. Approvals that are past their deadline live in memory, so a restart of the service forgets them.
 
 ## License
 

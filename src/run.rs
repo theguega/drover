@@ -57,6 +57,13 @@ words!(Role {
     Chat = "chat",
 });
 
+// Where a run's cwd came from, which decides what `done` may do to it.
+words!(Place {
+    Worktree = "worktree",
+    Dir = "dir",
+    Scratch = "scratch",
+});
+
 words!(Profile {
     Reader = "reader",
     Actor = "actor",
@@ -293,7 +300,8 @@ impl std::ops::AddAssign<&Usage> for Usage {
 pub struct Run {
     pub id: RunId,
     pub machine: Machine,
-    pub cwd: PathBuf, // a worktree; empty until a pending run is approved
+    pub cwd: PathBuf, // empty until a pending run is approved
+    pub place: Place,
     pub harness: HarnessName,
     pub mode: Mode,
     pub role: Role,

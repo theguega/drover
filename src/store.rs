@@ -15,7 +15,9 @@ use crate::{
     Result,
     harness::Ident,
     herdr::{PaneId, SessionId},
-    run::{HarnessName, Machine, Mode, Owner, Phase, Profile, Role, Run, RunId, now, rfc3339},
+    run::{
+        HarnessName, Machine, Mode, Owner, Phase, Place, Profile, Role, Run, RunId, now, rfc3339,
+    },
 };
 
 const SCHEMA: &str = "
@@ -23,7 +25,7 @@ CREATE TABLE IF NOT EXISTS runs(
     id TEXT PRIMARY KEY, machine TEXT NOT NULL, cwd TEXT NOT NULL, harness TEXT NOT NULL,
     mode TEXT NOT NULL, pane TEXT, role TEXT NOT NULL, parent TEXT, profile TEXT NOT NULL,
     owner TEXT NOT NULL, session TEXT, phase TEXT NOT NULL, usage TEXT NOT NULL,
-    created_at INTEGER NOT NULL, ended_at INTEGER);
+    created_at INTEGER NOT NULL, ended_at INTEGER, place TEXT NOT NULL DEFAULT 'worktree');
 CREATE TABLE IF NOT EXISTS events(
     id INTEGER PRIMARY KEY, run TEXT NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL,
     data TEXT NOT NULL);
@@ -112,7 +114,7 @@ pub struct Store(Mutex<Connection>);
 
 const OPEN: &str = "WHERE phase NOT IN ('done', 'failed')";
 
-const COLUMNS: &str = "id, machine, cwd, harness, mode, pane, role, parent, profile, owner, session, phase, usage, created_at, ended_at";
+const COLUMNS: &str = "id, machine, cwd, harness, mode, pane, role, parent, profile, owner, session, phase, usage, created_at, ended_at, place";
 
 // A runs row as SQLite holds it, checked into a Run after the statement is done.
 struct Row {
@@ -131,6 +133,7 @@ struct Row {
     usage: String,
     created_at: i64,
     ended_at: Option<i64>,
+    place: String,
 }
 
 impl Row {
@@ -151,6 +154,7 @@ impl Row {
             usage: r.get(12)?,
             created_at: r.get(13)?,
             ended_at: r.get(14)?,
+            place: r.get(15)?,
         })
     }
 
@@ -167,6 +171,7 @@ impl Row {
             id: self.id.parse()?,
             machine: self.machine.parse()?,
             cwd: PathBuf::from(&self.cwd),
+            place: Place::parse(&self.place).ok_or_else(|| bad("place", &self.place))?,
             harness: HarnessName::parse(&self.harness)
                 .ok_or_else(|| bad("harness", &self.harness))?,
             mode,
@@ -188,6 +193,18 @@ impl Store {
     pub fn open(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         db.execute_batch(SCHEMA)?;
+        // a db from before `place`: its rows are worktrees, but a reader never had one
+        let has: bool = db.query_row(
+            "SELECT count(*) > 0 FROM pragma_table_info('runs') WHERE name = 'place'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has {
+            db.execute_batch(
+                "ALTER TABLE runs ADD COLUMN place TEXT NOT NULL DEFAULT 'worktree';
+                 UPDATE runs SET place = 'dir' WHERE profile = 'reader';",
+            )?;
+        }
         Ok(Self(Mutex::new(db)))
     }
 
@@ -509,7 +526,7 @@ impl Store {
 // `verb` is INSERT, or INSERT OR REPLACE.
 fn write(db: &Connection, verb: &str, r: &Run) -> Result<()> {
     db.execute(
-        &format!("{verb} INTO runs({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)"),
+        &format!("{verb} INTO runs({COLUMNS}) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)"),
         params![
             r.id.as_str(),
             r.machine.as_str(),
@@ -526,6 +543,7 @@ fn write(db: &Connection, verb: &str, r: &Run) -> Result<()> {
             serde_json::to_string(&r.usage)?,
             r.created_at,
             r.ended_at,
+            r.place.as_str(),
         ],
     )?;
     Ok(())
@@ -550,6 +568,7 @@ mod tests {
             id: id.parse()?,
             machine: "host".parse()?,
             cwd: "/w/drover.x".into(),
+            place: Place::Worktree,
             harness: HarnessName::Claude,
             mode: Mode::Pane {
                 pane: Some(PaneId("w1:p1".into())),
@@ -644,6 +663,34 @@ mod tests {
             store.open_replies()?.keys().collect::<Vec<_>>(),
             ["r-0000e2"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn rows_from_before_places_read_as_worktrees() -> Result<()> {
+        let path = std::env::temp_dir().join(format!("drover-store-{}.db", std::process::id()));
+        let old = Connection::open(&path)?;
+        old.execute_batch(
+            "CREATE TABLE runs(
+                id TEXT PRIMARY KEY, machine TEXT NOT NULL, cwd TEXT NOT NULL, harness TEXT NOT NULL,
+                mode TEXT NOT NULL, pane TEXT, role TEXT NOT NULL, parent TEXT, profile TEXT NOT NULL,
+                owner TEXT NOT NULL, session TEXT, phase TEXT NOT NULL, usage TEXT NOT NULL,
+                created_at INTEGER NOT NULL, ended_at INTEGER);",
+        )?;
+        for (id, profile) in [("r-00000a", "actor"), ("r-00000b", "reader")] {
+            old.execute(
+                "INSERT INTO runs VALUES (?1,'host','/w','claude','headless',NULL,'task',NULL,?2,'user',NULL,'idle','{\"input\":0,\"output\":0,\"cache_read\":0,\"cache_write\":0,\"cost_usd\":0.0}',1,NULL)",
+                [id, profile],
+            )?;
+        }
+        drop(old);
+        let store = Store::open(&path)?;
+        let place = |id: &str| -> Result<Place> {
+            Ok(store.get(&id.parse()?)?.map(|r| r.place).ok_or("gone")?)
+        };
+        assert_eq!(place("r-00000a")?, Place::Worktree);
+        assert_eq!(place("r-00000b")?, Place::Dir);
+        std::fs::remove_file(&path)?;
         Ok(())
     }
 }

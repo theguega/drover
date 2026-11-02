@@ -408,6 +408,92 @@ pub async fn worktree(m: &Host, repo: &Name, branch: &Name) -> Result<Worktree> 
     })
 }
 
+// A folder as the machine's shell sees it: `~` expanded, existing, symlinks resolved.
+pub async fn dir(m: &Host, path: &str) -> Result<String> {
+    let arg = match path.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with('/') => {
+            format!("\"$HOME\"{}", quote(rest))
+        }
+        _ if path.starts_with('/') => quote(path),
+        _ => {
+            return Err(Error::failed(format!(
+                "{path} is not an absolute or ~ path"
+            )));
+        }
+    };
+    let o = sh(m, &format!("cd {arg} && pwd -P"), SHORT).await?;
+    if o.code != Some(0) {
+        return Err(Error::failed(format!(
+            "{path} is not a folder on {}",
+            m.name
+        )));
+    }
+    Ok(o.out.trim().into())
+}
+
+// A repo's main checkout under the machine's repos root.
+pub async fn main_checkout(m: &Host, repo: &Name) -> Result<String> {
+    let script = format!("cd {ROOT}/{} && test -d .git && pwd -P", repo.as_str());
+    let o = sh(m, &script, SHORT).await?;
+    if o.code != Some(0) {
+        return Err(Error::failed(format!(
+            "{} is not a repo under the repos root on {}",
+            repo.as_str(),
+            m.name
+        )));
+    }
+    Ok(o.out.trim().into())
+}
+
+// What `scratch` names its dirs, and what `remove_scratch` insists on before it deletes one.
+const SCRATCH: &str = "drover-scratch.";
+
+// A fresh temp dir on the machine.
+pub async fn scratch(m: &Host) -> Result<String> {
+    let script =
+        format!("d=$(mktemp -d \"${{TMPDIR:-/tmp}}/{SCRATCH}XXXXXX\") && cd \"$d\" && pwd -P");
+    let o = sh(m, &script, SHORT).await?;
+    if o.code != Some(0) {
+        return Err(failure(&o));
+    }
+    Ok(o.out.trim().into())
+}
+
+pub async fn remove_scratch(m: &Host, path: &str) -> Result<()> {
+    let named = std::path::Path::new(path)
+        .file_name()
+        .is_some_and(|n| n.to_string_lossy().starts_with(SCRATCH));
+    if !named {
+        return Err(Error::failed(format!("{path} is not a scratch dir")));
+    }
+    let o = sh(m, &format!("rm -rf -- {}", quote(path)), LONG).await?;
+    if o.code != Some(0) {
+        return Err(failure(&o));
+    }
+    Ok(())
+}
+
+// A workspace on a folder that is not a worktree: no git, no checkout to remove.
+pub async fn workspace(m: &Host, path: &str, label: &str) -> Result<Worktree> {
+    #[derive(Deserialize)]
+    struct Created {
+        root_pane: Pane,
+    }
+    #[derive(Deserialize)]
+    struct Pane {
+        pane_id: PaneId,
+    }
+    let params = json!({"cwd": path, "label": label, "focus": false});
+    let c = m
+        .link
+        .call::<Created>("workspace.create", params, SHORT)
+        .await?;
+    Ok(Worktree {
+        pane_id: c.root_pane.pane_id,
+        path: path.into(),
+    })
+}
+
 // Resolves once herdr sees the agent, which may still be blocked at startup (folder trust and
 // similar dialogs; then agent.start fails with AgentNotReady). A reopened workspace keeps its shell wherever it was left,
 // so cd to the checkout first. `env` is exported in the pane's shell, so the agent's own drover
