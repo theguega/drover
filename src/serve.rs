@@ -62,7 +62,7 @@ const CREW: &str = "You are a crewmate. Your mate reads the end of each of your 
 const MATE: &str = "You are a mate: you dispatch crew and write no code. Follow the `mates` skill. Your run id is $DROVER_RUN.";
 // The reader profile's cwd holds only these. pi has no read-only mode: its tools are these.
 const PI_READER: &str = "{\"defaultTools\": [\"read\", \"grep\", \"find\", \"ls\"]}\n";
-const READER_AGENTS: &str = "You are a reader. You can read files and run `brain find`, `brain get`, `brain pages` and `brain code`. You cannot change anything, and you have no network. Answer from what you read.\n";
+const READER_AGENTS: &str = "You are a reader. You can read files, and run only the commands your settings allow. You cannot change anything, and you have no network. Answer from what you read.\n";
 
 // A headless process, while it is warm.
 struct Proc {
@@ -99,6 +99,9 @@ pub struct App {
     state: PathBuf,
     port: u16,
     hook_timeout: u64,
+    // `done --entry` runs it through sh, the entry on stdin
+    journal_cmd: Option<String>,
+    reader_allow: Vec<String>,
     idle_kill: Duration,
     // the same for a process running background tasks, which may never end
     background_kill: Duration,
@@ -344,6 +347,8 @@ impl App {
             state,
             port: config.http_port,
             hook_timeout: config.hook_timeout,
+            journal_cmd: config.journal_cmd.clone(),
+            reader_allow: config.reader_allow.clone(),
             idle_kill: Duration::from_secs(config.idle_kill),
             background_kill: Duration::from_secs(
                 config
@@ -815,6 +820,7 @@ impl App {
             hooks,
             hook_timeout: self.hook_timeout,
             remote,
+            reader_allow: &self.reader_allow,
         }
     }
 
@@ -951,6 +957,31 @@ impl App {
             }
         }
         Ok(dir)
+    }
+
+    // journal_cmd takes the entry on stdin. Unset or failing, nothing closes.
+    async fn journal(&self, entry: &str) -> Result<()> {
+        let Some(cmd) = &self.journal_cmd else {
+            return Err(Failure::new(
+                "no journal_cmd in the config: the entry was not logged",
+                "drover done <run>, without --entry",
+            )
+            .into());
+        };
+        let mut child = Command::new("sh")
+            .args(["-c", cmd])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(entry.as_bytes()).await?;
+        }
+        let out = child.wait_with_output().await?;
+        if !out.status.success() {
+            bail!("{cmd}: {}", String::from_utf8_lossy(&out.stderr).trim());
+        }
+        Ok(())
     }
 
     // The next prompt into a run, under the turns lock: typed into its pane, or written to its
@@ -2139,7 +2170,7 @@ impl App {
         };
         // the entry is logged before anything closes, so a failed log loses nothing
         if let Some(entry) = entry {
-            brain_log(entry).await?;
+            self.journal(entry).await?;
         }
         let mut notes = Vec::new();
         let mut removed = false;
@@ -2530,35 +2561,6 @@ async fn tunnel(host: String, port: u16) {
         sleep(backoff).await;
         backoff = backoff.saturating_mul(2).min(Duration::from_secs(10));
     }
-}
-
-// `brain log` takes the entry on stdin. brain may be absent; then nothing closes.
-async fn brain_log(entry: &str) -> Result<()> {
-    let child = Command::new("brain")
-        .arg("log")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Failure::new(
-                "brain is not on PATH: the entry was not logged",
-                "drover done <run>, without --entry",
-            )
-            .into());
-        }
-        Err(e) => return Err(e.into()),
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(entry.as_bytes()).await?;
-    }
-    let out = child.wait_with_output().await?;
-    if !out.status.success() {
-        bail!("brain log: {}", String::from_utf8_lossy(&out.stderr).trim());
-    }
-    Ok(())
 }
 
 async fn watch_machine(app: &App, h: &Host) {
@@ -3701,6 +3703,37 @@ cat >/dev/null
         )
         .await;
         assert_eq!(approved(&app, &r.id), 0);
+        Ok(())
+    }
+
+    // An entry goes to journal_cmd's stdin before the run closes; with none configured, done
+    // --entry is refused and the run stays open.
+    #[tokio::test]
+    async fn done_logs_the_entry_with_journal_cmd() -> Result<()> {
+        let log = std::env::temp_dir().join(format!("drover-journal-{}", std::process::id()));
+        let entries = [
+            (
+                "",
+                Some("no journal_cmd in the config: the entry was not logged"),
+            ),
+            (&*format!("journal_cmd = \"cat > {}\"", log.display()), None),
+        ];
+        for (config, refused) in entries {
+            let app = app_with(config)?;
+            let mut r = run("r-00000d", Role::Task)?;
+            // on a machine this service does not drive, so done touches no herdr
+            r.machine = "elsewhere".parse()?;
+            r.phase = Phase::Idle;
+            app.store.save(&r)?;
+            let out = request(&app, None, "done r-00000d --entry shipped").await;
+            assert_eq!(failure(out).as_deref(), refused);
+            assert_eq!(
+                phase(&app, "r-00000d").is_some_and(Phase::ended),
+                refused.is_none()
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&log)?, "shipped");
+        std::fs::remove_file(log)?;
         Ok(())
     }
 

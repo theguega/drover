@@ -13,16 +13,6 @@ use crate::{
 
 pub struct Claude;
 
-// A reader reads the brain and files, nothing else. --restricted drops your own settings files,
-// so your allowlists do not reach it; dontAsk denies whatever these rules do not allow.
-const READER_ALLOW: [&str; 5] = [
-    "Bash(brain find *)",
-    "Bash(brain get *)",
-    "Bash(brain pages *)",
-    "Bash(brain code *)",
-    "Read",
-];
-
 // Seconds a hook that only reports may take.
 const REPORT_TIMEOUT: u64 = 10;
 
@@ -57,10 +47,16 @@ impl Harness for Claude {
         // auto: the classifier runs harmless calls and drover's hook gets what it escalates (SPIKE.md §8)
         let profile: Vec<&str> = match spec.profile {
             Profile::Actor => vec!["--permission-mode", spec.permission_mode.unwrap_or("auto")],
+            // --restricted drops your own settings files, so your allowlists do not reach a
+            // reader; dontAsk denies whatever its rules do not allow
             Profile::Reader => vec![
                 "--restricted",
                 "--tools",
-                "Bash,Read",
+                if spec.reader_allow.is_empty() {
+                    "Read"
+                } else {
+                    "Bash,Read"
+                },
                 "--permission-mode",
                 "dontAsk",
             ],
@@ -331,7 +327,13 @@ impl Claude {
         if spec.profile == Profile::Reader
             && let Value::Object(s) = &mut settings
         {
-            s.insert("permissions".into(), json!({ "allow": READER_ALLOW }));
+            let allow: Vec<String> = spec
+                .reader_allow
+                .iter()
+                .map(|c| format!("Bash({c})"))
+                .chain(["Read".into()])
+                .collect();
+            s.insert("permissions".into(), json!({ "allow": allow }));
         }
         settings
     }
@@ -464,6 +466,7 @@ mod tests {
             hooks: "http://127.0.0.1:7341/hooks/r-00000a",
             hook_timeout: 600,
             remote: false,
+            reader_allow: &[],
         }
     }
 
@@ -482,12 +485,24 @@ mod tests {
         )
     }
 
-    // A reader run cannot ssh or write to the brain: none of its rules allow it, dontAsk denies
-    // what they do not allow, and --restricted keeps your own allowlists out.
+    // A reader run cannot ssh or run a write command next to the ones it is allowed: none of its
+    // rules allow it, dontAsk denies what they do not allow, and --restricted keeps your own
+    // allowlists out. With no reader_allow it has Read alone.
     #[test]
     fn a_reader_cannot_act() -> Result<(), Box<dyn std::error::Error>> {
+        let allowed = ["notes find *".to_string(), "notes get *".to_string()];
+        let none = Claude.start(&spec(true, Profile::Reader));
+        assert_eq!(flag(&none, "--tools"), Some("Read"));
+        let settings: Value = serde_json::from_str(flag(&none, "--settings").unwrap_or_default())?;
+        assert_eq!(
+            settings.pointer("/permissions/allow"),
+            Some(&json!(["Read"]))
+        );
         for headless in [true, false] {
-            let argv = Claude.start(&spec(headless, Profile::Reader));
+            let argv = Claude.start(&StartSpec {
+                reader_allow: &allowed,
+                ..spec(headless, Profile::Reader)
+            });
             assert_eq!(flag(&argv, "--permission-mode"), Some("dontAsk"));
             assert_eq!(flag(&argv, "--tools"), Some("Bash,Read"));
             assert!(argv.iter().any(|a| a == "--restricted"));
@@ -500,7 +515,7 @@ mod tests {
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Value::as_str).collect())
                 .unwrap_or_default();
-            assert_eq!(rules, READER_ALLOW);
+            assert_eq!(rules, ["Bash(notes find *)", "Bash(notes get *)", "Read"]);
             assert!(
                 settings.pointer("/permissions/deny").is_none()
                     && settings.pointer("/permissions/defaultMode").is_none()
@@ -508,12 +523,11 @@ mod tests {
             // nothing for a reader to ask: it never reaches you
             assert!(settings.pointer("/hooks/PermissionRequest").is_none());
             for denied in [
-                "ssh dog",
-                "ssh -o x dog true",
-                "brain add x",
-                "brain label x y",
-                "brain log",
-                "brain wiki merge a b",
+                "ssh devbox",
+                "ssh -o x devbox true",
+                "notes add x",
+                "notes log",
+                "notes",
                 "curl https://x",
             ] {
                 assert!(!allows(&rules, "Bash", denied), "{denied}");
@@ -521,7 +535,7 @@ mod tests {
             for tool in ["Edit", "Write", "WebFetch"] {
                 assert!(!allows(&rules, tool, ""), "{tool}");
             }
-            assert!(allows(&rules, "Bash", "brain find robots") && allows(&rules, "Read", ""));
+            assert!(allows(&rules, "Bash", "notes find robots") && allows(&rules, "Read", ""));
         }
         Ok(())
     }

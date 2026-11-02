@@ -52,7 +52,7 @@ drover attach r-1a2b3c       # a headless run reopens in a pane, as yours
 drover run --harness cursor --repo myrepo --branch z --model auto --prompt "…"   # cursor over ACP, headless
 drover send r-1a2b3c "Plan"  # answers the question a cursor run asks (an option's label, or your own words)
 drover approve-run r-4d5e6f  # start a run an agent asked for; drop-run removes it
-drover done r-1a2b3c --remove --entry "what, why, outcome"   # brain log, close, remove the worktree
+drover done r-1a2b3c --remove --entry "what, why, outcome"   # journal_cmd, close, remove the worktree
 drover run --role mate --repo myrepo --branch mate-x --headless --prompt "the goal"   # a mate, see Mates
 drover send r-7a8b9c "the answer"   # to a mate that escalated: `drover` and `ls --phase needs` show its question
 drover snapshot              # open runs as JSON (--all for every run)
@@ -121,6 +121,8 @@ Its output is added to every session's context, so each session pays for those t
 host = "meerkat"                        # this machine's name, as herdr's machine label (default "host")
 remotes = ["chicken"]                   # ssh names whose herdr server already runs
 repos_root = "~/.drover-workspace"      # REPOS_ROOT for drover-wt on this machine
+journal_cmd = "brain log"               # done --entry: run through sh, the entry on stdin (unset: --entry is refused)
+reader_allow = ["brain find *"]         # Bash commands a reader may run, besides Read (default none)
 ```
 
 The installer writes it. An unknown key is ignored with a warning. `--config` or `DROVER_CONFIG` names another file, and `--state-dir` or `DROVER_STATE_DIR` another state directory, for a test service next to the real one.

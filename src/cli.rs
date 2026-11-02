@@ -94,12 +94,12 @@ pub enum Cmd {
     },
     /// Interrupt the run's current turn; a headless run's process is stopped, and the next send resumes it
     Stop { run: RunId },
-    /// Close a run: `brain log` its entry, close its pane, and with --remove its worktree if clean and merged
+    /// Close a run: log its entry with the config's journal_cmd, close its pane, and with --remove its worktree if clean and merged
     Done {
         run: RunId,
         #[arg(long)]
         remove: bool,
-        /// The journal entry for `brain log`; - reads it from stdin
+        /// The journal entry, on journal_cmd's stdin; - reads it from stdin
         #[arg(long)]
         entry: Option<String>,
     },
@@ -183,7 +183,7 @@ pub struct Start {
     pub headless: bool,
     #[arg(long, value_enum, default_value_t = HarnessName::Claude)]
     pub harness: HarnessName,
-    /// actor: a worktree and your allowlists. reader: brain reads and Read only, headless, in the state dir's reader/
+    /// actor: a worktree and your allowlists. reader: Read and the config's reader_allow only, headless, in the state dir's reader/
     #[arg(long, value_enum, default_value_t = Profile::Actor)]
     pub profile: Profile,
     /// The harness's model [default: the harness's own]

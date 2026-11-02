@@ -9,6 +9,8 @@
 //   hook_timeout = 600               # seconds a tool call waits for your approve or deny
 //   idle_kill = 900                  # seconds a headless process stays warm after its last turn
 //   background_kill = 9000           # the same while it runs background tasks (default 10 × idle_kill)
+//   journal_cmd = "notes log"        # `done --entry` runs it through sh, the entry on stdin (default: none)
+//   reader_allow = ["notes find *"]  # Bash commands a reader may run, as Claude rules (default: none)
 //
 // Only that flat subset of TOML is read: `key = "string"`, `key = ["a", "b"]` and `key = 7`.
 
@@ -58,6 +60,8 @@ pub struct Config {
     pub hook_timeout: u64,
     pub idle_kill: u64,
     pub background_kill: Option<u64>,
+    pub journal_cmd: Option<String>,
+    pub reader_allow: Vec<String>,
 }
 
 impl Config {
@@ -80,6 +84,8 @@ impl Config {
             hook_timeout: 600,
             idle_kill: 900,
             background_kill: None,
+            journal_cmd: None,
+            reader_allow: Vec::new(),
         };
         for (n, line) in text.lines().enumerate() {
             let line = line.split_once('#').map_or(line, |(l, _)| l).trim();
@@ -97,17 +103,20 @@ impl Config {
             match key.trim() {
                 "host" => c.host = string(value).ok_or_else(bad)?.parse()?,
                 "remotes" => {
-                    let list = value
-                        .strip_prefix('[')
-                        .and_then(|v| v.strip_suffix(']'))
-                        .ok_or_else(bad)?;
-                    c.remotes = list
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|v| !v.is_empty())
-                        .map(|v| string(v).ok_or_else(bad).and_then(|s| Ok(s.parse()?)))
+                    c.remotes = list(value)
+                        .ok_or_else(bad)?
+                        .into_iter()
+                        .map(|s| Ok(s.parse()?))
                         .collect::<Result<_>>()?;
                 }
+                "reader_allow" => {
+                    c.reader_allow = list(value)
+                        .ok_or_else(bad)?
+                        .into_iter()
+                        .map(String::from)
+                        .collect();
+                }
+                "journal_cmd" => c.journal_cmd = Some(string(value).ok_or_else(bad)?.into()),
                 "repos_root" => c.repos_root = Some(expand(string(value).ok_or_else(bad)?)),
                 // a path on the remotes, so not expanded here
                 "remote_repos_root" => {
@@ -134,6 +143,17 @@ impl Config {
 
 fn string(v: &str) -> Option<&str> {
     v.strip_prefix('"')?.strip_suffix('"')
+}
+
+// `["a", "b"]`; no comma inside an item.
+fn list(v: &str) -> Option<Vec<&str>> {
+    v.strip_prefix('[')?
+        .strip_suffix(']')?
+        .split(',')
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(string)
+        .collect()
 }
 
 fn expand(p: &str) -> PathBuf {
@@ -167,6 +187,12 @@ mod tests {
             Some("/tmp/r".into())
         );
         assert!(Config::parse("remote_repos_root = \"~/r\"").is_err());
+        let c = Config::parse(
+            "journal_cmd = \"notes log\"\nreader_allow = [\"notes find *\", \"notes get *\"]",
+        )?;
+        assert_eq!(c.journal_cmd.as_deref(), Some("notes log"));
+        assert_eq!(c.reader_allow, ["notes find *", "notes get *"]);
+        assert!(Config::parse("reader_allow = [notes]").is_err());
         Ok(())
     }
 

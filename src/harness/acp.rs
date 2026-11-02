@@ -590,6 +590,7 @@ mod tests {
             hooks: "",
             hook_timeout: 600,
             remote: false,
+            reader_allow: &[],
         }
     }
 

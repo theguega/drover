@@ -73,7 +73,7 @@ Claude (`claude.rs`, see SPIKE.md):
 - An actor headless gets `--permission-prompt-tool stdio`: without a permission host `-p` offers no AskUserQuestion or ExitPlanMode. The hook answers first and Claude cancels its stdout `control_request`; a `can_use_tool` request still open `hook_timeout` + 5 s after it came is denied on stdin (`Out::Backstop`, `Parse.held`), since a hook with no decision leaves the turn waiting there. Every way out of `App::hook` answers a permission with a deny, never `{}`, and the deadline deny does not wait for the turns lock. An allow of those two carries the call's input as `updatedInput` (they need it), with `approve --answer`s as AskUserQuestion's `answers`; any other allow is plain, since an updated input meets the `ask` rules again and a pane then shows its own dialog; `approve` needs exactly one `--answer` per question (`Harness::questions`), and `drover send <text>` answers a call with one question, as it does cursor's `AskQuestion`. A late answer is the next prompt and records no allowance.
 - A prompt starting with `/` sent to a pane leaves the phase alone: a command the TUI runs itself (`/context`) posts no hook, and one that is a turn posts `UserPromptSubmit` (`/init`, skills, custom commands) or `PreCompact`/`PostCompact` with trigger `manual` (`/compact`: working, then an empty reply).
 - Both modes get `--settings` with `http` hooks to `127.0.0.1:<http_port>/hooks/<run>`: `PermissionRequest` always, and for a pane `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `Stop` (`last_assistant_message` is the reply) and `SessionEnd`. An actor gets `--permission-mode auto` unless `drover run --permission-mode <mode>` asked for another (kept in the run's request, so a resume passes it again): auto mode runs harmless calls itself and the hook gets only what it escalates (SPIKE.md §8).
-- A reader gets `--restricted --tools Bash,Read --permission-mode dontAsk` and allow rules for `brain find|get|pages|code` and `Read`: your own settings files (and allowlists) are not read, and anything else is denied without asking.
+- A reader gets `--restricted --tools Bash,Read --permission-mode dontAsk` and allow rules for `Read` and each `reader_allow` command in the config (`--tools Read` alone when there are none): your own settings files (and allowlists) are not read, and anything else is denied without asking.
 
 Cursor and pi (`acp.rs`, see SPIKE.md §9): the Agent Client Protocol, JSON-RPC 2.0 a line over the agent's stdio. Cursor is `cursor-agent acp`, pi is `pi-acp` (npm, which runs `pi --mode rpc`; its session id is pi's). Headless only: `drover run` runs them headless, and `attach` stops the process and opens the agent's own TUI on the session in a pane (`cursor-agent --resume <id>`, `pi --session <id>`), unobserved and yours.
 
@@ -114,7 +114,7 @@ A mate is a run with `role: mate`, started by you with `drover run --role mate` 
 
 ## Memory
 
-Sessions are throwaway. drover holds no knowledge: `done --entry` hands the entry to `brain log` on stdin, before anything closes, and refuses when `brain` is not on PATH. drover stores runs, their events, and later mates' goal graphs. Long tasks rely on the agent's own compaction.
+Sessions are throwaway. drover holds no knowledge: `done --entry` runs the config's `journal_cmd` through `sh -c` with the entry on stdin, before anything closes, and refuses when `journal_cmd` is unset or fails. drover stores runs, their events, and later mates' goal graphs. Long tasks rely on the agent's own compaction.
 
 ## Machines
 

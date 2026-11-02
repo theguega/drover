@@ -43,6 +43,8 @@ pub struct StartSpec<'a> {
     pub hook_timeout: u64,
     // the process runs on a remote machine
     pub remote: bool,
+    // the Bash commands a reader may run, as Claude rules (`notes find *`)
+    pub reader_allow: &'a [String],
 }
 
 // A harness's output or hook, as drover reads it.
