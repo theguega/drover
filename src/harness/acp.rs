@@ -21,9 +21,9 @@ pub struct Acp {
     // the session mode a reader runs in; pi's reader is its cwd's .pi/settings.json instead
     reader_mode: Option<&'static str>,
     forward: &'static [(&'static str, &'static str)],
-    // set on a remote's agent: the login is in a file, since a mac's keychain is locked to an
-    // ssh session (SPIKE.md §9)
-    remote_env: Option<&'static str>,
+    // `env` words for a remote's agent: the login is in a file, since a mac's keychain is locked
+    // to an ssh session, and an API key in the remote's login shell must not override it (SPIKE.md §9)
+    remote_env: &'static [&'static str],
 }
 
 pub static CURSOR: Acp = Acp {
@@ -32,7 +32,7 @@ pub static CURSOR: Acp = Acp {
     reader_mode: Some("ask"),
     // a config dir on the remote is named apart from this machine's own
     forward: &[("DROVER_REMOTE_CURSOR_CONFIG_DIR", "CURSOR_CONFIG_DIR")],
-    remote_env: Some("AGENT_CLI_CREDENTIAL_STORE=file"),
+    remote_env: &["-u", "CURSOR_API_KEY", "AGENT_CLI_CREDENTIAL_STORE=file"],
 };
 
 // pi-acp runs `pi --mode rpc`; its session id is pi's own.
@@ -41,7 +41,7 @@ pub static PI: Acp = Acp {
     tui: &["pi", "--session"],
     reader_mode: None,
     forward: &[],
-    remote_env: None,
+    remote_env: &[],
 };
 
 // cursor answers session/new and session/load with -32000 "Authentication required" when it has no login.
@@ -427,10 +427,9 @@ impl Harness for Acp {
             return argv;
         }
         let mut argv = Vec::new();
-        if let Some(set) = self.remote_env
-            && spec.remote
-        {
-            argv.extend(words(&["env", set]));
+        if spec.remote && !self.remote_env.is_empty() {
+            argv.push("env".into());
+            argv.extend(words(self.remote_env));
         }
         argv.extend(words(self.agent));
         argv
@@ -1111,6 +1110,8 @@ mod tests {
             CURSOR.start(&remote),
             [
                 "env",
+                "-u",
+                "CURSOR_API_KEY",
                 "AGENT_CLI_CREDENTIAL_STORE=file",
                 "cursor-agent",
                 "acp"

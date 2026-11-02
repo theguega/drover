@@ -125,6 +125,14 @@ await "$h" reply '.data.text | test("PONG-2")' || fail "cursor $h: second reply"
 [[ $("$bin" show "$h" | field session) == "$session" ]] || fail "cursor $h: the session changed"
 ok "the second turn ran in the same warm process $pid: $(text)"
 
+# a remote agent has its login file, never an API key from the remote's login shell
+if [[ -n $remote ]]; then
+  penv=$(on "ps eww -p $pid") || fail "cursor $h: ps eww -p $pid"
+  grep -q 'CURSOR_API_KEY=' <<<"$penv" && fail "cursor $h: the remote agent has CURSOR_API_KEY in its environment"
+  grep -q 'AGENT_CLI_CREDENTIAL_STORE=file' <<<"$penv" || fail "cursor $h: the remote agent has no file credential store"
+  ok "the remote agent $pid has no API key and the file credential store"
+fi
+
 "$bin" send "$h" "Run this exact shell command: touch approved.txt. Then reply with exactly: DONE-3" >/dev/null
 await "$h" needs '.data.perm != null' || fail "cursor $h: no needs for touch"
 perm=$(jq -r .data.perm <<<"$event")
