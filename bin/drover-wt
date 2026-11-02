@@ -82,7 +82,7 @@ case "${1:-}" in
   ls) shift ;;
   --at) ;;
   -h|--help|help) awk 'NR>1 && !/^#/{exit} NR>1{sub(/^# ?/, ""); print}' "$0"; exit ;;
-  --version) git -C "$(dirname "$(readlink -f "$0")")" rev-parse --short HEAD; exit ;;
+  --version) d=$(dirname "$(readlink -f "$0")"); if [[ -f $d/drover-wt.build ]]; then cat "$d/drover-wt.build"; else git -C "$d" rev-parse --short HEAD; fi; exit ;;
   # a flag here would otherwise become a branch named after it
   -*) echo "unknown option $1, see --help" >&2; exit 1 ;;
 esac

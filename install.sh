@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Install drover from this checkout. Rerun after a pull. Skills are copied by hand, see README.
 #   ./install.sh           host: write ~/.config/drover/config.toml, build, link the tools, run the service
-#   ./install.sh --remote  remote: link drover-wt and the client only; no service, no config
+#   ./install.sh --remote  remote: copy drover-wt and the client, no clone needed after; no service, no config
 # The desk's own config (keys, aliases, REPOS_ROOT) stays in your dotfiles.
 set -euo pipefail
 
@@ -14,8 +14,6 @@ mkdir -p "$bin"
 for cmd in git jq herdr ssh; do
   command -v "$cmd" >/dev/null || echo "warning: $cmd is not on PATH" >&2
 done
-
-ln -sfn "$root/bin/drover-wt" "$bin/drover-wt"
 
 # /dev/tty can exist yet refuse to open (macOS over ssh without -t), so try it
 has_tty() { (exec </dev/tty) 2>/dev/null; }
@@ -37,13 +35,19 @@ if ((remote)); then
   elif [[ -z ${REPOS_ROOT:-} ]]; then
     echo "no terminal to ask on: set REPOS_ROOT=<where repositories and worktrees live> in your shell environment"
   fi
-  ln -sfn "$root/bin/drover-ssh" "$bin/drover"
-  echo "linked drover-wt and drover (set DROVER_HOST to the host's ssh name)"
+  # a symlink from an older install would be written through into the clone
+  rm -f "$bin/drover-wt" "$bin/drover"
+  cp "$root/bin/drover-wt" "$bin/drover-wt"
+  cp "$root/bin/drover-ssh" "$bin/drover"
+  git -C "$root" rev-parse --short HEAD >"$bin/drover-wt.build"
+  echo "installed drover-wt and drover (set DROVER_HOST to the host's ssh name)"
   echo "this machine needs herdr, python3 and ssh from the host"
   # the keychain is locked to an ssh session, so cursor keeps its login in a file here
   [[ $(uname) != Darwin ]] || echo "for cursor runs, log in once (from the host: ssh -t <this machine> '...'): AGENT_CLI_CREDENTIAL_STORE=file NO_OPEN_BROWSER=1 ~/.local/bin/cursor-agent login"
   exit 0
 fi
+
+ln -sfn "$root/bin/drover-wt" "$bin/drover-wt"
 
 config=~/.config/drover/config.toml
 if [[ ! -f "$config" ]]; then

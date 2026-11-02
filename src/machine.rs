@@ -1,7 +1,10 @@
 // `drover machine`: the remote machines the service drives. It runs here, as you, and restarts the
 // service when the set changes, since the config is read once at start.
 
-use std::process::Command;
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
@@ -19,21 +22,11 @@ use crate::{
 pub enum Op {
     /// The remote machines in the config
     Ls,
-    /// Save it in herdr, install drover on it over ssh, add it to remotes, and restart the service
+    /// Save it in herdr, copy drover's client scripts to it over ssh, add it to remotes, and restart the service
     Add { ssh: Machine },
     /// Remove it from herdr and from remotes, and restart the service
     Rm { ssh: Machine },
 }
-
-// Runs on the remote's login shell. A clone there is updated in place, a missing drover is installed.
-const REMOTE_INSTALL: &str = r#"set -e
-if command -v drover-wt >/dev/null 2>&1; then
-  root=$(dirname "$(dirname "$(readlink -f "$(command -v drover-wt)")")")
-  git -C "$root" pull --ff-only -q
-  "$root/install.sh" --remote
-else
-  curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh -s -- --remote
-fi"#;
 
 pub fn run(paths: &Paths, op: Op) -> Result<Value, Failure> {
     if std::env::var_os("DROVER_RUN").is_some_and(|r| !r.is_empty()) {
@@ -54,7 +47,12 @@ pub fn run(paths: &Paths, op: Op) -> Result<Value, Failure> {
             }
             set_remotes(&paths.config, &remotes)?;
             restart()?;
-            Ok(json!({ "machine": ssh.as_str(), "remotes": remotes, "help": "drover doctor" }))
+            Ok(json!({
+                "machine": ssh.as_str(),
+                "remotes": remotes,
+                "note": format!("on {ssh}, set DROVER_HOST={} in its shell", config.host.as_str()),
+                "help": "drover doctor",
+            }))
         }
         Op::Rm { ssh } => {
             for id in herdr_ids(&ssh)? {
@@ -108,17 +106,38 @@ fn herdr_add(ssh: &Machine) -> Result<(), Failure> {
     ))
 }
 
+// The client scripts of this build, so the remote needs no clone and no git.
+const DROVER_WT: &str = include_str!("../bin/drover-wt");
+const DROVER_SSH: &str = include_str!("../bin/drover-ssh");
+
 fn install(ssh: &Machine) -> Result<(), Failure> {
-    let ok = Command::new("ssh")
+    ship(ssh, "~/.local/bin/drover-wt", DROVER_WT)?;
+    ship(ssh, "~/.local/bin/drover", DROVER_SSH)?;
+    ship(
+        ssh,
+        "~/.local/bin/drover-wt.build",
+        concat!(env!("DROVER_GIT_SHA"), "\n"),
+    )
+}
+
+// Written under a new name and moved over, so a symlink from an older install is replaced, not written through.
+fn ship(ssh: &Machine, path: &str, content: &str) -> Result<(), Failure> {
+    let script = format!(
+        "set -e; mkdir -p ~/.local/bin; cat >{path}.new; chmod +x {path}.new; mv -f {path}.new {path}"
+    );
+    let mut child = Command::new("ssh")
         .args(SSH_OPTS)
-        .args([ssh.as_str(), REMOTE_INSTALL])
-        .status()?
-        .success();
-    if ok {
+        .args([ssh.as_str(), &script])
+        .stdin(Stdio::piped())
+        .spawn()?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(content.as_bytes())?;
+    }
+    if child.wait()?.success() {
         return Ok(());
     }
     Err(Failure::new(
-        format!("installing drover on {ssh} failed"),
+        format!("copying {path} to {ssh} failed"),
         format!("ssh {ssh} and read the output above"),
     ))
 }

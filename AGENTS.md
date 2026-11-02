@@ -23,7 +23,7 @@ bin/drover-wt   worktrees for herdr: branch, new name, #pr, ls, rm (shipped, not
 bin/drover-ssh  the client on a non-host machine: runs drover on DROVER_HOST
 skills/drover/  the drover skill, copied by hand into ~/.agents/skills
 skills/mates/   the mates skill: a mate's dispatch playbook, copied the same way
-install.sh      host: config.toml, build, links, user service. --remote: links only
+install.sh      host: config.toml, build, links, user service. --remote: copies drover-wt and the client, with a build stamp
 bootstrap.sh    curl entry point: clones into ~/.local/share/drover, runs install.sh
 scripts/live-test.sh  headless, approvals, pane and attach against a real claude (haiku) and herdr
 scripts/live-test-mates.sh  a mate's crew, wait, goal and escalate against a real claude (haiku)
@@ -47,7 +47,7 @@ dashboard ─ 127.0.0.1:7341 ─▶      │  ▲ hooks (http)
 
 drover ships with its own worktree tool (`bin/drover-wt`), linked to `~/.local/bin` by `install.sh`, and its own skill. Your desk is personal and lives in your dotfiles: herdr's keybindings, a `wt` alias, and the env (`PATH`, `REPOS_ROOT`, `HERDR_WORKTREE_PREFIX`) in your shell's env file. Those point at `drover-wt`. drover reads none of them itself, except `repos_root` from its config, given to drover-wt on the host. The service starts through `zsh -lc`, and ssh runs the login shell, so every machine's own dotfiles decide.
 
-Remotes need `drover-wt` on PATH, so they run `install.sh --remote` too.
+Remotes need `drover-wt` on PATH: `drover machine add` copies it there, with the client, from the scripts this build carries (`include_str!`). A remote needs no clone and no git checkout of drover.
 
 ## Worktrees
 
@@ -124,7 +124,7 @@ Sessions are throwaway. drover holds no knowledge: the agents write their own no
 
 The service runs on one host, named by `host` in the config. Each name in `remotes` is an ssh name whose herdr server is already running; drover never starts one. Match it to the saved herdr machine label so the desk and drover agree. One service at a time: it owns `drover.db`.
 
-Every other machine is a client: `install.sh --remote` links `drover-wt` and `bin/drover-ssh` as `drover`, and `DROVER_HOST` names the host. `drover-ssh` passes `DROVER_RUN` along, so a remote run speaks as itself.
+Every other machine is a client: `drover machine add` copies `drover-wt` and `bin/drover-ssh` there as `drover`, and `DROVER_HOST` names the host. `drover-ssh` passes `DROVER_RUN` along, so a remote run speaks as itself.
 
 ## Rules the code follows
 

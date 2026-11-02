@@ -82,13 +82,13 @@ This clones drover into `~/.local/share/drover` (or `$DROVER_HOME`) and runs its
 3. links `drover` and `drover-wt` into `~/.local/bin`;
 4. installs and starts the service: `~/.config/systemd/user/drover.service` on Linux (with `loginctl enable-linger`), or `~/Library/LaunchAgents/dev.drover.plist` on macOS.
 
-Run it again to update. On each remote, set up only the worktree tool and the client:
+Run it again to update. To add a remote, run this on the host:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/theguega/drover/main/bootstrap.sh | sh -s -- --remote
+drover machine add gpu
 ```
 
-`--remote` links `drover-wt`, and links `bin/drover-ssh` as `drover`: a client that runs each command on the host over ssh. Set `DROVER_HOST` to the host's ssh name in your shell (`export DROVER_HOST=devbox`). On macOS it also prints the one-time Cursor login command (see [Harnesses](#harnesses)).
+It saves `gpu` in herdr, copies `drover-wt` and the client (`bin/drover-ssh`, as `drover`) to it over ssh, adds it to `remotes` and restarts the service. Nothing is cloned on the remote. On the remote, set `DROVER_HOST` to the host's ssh name in your shell (`export DROVER_HOST=devbox`). Without a host, `bootstrap.sh --remote` clones the repo and copies the same files. On macOS, `drover doctor` prints the one-time Cursor login command (see [Harnesses](#harnesses)).
 
 The service runs `zsh -lc`, and ssh runs commands through your remote shell without a terminal. So the `PATH` that finds `herdr`, `jq`, `drover-wt` and the agent CLIs must be set in a file a non-interactive shell reads (`~/.zshenv` or `~/.zprofile`), not only in `~/.zshrc`. The same goes for `~/.local/bin` on the host, where the client runs `drover`. If a tool is missing, the service does not start.
 
@@ -170,7 +170,7 @@ Its first prompt tells it to follow the `mates` skill ([`skills/mates`](skills/m
 
 ### Remotes
 
-Each name in `remotes` is an ssh name whose herdr server is already running. drover never starts one. Use the same name as that machine's herdr label. `drover run --machine gpu …` opens the worktree under that machine's repos root, and starts the agent there: in its herdr, or headless as `ssh gpu 'cd … && exec claude …'`. Hooks come back to the host through one `ssh -R` tunnel per remote. One host runs the service; on every other machine, `drover` is the ssh client that `install.sh --remote` links.
+Each name in `remotes` is an ssh name whose herdr server is already running. drover never starts one. Use the same name as that machine's herdr label. `drover run --machine gpu …` opens the worktree under that machine's repos root, and starts the agent there: in its herdr, or headless as `ssh gpu 'cd … && exec claude …'`. Hooks come back to the host through one `ssh -R` tunnel per remote. One host runs the service; on every other machine, `drover` is the ssh client that `drover machine add` copies there.
 
 ## Harnesses
 
