@@ -111,7 +111,14 @@ impl Config {
                 "repos_root" => c.repos_root = Some(expand(string(value).ok_or_else(bad)?)),
                 // a path on the remotes, so not expanded here
                 "remote_repos_root" => {
-                    c.remote_repos_root = Some(string(value).ok_or_else(bad)?.into());
+                    let root = string(value).ok_or_else(bad)?;
+                    if !root.starts_with('/') {
+                        bail!(
+                            "line {}: remote_repos_root is a path on the remotes: give it from /",
+                            n + 1
+                        );
+                    }
+                    c.remote_repos_root = Some(root.into());
                 }
                 "v1_state" => c.v1_state = Some(expand(string(value).ok_or_else(bad)?)),
                 "http_port" => c.http_port = value.parse().map_err(|_| bad())?,
@@ -156,6 +163,11 @@ mod tests {
         assert!(Config::parse("remotes = [\"-oProxyCommand=x\"]").is_err());
         assert!(Config::parse("hots = \"x\"").is_err());
         assert!(Config::parse("host = meerkat").is_err());
+        assert_eq!(
+            Config::parse("remote_repos_root = \"/tmp/r\"")?.remote_repos_root,
+            Some("/tmp/r".into())
+        );
+        assert!(Config::parse("remote_repos_root = \"~/r\"").is_err());
         Ok(())
     }
 }

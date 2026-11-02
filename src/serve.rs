@@ -16,7 +16,7 @@ use std::{
 
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStderr, ChildStdin, ChildStdout, Command},
     sync::{Notify, broadcast, mpsc, oneshot, watch},
     time::sleep,
@@ -360,6 +360,7 @@ impl App {
     // Headless processes end with the service, and their runs wait for the next send, which
     // resumes them. One the service left running (it was killed) is ended now, and before a resume.
     fn orphans(&self) -> Result<()> {
+        crate::unswap::all(&self.state.join("hooks"));
         if !self.store.procs(None)?.is_empty() {
             let me = Weak::clone(&self.me);
             tokio::spawn(async move {
@@ -501,6 +502,8 @@ impl App {
 
     // Takes the run's process out and ends it.
     async fn retire(&self, id: &RunId) {
+        // nothing will be left to hear an answer
+        self.deny_waiting(id, None);
         let proc = locked(&self.procs).remove(id);
         if let Some(p) = proc {
             self.stop(id, p).await;
@@ -988,7 +991,7 @@ impl App {
             .forward()
             .iter()
             .filter(|_| h.ssh().is_some())
-            .filter_map(|k| Some((*k, std::env::var(k).ok()?)))
+            .filter_map(|(from, to)| Some((*to, std::env::var(from).ok()?)))
             .filter(|(_, v)| !v.is_empty() && !v.contains('\n'))
             .collect();
         let names: Vec<&str> = forwarded.iter().map(|(k, _)| *k).collect();
@@ -1146,6 +1149,13 @@ impl App {
                 Out::End if r.mode != Mode::Headless => {
                     return self.end(&mut r, Phase::Done, Kind::Done, json!({ "by": "exit" }));
                 }
+                // the agent's open questions were answered as cancelled
+                Out::Cancel if self.has_waiting(&r.id) => {
+                    self.deny_waiting(&r.id, None);
+                    if r.phase == Phase::Needs {
+                        r.phase = Phase::Working;
+                    }
+                }
                 Out::Fail(error) => {
                     return self.end(
                         &mut r,
@@ -1154,7 +1164,7 @@ impl App {
                         json!({ "error": error }),
                     );
                 }
-                Out::End | Out::Permission { .. } | Out::Write(_) => {}
+                Out::End | Out::Permission { .. } | Out::Write(_) | Out::Cancel => {}
             }
         }
         if r != before {
@@ -1905,9 +1915,11 @@ impl App {
             // the next send resumes its session
             Some(Abort::Kill) => self.retire(id).await,
             // the turn ends with its reply; what it waits on is answered as cancelled
-            Some(Abort::Stdin(line)) => {
+            Some(Abort::Stdin(lines)) => {
                 if let Some(p) = locked(&self.procs).get(id) {
-                    let _ = p.stdin.send(line);
+                    for line in lines {
+                        let _ = p.stdin.send(line);
+                    }
                 }
                 // a needs with nothing waiting would read as an escalation
                 if r.phase == Phase::Needs && self.has_waiting(id) {
@@ -2124,6 +2136,33 @@ fn keep_tail(s: &mut String, max: usize) {
     s.drain(..cut);
 }
 
+// A stdout line is a JSON message; one this long is no message drover reads.
+const LINE_MAX: u64 = 16 << 20;
+
+// The next line, without its newline; a line over LINE_MAX is skipped whole.
+async fn next_line(r: &mut BufReader<ChildStdout>) -> std::io::Result<Option<String>> {
+    loop {
+        let mut buf = Vec::new();
+        let n = (&mut *r).take(LINE_MAX).read_until(b'\n', &mut buf).await?;
+        if n == 0 {
+            return Ok(None);
+        }
+        if buf.last() == Some(&b'\n') || (n as u64) < LINE_MAX {
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+            }
+            return Ok(Some(String::from_utf8_lossy(&buf).into_owned()));
+        }
+        while buf.last() != Some(&b'\n') {
+            buf.clear();
+            if (&mut *r).take(LINE_MAX).read_until(b'\n', &mut buf).await? == 0 {
+                return Ok(None);
+            }
+        }
+        eprintln!("a line over {LINE_MAX} bytes, skipped");
+    }
+}
+
 async fn write_lines(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
     while let Some(mut line) = rx.recv().await {
         line.push('\n');
@@ -2170,19 +2209,28 @@ async fn read_proc(
         }
         tail
     });
-    let mut lines = BufReader::new(stdout).lines();
+    // read apart, so the batch timer never cuts a line
+    let (lines_tx, mut lines) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut out = BufReader::new(stdout);
+        while let Ok(Some(l)) = next_line(&mut out).await {
+            if lines_tx.send(l).is_err() {
+                return;
+            }
+        }
+    });
     let mut text = String::new();
     let mut due = None;
     loop {
         let line = tokio::select! {
-            l = lines.next_line() => l,
+            l = lines.recv() => l,
             () = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if due.is_some() => {
                 due = None;
                 app.apply(&id, vec![Out::Text(std::mem::take(&mut text))]).await;
                 continue;
             }
         };
-        let Ok(Some(line)) = line else { break };
+        let Some(line) = line else { break };
         let mut outs = Vec::new();
         let read = harness.events(&line, &mut locked(&parse));
         for out in read {
@@ -2193,6 +2241,12 @@ async fn read_proc(
                 }
                 Out::Write(l) => drop(stdin.send(l)),
                 Out::Permission { tool, input, call } => {
+                    // what came before it is stored before its needs
+                    if !text.is_empty() {
+                        outs.push(Out::Text(std::mem::take(&mut text)));
+                        due = None;
+                    }
+                    app.apply(&id, std::mem::take(&mut outs)).await;
                     let (app, id, stdin, parse) = (
                         Arc::clone(&app),
                         id.clone(),
@@ -2201,9 +2255,15 @@ async fn read_proc(
                     );
                     tokio::spawn(async move {
                         let d = app.permission(&id, tool, input, None).await;
-                        for l in harness.answer(&d, &call, &mut locked(&parse)) {
-                            let _ = stdin.send(l);
+                        let answer = harness.answer(&d, &call, &mut locked(&parse));
+                        let mut rest = Vec::new();
+                        for o in answer {
+                            match o {
+                                Out::Write(l) => drop(stdin.send(l)),
+                                o => rest.push(o),
+                            }
                         }
+                        app.apply(&id, rest).await;
                     });
                 }
                 o => {
@@ -3018,6 +3078,118 @@ read -r l
         assert_eq!(
             app.get(&r.id)?.session.map(|s| s.as_str().to_string()),
             Some("317266eb-32ce-4e67-9457-7a097c828473".into())
+        );
+        Ok(())
+    }
+
+    // A fake ACP agent's run, its process served as App::spawn would serve it.
+    async fn fake_acp(app: &App, id: &str, script: &str) -> Result<Run> {
+        let mut r = run(id, Role::Task)?;
+        (r.harness, r.mode, r.cwd) = (crate::run::HarnessName::Cursor, Mode::Headless, "/".into());
+        app.store.save(&r)?;
+        let h = harness::get(r.harness).ok_or("no cursor")?;
+        let argv = ["sh", "-c", script].map(String::from);
+        let sp = harness::spawn(&argv, Path::new("/"), &[], None, &[])?;
+        let mut parse = Parse::default();
+        let first = h.open(&app.spec(&r, &Value::Null, "", None, &[]), &mut parse);
+        app.serve_proc(&r, h, sp, first, parse)?;
+        request(app, None, &format!("send {id} go")).await?;
+        Ok(r)
+    }
+
+    async fn idle(app: &App, id: &str) -> Result<()> {
+        for _ in 0..300 {
+            if phase(app, id) == Some(Phase::Idle) {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        bail!("{id} is {:?}", phase(app, id))
+    }
+
+    // Cursor asks two calls at once. A deny with a reason cancels the turn: the other call is
+    // answered `cancelled` and waits no more, and only the reason's turn follows; the next send
+    // gets its own reply.
+    const FAKE_TWO_CALLS: &str = r#"
+sid=317266eb-32ce-4e67-9457-7a097c828473
+say() { printf '%s\n' "$1"; }
+upd() { say '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"'$sid'","update":'"$1"'}}'; }
+read -r l; say '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1,"agentCapabilities":{"loadSession":true}}}'
+read -r l; say '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"'$sid'"}}'
+read -r l
+for i in 0 1; do
+  upd '{"sessionUpdate":"tool_call","toolCallId":"c'$i'","title":"`touch '$i'`","kind":"execute","status":"pending","rawInput":{"command":"touch '$i'"}}'
+done
+for i in 0 1; do
+  say '{"jsonrpc":"2.0","id":'$i',"method":"session/request_permission","params":{"sessionId":"'$sid'","toolCall":{"toolCallId":"c'$i'","title":"`touch '$i'`","kind":"execute"},"options":[{"optionId":"allow-once","kind":"allow_once"},{"optionId":"reject-once","kind":"reject_once"}]}}'
+done
+read -r l; case $l in *'"id":0,'*reject-once*) ;; *) exit 3 ;; esac
+read -r l; case $l in *session/cancel*) ;; *) exit 4 ;; esac
+read -r l; case $l in *'"id":1,'*'"outcome":"cancelled"'*) ;; *) exit 5 ;; esac
+say '{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}'
+read -r l; case $l in *'"id":4,'*FIRST*) ;; *) exit 6 ;; esac
+upd '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"heard FIRST"}}'
+say '{"jsonrpc":"2.0","id":4,"result":{"stopReason":"end_turn"}}'
+read -r l; case $l in *'"id":5,'*hello*) ;; *) exit 7 ;; esac
+upd '{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello back"}}'
+say '{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}'
+read -r l
+"#;
+
+    #[tokio::test]
+    async fn a_deny_that_cancels_answers_the_other_calls() -> Result<()> {
+        let app = app()?;
+        let r = fake_acp(&app, "r-0000b1", FAKE_TWO_CALLS).await?;
+        needs(&app, &r.id).await?;
+        for _ in 0..100 {
+            if locked(&app.waiting).len() == 2 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        request(&app, None, "deny r-0000b1 p1 --reason FIRST").await?;
+        idle(&app, "r-0000b1").await?;
+        assert!(!app.has_waiting(&r.id));
+        let full = |app: &App| -> Result<Value> {
+            Ok(at(
+                &app.store.last(&r.id, Kind::Reply)?.unwrap_or_default(),
+                "/full",
+            )
+            .clone())
+        };
+        assert_eq!(full(&app)?, "heard FIRST");
+        assert!(
+            failure(request(&app, None, "deny r-0000b1 p2 --reason SECOND").await)
+                .is_some_and(|e| e.contains("no call p2"))
+        );
+        request(&app, None, "send r-0000b1 hello").await?;
+        for _ in 0..300 {
+            if full(&app)? == "hello back" {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(full(&app)?, "hello back");
+        Ok(())
+    }
+
+    // attach retires the process while a question waits: nothing is left to answer it.
+    #[tokio::test]
+    async fn a_retired_process_leaves_no_call_waiting() -> Result<()> {
+        let app = app()?;
+        let script = r#"
+read -r l; printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}'
+read -r l; printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"sessionId":"317266eb-32ce-4e67-9457-7a097c828473"}}'
+read -r l; printf '%s\n' '{"jsonrpc":"2.0","id":0,"method":"cursor/ask_question","params":{"toolCallId":"q","questions":[{"id":"q1","prompt":"Which?","options":[{"id":"a","label":"A"}]}]}}'
+cat >/dev/null
+"#;
+        let r = fake_acp(&app, "r-0000b2", script).await?;
+        assert_eq!(at(&needs(&app, &r.id).await?, "/tool"), "AskQuestion");
+        app.retire(&r.id).await;
+        assert!(!app.has_waiting(&r.id));
+        assert!(
+            failure(request(&app, None, "approve r-0000b2 p1").await)
+                .is_some_and(|e| e.contains("no call p1"))
         );
         Ok(())
     }

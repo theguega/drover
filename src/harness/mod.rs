@@ -41,7 +41,7 @@ pub struct StartSpec<'a> {
     pub hooks: &'a str,
     // seconds a permission hook may wait for drover's answer
     pub hook_timeout: u64,
-    // names of `Harness::forward` drover sends on the process's stdin, for a remote run
+    // the names a remote process has the variables of `Harness::forward` drover sends it under
     pub forwarded: &'a [&'a str],
 }
 
@@ -71,6 +71,7 @@ pub enum Out {
     },
     Write(String), // a protocol line onto the process's stdin
     Fail(String),  // the process cannot serve the run
+    Cancel,        // what the agent asked is over: the run's waiting calls are answered
     End,           // the session ended
     Rekey,         // the next hook brings a new session, in the same agent
 }
@@ -83,7 +84,7 @@ pub struct Decision {
 
 pub enum Abort {
     Kill,
-    Stdin(String),
+    Stdin(Vec<String>),
 }
 
 // What an adapter remembers of one process: the reader of its stdout and the writer of prompts
@@ -108,8 +109,8 @@ pub trait Harness: Sync {
     fn abort(&self, p: &mut Parse) -> Abort;
     // One stdout line of a headless process.
     fn events(&self, line: &str, p: &mut Parse) -> Vec<Out>;
-    // The answer to a permission its stdout asked for, as stdin lines.
-    fn answer(&self, _d: &Decision, _call: &Value, _p: &mut Parse) -> Vec<String> {
+    // The answer to a permission its stdout asked for: `Out::Write`s, and what follows.
+    fn answer(&self, _d: &Decision, _call: &Value, _p: &mut Parse) -> Vec<Out> {
         Vec::new()
     }
     // One hook the harness posted, and the answer to a permission it asked for.
@@ -119,8 +120,9 @@ pub trait Harness: Sync {
     fn respond(&self, _d: &Decision) -> Value {
         json!({})
     }
-    // Variables of drover's environment a remote process gets, on its stdin: never on a command line.
-    fn forward(&self) -> &'static [&'static str] {
+    // Variables of drover's environment a remote process gets on its stdin, never on a command
+    // line: (drover's name, the name the process has it under).
+    fn forward(&self) -> &'static [(&'static str, &'static str)] {
         &[]
     }
 }
@@ -233,10 +235,11 @@ pub fn spawn(
 // left after `grace`. A harness's tools run in sessions and groups of their own, so they are found
 // by their parents, which a SIGKILL of the harness alone would orphan, and by the harness's group.
 // One script, here or over ssh, so the tree is read before anything dies. Nothing to do when the
-// process is gone or its pid is another process now.
+// process is gone or its pid is another process now; exit 1 when it outlived the SIGKILL.
+// macOS pads lstart with spaces, which `Ident::parse` trims: so is it trimmed here.
 const TERMINATE: &str = r#"
 pid=PID; start=START; grace=GRACE
-[ "$(ps -o lstart= -p $pid 2>/dev/null)" = "$start" ] || exit 0
+[ "$(ps -o lstart= -p $pid 2>/dev/null | sed 's/^ *//; s/ *$//')" = "$start" ] || exit 0
 ids="$pid $(ps -e -o pid=,pgid= | awk -v g=$pid '$2 == g { print $1 }') $(ps -e -o pid=,ppid= | awk -v r=$pid '{ p[$1] = $2 } END { for (i in p) { x = i; while (x in p) { if (p[x] == r) { print i; break }; x = p[x] } } }')"
 # a zombie has ended: only its parent's wait is left
 alive() { for i in $ids; do case "$(ps -o stat= -p $i 2>/dev/null)" in "" | Z*) ;; *) return 0 ;; esac; done; return 1; }
@@ -244,6 +247,9 @@ kill -TERM $ids 2>/dev/null
 n=0
 while alive && [ $n -lt $((grace * 5)) ]; do sleep 0.2; n=$((n + 1)); done
 alive && kill -KILL $ids 2>/dev/null
+n=0
+while alive && [ $n -lt 10 ]; do sleep 0.2; n=$((n + 1)); done
+alive && exit 1
 exit 0
 "#;
 
@@ -270,9 +276,16 @@ pub async fn terminate(ssh: Option<&str>, ident: &Ident, grace: Duration) -> std
         .stderr(Stdio::null())
         .kill_on_drop(true)
         .status();
-    tokio::time::timeout(grace + Duration::from_secs(20), status)
+    let status = tokio::time::timeout(grace + Duration::from_secs(20), status)
         .await
         .map_err(|_| std::io::Error::other("terminate timed out"))??;
+    // the caller keeps its record of the process until it is gone
+    if !status.success() {
+        return Err(std::io::Error::other(format!(
+            "pid {} is still running",
+            ident.pid
+        )));
+    }
     Ok(())
 }
 

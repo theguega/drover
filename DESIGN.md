@@ -67,10 +67,10 @@ trait Harness {
     fn send(&self, text: &str, p: &mut Parse) -> Vec<String>;        // a prompt, as stdin lines
     fn abort(&self, p: &mut Parse) -> Abort;                         // kill, or an interrupt line
     fn events(&self, line: &str, p: &mut Parse) -> Vec<Out>;         // one stdout line, normalized
-    fn answer(&self, d: &Decision, call: &Value, p: &mut Parse) -> Vec<String>; // a permission asked on stdout
+    fn answer(&self, d: &Decision, call: &Value, p: &mut Parse) -> Vec<Out>; // a permission asked on stdout
     fn hook(&self, body: &Value) -> Vec<Out>;        // one hook it posted
     fn respond(&self, d: &Decision) -> Value;        // to the waiting hook
-    fn forward(&self) -> &'static [&'static str];    // env a remote process reads from its stdin
+    fn forward(&self) -> &'static [(&'static str, &'static str)]; // env a remote process reads from its stdin
 }
 ```
 

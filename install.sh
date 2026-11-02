@@ -17,7 +17,8 @@ done
 
 ln -sfn "$root/bin/drover-wt" "$bin/drover-wt"
 # the pi extension earlier versions linked: pi now runs through pi-acp
-if [[ -L ~/.pi/agent/extensions/drover.ts ]]; then rm ~/.pi/agent/extensions/drover.ts; fi
+old=~/.pi/agent/extensions/drover.ts
+if [[ -L $old && $(readlink "$old") == "$root/harness/pi.ts" ]]; then rm "$old"; fi
 
 # ask on the terminal, so this also works when the script arrives through curl
 ask() {

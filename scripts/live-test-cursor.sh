@@ -25,8 +25,8 @@ tmp=$(mktemp -d /tmp/drover-cur.XXXX)
 port=${LIVE_PORT:-7381}
 export DROVER_STATE_DIR=$tmp/state DROVER_CONFIG=$tmp/config.toml
 # cursor's own config, in allowlist mode so shell calls ask; your approvalMode may run everything.
-# Forwarded to a remote with the key, so the same path exists there.
-export CURSOR_CONFIG_DIR=$tmp/cursor
+# A remote run gets the same path, written there too, as its CURSOR_CONFIG_DIR.
+export CURSOR_CONFIG_DIR=$tmp/cursor DROVER_REMOTE_CURSOR_CONFIG_DIR=$tmp/cursor
 # the test speaks as you
 unset DROVER_RUN
 mkdir -p "$DROVER_STATE_DIR"
@@ -169,6 +169,13 @@ await "$h" reply '.data.text | test("PONG-1")' || fail "cursor $h: the resumed s
 [[ $(pid_of "$h") != "$pid" ]] || fail "cursor $h: no new process"
 ok "kill -9 $pid, then session/load in process $(pid_of "$h"): $(text)"
 
+# done ends the agent, and drover forgets it only once it is gone
+pid=$(pid_of "$h")
 "$bin" done "$h" >/dev/null
 runs=()
+for _ in $(seq 50); do on "kill -0 $pid" 2>/dev/null || break; sleep 0.2; done
+on "kill -0 $pid" 2>/dev/null && fail "done $h left its agent $pid running"
+for _ in $(seq 50); do [[ -z $(pid_of "$h") ]] && break; sleep 0.2; done
+[[ -z $(pid_of "$h") ]] || fail "cursor $h: its process is still recorded"
+ok "done $h ended its agent $pid"
 echo "all checks passed"
