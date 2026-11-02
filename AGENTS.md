@@ -113,7 +113,7 @@ A mate is a run with `role: mate`, started by you with `drover run --role mate` 
 
 ## Memory
 
-Sessions are throwaway. drover holds no knowledge: `done --entry` runs the config's `journal_cmd` through `sh -c` with the entry on stdin, before anything closes, and refuses when `journal_cmd` is unset or fails (exit status and stderr in the error; killed with its process group after 30 s, or when the client goes away). drover stores runs, their events, and later mates' goal graphs. Long tasks rely on the agent's own compaction.
+Sessions are throwaway. drover holds no knowledge: the agents write their own notes, through their own skills. drover stores runs, their events, and later mates' goal graphs. Long tasks rely on the agent's own compaction.
 
 ## Machines
 

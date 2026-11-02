@@ -1,6 +1,6 @@
 # drover: design
 
-drover runs coding agents. It starts them in git worktrees, on this machine or over ssh. It runs them either in a herdr pane, for you to pair with, or headless, for the dashboard and for other agents. It carries their approvals and streams their events. It calls no model and holds no knowledge: when a task ends, its journal entry goes to the command you configure (`journal_cmd`).
+drover runs coding agents. It starts them in git worktrees, on this machine or over ssh. It runs them either in a herdr pane, for you to pair with, or headless, for the dashboard and for other agents. It carries their approvals and streams their events. It calls no model and holds no knowledge: the agents keep their own notes.
 
 Status: requirements D1–D12. Built: runs, pending runs, the Harness trait with the Claude adapter (pane and headless) and one ACP adapter for Cursor and pi (headless; pi's not yet run live), events and SSE, approvals, profiles, per-run usage. Mates: `--role mate`, `goal`, `wait`, `escalate`. Not yet: plan-window usage, the dashboard.
 
@@ -194,7 +194,7 @@ The goal graph is stored with the mate's run and streamed as `goal` events. That
 | `drover attach <run>` | opens it in a herdr pane and takes ownership |
 | `drover screen <run>` · `keys <run> <keys>` | pane runs only, kept for pair-coding |
 | `drover stop <run>` | aborts it |
-| `drover done <run> [--remove]` | with `--entry`, runs `journal_cmd` with the entry on stdin; closes the run, removes the worktree if it's clean and merged |
+| `drover done <run> [--remove]` | closes the run and its pane; removes the worktree if it's clean and merged |
 | `drover goal …` · `escalate` | C16, for mates |
 | `drover watch` · `snapshot` | JSON for programs |
 | `drover serve` | the service |

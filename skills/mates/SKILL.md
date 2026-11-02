@@ -19,10 +19,10 @@ drover show <crew>                            # phase, perms, last reply (first 
 drover reply <crew>                           # the whole last reply
 drover goal set --file goal.json · drover goal node <id> --status … --round … --crew … --review …
 drover escalate --text -                      # to the user, on stdin
-drover done <crew> [--remove] [--entry -]    # close it; --entry needs journal_cmd in the config
+drover done <crew> [--remove]    # close it
 ```
 
-- Pass long text on stdin with a quoted heredoc (`--prompt -`, `--text -`, `--entry -`). In double quotes the shell expands `$5.65` and backticks.
+- Pass long text on stdin with a quoted heredoc (`--prompt -`, `--text -`). In double quotes the shell expands `$5.65` and backticks.
 - A crew run waits in `pending` until the user runs `drover approve-run`. Say nothing about it: `drover wait` returns when it starts and replies. You cannot approve, drop or attach a run.
 - You own your crew: only you `send`, `approve`, `deny` and `stop` them. The crew's tool calls need an answer from you, not the user. The home view `drover` is for the user.
 - `drover wait` keeps your place: each call returns what came after the last one it returned, once. It returns no events after `--timeout` (90 s by default, below a shell tool's own timeout): call it again.
@@ -130,7 +130,7 @@ Each reply from a crew run is one round for its node.
 ### Close
 
 1. Only after the user confirms the work is done.
-2. `drover done <crew>` for each crew run, with `--entry -` and the journal entry on stdin (what, why, outcome) when the config has a `journal_cmd`; without one, `--entry` is refused. Add `--remove` once its branch is merged: a dirty checkout and an unmerged branch stay anyway.
+2. `drover done <crew>` for each crew run. Add `--remove` once its branch is merged: a dirty checkout and an unmerged branch stay anyway.
 3. Report the outcome in one short message.
 
 ## Practices

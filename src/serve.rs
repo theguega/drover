@@ -100,8 +100,6 @@ pub struct App {
     state: PathBuf,
     port: u16,
     hook_timeout: u64,
-    // `done --entry` runs it through sh, the entry on stdin
-    journal_cmd: Option<String>,
     reader_allow: Vec<String>,
     idle_kill: Duration,
     // the same for a process running background tasks, which may never end
@@ -348,7 +346,6 @@ impl App {
             state,
             port: config.http_port,
             hook_timeout: config.hook_timeout,
-            journal_cmd: config.journal_cmd.clone(),
             reader_allow: config.reader_allow.clone(),
             idle_kill: Duration::from_secs(config.idle_kill),
             background_kill: Duration::from_secs(
@@ -592,9 +589,7 @@ impl App {
             Cmd::Screen { run, lines } => self.cmd_screen(&run, lines).await,
             Cmd::Keys { run, keys } => self.cmd_keys(from, &run, &keys).await,
             Cmd::Stop { run } => self.cmd_stop(from, &run).await,
-            Cmd::Done { run, remove, entry } => {
-                self.cmd_done(from, &run, remove, entry.as_deref()).await
-            }
+            Cmd::Done { run, remove } => self.cmd_done(from, &run, remove).await,
             Cmd::Snapshot { all } => self.snapshot(all),
             Cmd::Home => self.home(),
             Cmd::Wait {
@@ -957,18 +952,6 @@ impl App {
             }
         }
         Ok(dir)
-    }
-
-    // journal_cmd takes the entry on stdin. Unset or failing, nothing closes.
-    async fn journal(&self, entry: &str) -> Result<()> {
-        let Some(cmd) = &self.journal_cmd else {
-            return Err(Failure::new(
-                "no journal_cmd in the config: the entry was not logged",
-                "drover done <run>, without --entry",
-            )
-            .into());
-        };
-        run_journal(cmd, entry, JOURNAL_TIMEOUT).await
     }
 
     // The next prompt into a run, under the turns lock: typed into its pane, or written to its
@@ -2122,13 +2105,7 @@ impl App {
         Ok(self.brief(&r))
     }
 
-    async fn cmd_done(
-        &self,
-        from: Option<&RunId>,
-        id: &RunId,
-        remove: bool,
-        entry: Option<&str>,
-    ) -> Result<Value> {
+    async fn cmd_done(&self, from: Option<&RunId>, id: &RunId, remove: bool) -> Result<Value> {
         // checked under the lock, closed without it: an unreachable remote holds up no hook
         let r = {
             let _turn = self.turns.lock().await;
@@ -2155,10 +2132,6 @@ impl App {
                 _ => r,
             }
         };
-        // the entry is logged before anything closes, so a failed log loses nothing
-        if let Some(entry) = entry {
-            self.journal(entry).await?;
-        }
         let mut notes = Vec::new();
         let mut removed = false;
         match (self.host(&r.machine), r.mode.pane().cloned(), r.workspace()) {
@@ -2189,12 +2162,8 @@ impl App {
                 if let Err(e) = closed
                     && !herdr::panes(h).await.is_ok_and(|p| !p.contains(&pane))
                 {
-                    let logged = match entry {
-                        Some(_) => "; its entry is logged already",
-                        None => "",
-                    };
                     return Err(Failure::new(
-                        format!("{id} is not closed: {e}{logged}"),
+                        format!("{id} is not closed: {e}"),
                         format!("drover done {id}, once {} answers", h.name),
                     )
                     .into());
@@ -2205,13 +2174,13 @@ impl App {
             _ => {}
         }
         let _turn = self.turns.lock().await;
-        // a hook may have moved it on meanwhile; this end, with its entry, is the record
+        // a hook may have moved it on meanwhile; this end is the record
         let mut r = self.get(id)?;
         self.end(
             &mut r,
             Phase::Done,
             Kind::Done,
-            json!({ "entry": entry.is_some(), "removed": removed }),
+            json!({ "removed": removed }),
         )?;
         let note = notes.join("\n");
         Ok(
@@ -2594,64 +2563,6 @@ async fn watch_session(app: &App, h: &Host) -> Result<()> {
             },
             () = &mut woke => {}
         }
-    }
-}
-
-const JOURNAL_TIMEOUT: Duration = Duration::from_secs(30);
-
-// Kills journal_cmd's process group when dropped: on a timeout, and when the client that asked
-// for `done` goes away and the request is dropped.
-struct KillGroup(u32);
-
-impl Drop for KillGroup {
-    fn drop(&mut self) {
-        let _ = std::process::Command::new("kill")
-            .args(["-KILL", "--", &format!("-{}", self.0)])
-            .stderr(Stdio::null())
-            .status();
-    }
-}
-
-async fn run_journal(cmd: &str, entry: &str, limit: Duration) -> Result<()> {
-    let mut child = Command::new("sh")
-        .args(["-c", cmd])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .kill_on_drop(true)
-        .spawn()?;
-    let _group = child.id().map(KillGroup);
-    let mut stdin = child.stdin.take();
-    let feed = async {
-        match &mut stdin {
-            Some(stdin) => stdin.write_all(entry.as_bytes()).await,
-            None => Ok(()),
-        }
-    };
-    let fed = tokio::time::timeout(limit, feed).await;
-    drop(stdin);
-    let out = tokio::time::timeout(limit, child.wait_with_output())
-        .await
-        .map_err(|_| err!("journal_cmd did not exit in {limit:?}: killed"))??;
-    let said = String::from_utf8_lossy(&out.stderr);
-    if !out.status.success() {
-        match out.status.code() {
-            Some(code) => bail!("journal_cmd exited {code}: {}", said.trim()),
-            None => bail!("journal_cmd was killed by a signal: {}", said.trim()),
-        }
-    }
-    // a command that never reads stdin closes it: the write fails with EPIPE
-    match fed {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => bail!(
-            "journal_cmd exited 0 without reading the entry ({e}): {}",
-            said.trim()
-        ),
-        Err(_) => bail!(
-            "journal_cmd did not read the entry in {} s",
-            limit.as_secs()
-        ),
     }
 }
 
@@ -3086,7 +2997,6 @@ pub(crate) mod tests {
             let cmd = Cmd::Done {
                 run: "r-00000d".parse()?,
                 remove: false,
-                entry: None,
             };
             b.act(None, cmd).await
         });
@@ -3167,7 +3077,6 @@ pub(crate) mod tests {
                     Cmd::Done {
                         run: id.parse()?,
                         remove: true,
-                        entry: None,
                     },
                 )
                 .await;
@@ -3749,76 +3658,6 @@ cat >/dev/null
         .await;
         assert_eq!(approved(&app, &r.id), 0);
         Ok(())
-    }
-
-    // An entry goes to journal_cmd's stdin before the run closes; with none configured, done
-    // --entry is refused and the run stays open.
-    #[tokio::test]
-    async fn done_logs_the_entry_with_journal_cmd() -> Result<()> {
-        let log = std::env::temp_dir().join(format!("drover-journal-{}", std::process::id()));
-        let entries = [
-            (
-                "",
-                Some("no journal_cmd in the config: the entry was not logged"),
-            ),
-            (&*format!("journal_cmd = \"cat > {}\"", log.display()), None),
-        ];
-        for (config, refused) in entries {
-            let app = app_with(config)?;
-            let mut r = run("r-00000d", Role::Task)?;
-            // on a machine this service does not drive, so done touches no herdr
-            r.machine = "elsewhere".parse()?;
-            r.phase = Phase::Idle;
-            app.store.save(&r)?;
-            let out = request(&app, None, "done r-00000d --entry shipped").await;
-            assert_eq!(failure(out).as_deref(), refused);
-            assert_eq!(
-                phase(&app, "r-00000d").is_some_and(Phase::ended),
-                refused.is_none()
-            );
-        }
-        assert_eq!(std::fs::read_to_string(&log)?, "shipped");
-        std::fs::remove_file(log)?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn journal_failures_name_the_command_status() {
-        let ms = Duration::from_millis;
-        let said = |cmd: &'static str, limit| async move {
-            run_journal(cmd, &"x".repeat(1 << 20), limit)
-                .await
-                .err()
-                .map(|e| e.to_string())
-                .unwrap_or_default()
-        };
-        assert!(run_journal("cat >/dev/null", "x", ms(5000)).await.is_ok());
-        assert_eq!(
-            said("echo boom >&2; exit 3", ms(5000)).await,
-            "journal_cmd exited 3: boom"
-        );
-        // never reads stdin, and exits 0 at once: EPIPE on a 1 MiB entry
-        assert!(
-            said("true", ms(5000))
-                .await
-                .starts_with("journal_cmd exited 0 without reading")
-        );
-        // a child that outlives sh is killed with the group
-        let canary = std::env::temp_dir().join(format!("drover-jt-{}", std::process::id()));
-        let cmd: &'static str = Box::leak(
-            format!(
-                "cat >/dev/null; (sleep 1; touch {}) & sleep 30",
-                canary.display()
-            )
-            .into_boxed_str(),
-        );
-        assert!(
-            said(cmd, ms(300))
-                .await
-                .starts_with("journal_cmd did not exit in 300ms")
-        );
-        tokio::time::sleep(ms(1500)).await;
-        assert!(!canary.exists());
     }
 
     // An ended run takes no hooks and no approvals: its waiting call is denied, nothing of it

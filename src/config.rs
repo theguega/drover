@@ -9,7 +9,6 @@
 //   hook_timeout = 600               # seconds a tool call waits for your approve or deny
 //   idle_kill = 900                  # seconds a headless process stays warm after its last turn
 //   background_kill = 9000           # the same while it runs background tasks (default 10 × idle_kill)
-//   journal_cmd = "notes log"        # `done --entry` runs it through sh, the entry on stdin (default: none)
 //   reader_allow = ["notes find *"]  # Bash commands a reader may run, as Claude rules (default: none)
 //
 // Only that flat subset of TOML is read: `key = "string"`, `key = ["a", "b"]` and `key = 7`.
@@ -61,7 +60,6 @@ pub struct Config {
     pub hook_timeout: u64,
     pub idle_kill: u64,
     pub background_kill: Option<u64>,
-    pub journal_cmd: Option<String>,
     pub reader_allow: Vec<String>,
 }
 
@@ -85,7 +83,6 @@ impl Config {
             hook_timeout: 600,
             idle_kill: 900,
             background_kill: None,
-            journal_cmd: None,
             reader_allow: Vec::new(),
         };
         let mut seen: Vec<(&str, usize)> = Vec::new();
@@ -127,7 +124,6 @@ impl Config {
                     }
                     c.reader_allow = items.into_iter().map(String::from).collect();
                 }
-                "journal_cmd" => c.journal_cmd = Some(string(value).ok_or_else(bad)?.into()),
                 "repos_root" => c.repos_root = Some(expand(string(value).ok_or_else(bad)?)),
                 // a path on the remotes, so not expanded here
                 "remote_repos_root" => {
@@ -206,7 +202,7 @@ fn safe_rule(item: &str) -> bool {
             .any(|c| matches!(c, '(' | ')') || c.is_control())
 }
 
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 9] = [
     "host",
     "remotes",
     "repos_root",
@@ -215,7 +211,6 @@ const KEYS: [&str; 10] = [
     "hook_timeout",
     "idle_kill",
     "background_kill",
-    "journal_cmd",
     "reader_allow",
 ];
 
@@ -267,19 +262,16 @@ mod tests {
             Some("/tmp/r".into())
         );
         assert!(Config::parse("remote_repos_root = \"~/r\"").is_err());
-        let c = Config::parse(
-            "journal_cmd = \"notes log\"\nreader_allow = [\"notes find *\", \"notes get *\"]",
-        )?;
-        assert_eq!(c.journal_cmd.as_deref(), Some("notes log"));
+        let c = Config::parse("reader_allow = [\"notes find *\", \"notes get *\"]")?;
         assert_eq!(c.reader_allow, ["notes find *", "notes get *"]);
         assert!(Config::parse("reader_allow = [notes]").is_err());
         Ok(())
     }
 
-    // A key this version does not read, such as one an older config kept, warns and starts anyway.
+    // A key this version does not read, such as journal_cmd in an older config, warns and starts anyway.
     #[test]
     fn an_unknown_key_is_ignored() -> Result<()> {
-        let c = Config::parse("retired = \"/x\"\nhttp_port = 7342\n")?;
+        let c = Config::parse("journal_cmd = \"notes log\"\nhttp_port = 7342\n")?;
         assert_eq!(c, Config::parse("http_port = 7342")?);
         Ok(())
     }
@@ -327,9 +319,8 @@ mod tests {
 
     #[test]
     fn quotes_hide_comments_and_commas() -> Result<()> {
-        let c =
-            Config::parse("journal_cmd = \"echo a # b\" # real\nreader_allow = [\"a, b\", \"c\"]")?;
-        assert_eq!(c.journal_cmd.as_deref(), Some("echo a # b"));
+        let c = Config::parse("repos_root = \"/a # b\" # real\nreader_allow = [\"a, b\", \"c\"]")?;
+        assert_eq!(c.repos_root, Some("/a # b".into()));
         assert_eq!(c.reader_allow, ["a, b", "c"]);
         Ok(())
     }

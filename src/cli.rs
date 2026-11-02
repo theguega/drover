@@ -94,14 +94,11 @@ pub enum Cmd {
     },
     /// Interrupt the run's current turn; a headless run's process is stopped, and the next send resumes it
     Stop { run: RunId },
-    /// Close a run: log its entry with the config's journal_cmd, close its pane, and with --remove its worktree if clean and merged
+    /// Close a run: close its pane, and with --remove its worktree if clean and merged
     Done {
         run: RunId,
         #[arg(long)]
         remove: bool,
-        /// The journal entry, on journal_cmd's stdin; - reads it from stdin
-        #[arg(long)]
-        entry: Option<String>,
     },
     /// A mate's goal graph: stored with the run, streamed as `goal` events
     Goal {
@@ -263,9 +260,6 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
         | Cmd::Send { text, .. }
         | Cmd::Deny {
             reason: Some(text), ..
-        }
-        | Cmd::Done {
-            entry: Some(text), ..
         }
         | Cmd::Escalate { text } => stdin_dash(text)?,
         Cmd::Goal {

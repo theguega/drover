@@ -114,11 +114,10 @@ http_port = 7341                      # hooks, events and approvals, on 127.0.0.
 hook_timeout = 600                    # seconds a Claude tool call waits for your approve or deny
 idle_kill = 900                       # seconds a headless process stays warm after its last turn
 background_kill = 9000                # the same while it runs background tasks (default 10 × idle_kill)
-journal_cmd = "brain log"             # done --entry runs this through sh, the entry on stdin (default none: --entry is refused)
 reader_allow = ["brain find *"]       # Bash commands a reader run may run, as Claude permission rules (default none)
 ```
 
-`journal_cmd` and `reader_allow` connect drover to a notes tool of your own. In this example, `brain` is a personal knowledge CLI: `drover done <run> --entry "what, why, outcome"` appends the entry with `brain log`, and a read-only run may search with `brain find`. drover stores no knowledge itself.
+`reader_allow` lets a read-only run use a tool of your own: here, a read-only run may search your notes with `brain find`. drover stores no knowledge itself.
 
 `--config` or `DROVER_CONFIG` selects another config file. `--state-dir` or `DROVER_STATE_DIR` selects another state directory (default `~/.local/state/drover`, which holds `drover.db` and `drover.sock`). Use both to run a test service next to the real one, with its own `http_port`.
 
@@ -218,7 +217,7 @@ Each name in `remotes` is an ssh name whose herdr server is already running. dro
 | `drover attach <run>` | take a run over in a herdr pane |
 | `drover screen <run>` · `keys <run> <keys…>` | read a pane run's terminal, send it keys |
 | `drover stop <run>` | interrupt the current turn |
-| `drover done <run>` | close a run; `--remove` its worktree if clean and merged, `--entry` to `journal_cmd` |
+| `drover done <run>` | close a run and its pane; `--remove` its worktree if clean and merged |
 | `drover wait --any` | block for the next reply, needs, done or failed of a crew; `--parent`, `--timeout` |
 | `drover goal set --file <f>` · `goal node <id>` | a mate's goal graph |
 | `drover escalate --text <q>` | a run asks you a question |
@@ -226,7 +225,7 @@ Each name in `remotes` is an ssh name whose herdr server is already running. dro
 | `drover snapshot` | open runs as JSON; `--all` |
 | `drover serve` | the service (`install.sh` runs it for you) |
 
-`drover <command> --help` is the reference for every flag. `send`, `escalate --text`, `run --prompt`, `done --entry` and `goal set --file` read stdin when given `-`. The event stream that `drover watch` prints is also served as SSE at `http://127.0.0.1:7341/events?run=&role=&since=`.
+`drover <command> --help` is the reference for every flag. `send`, `escalate --text`, `run --prompt` and `goal set --file` read stdin when given `-`. The event stream that `drover watch` prints is also served as SSE at `http://127.0.0.1:7341/events?run=&role=&since=`.
 
 ### drover-wt
 

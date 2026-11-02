@@ -33,7 +33,7 @@ drover approve <run> <perm> --answer Blue   # a question (AskUserQuestion): one 
 drover watch [--run --role --since]   # events as JSON lines: started, text, tool_start, tool_end, needs, reply, done, failed
 drover approve-run <run> · drop-run <run>   # a run a mate asked for, pending
 drover screen <run> · keys <run> <keys…> · stop <run> · attach <run>
-drover done <run> [--remove] [--entry <text>]   # --entry goes to the config's journal_cmd, refused without one
+drover done <run> [--remove]   # closes the run and its pane; --remove also its worktree if clean and merged
 drover wait [--any] [--parent <run>] [--timeout <s>]   # blocks for the next reply, needs, done or failed
 drover goal set --file goal.json · goal node <id> [--status --round --crew --review]   # a mate's graph
 drover escalate --text <question>      # a run asks you; - reads it from stdin
