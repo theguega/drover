@@ -234,6 +234,21 @@ mod tests {
     }
 
     #[test]
+    fn a_newline_in_a_cell_keeps_the_row_on_one_line() {
+        let v = json!({"perms": [
+            {"tool": "Bash", "input": "git commit -m \"line1\nline2\""},
+            {"tool": "Read", "input": "a\r\tb"},
+        ]});
+        assert_eq!(
+            encode(&v),
+            r#"perms[2]{tool,input}:
+  Bash,"git commit -m \"line1\nline2\""
+  Read,"a\r\tb"
+"#
+        );
+    }
+
+    #[test]
     fn numbers_roots_and_phrases() {
         assert_eq!(
             encode(&json!({"n": -0.0, "f": 1.5, "big": 1e21})),
