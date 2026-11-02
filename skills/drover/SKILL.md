@@ -29,6 +29,7 @@ drover show <run>                  # phase, owner, last reply (first and last 30
 drover reply <run>                 # the whole last reply
 drover send <run> <text>           # the next prompt, only while idle; or the answer to a cursor run's question (`needs` with tool AskQuestion)
 drover approve <run> <perm> · deny <run> <perm> --reason <why>   # a tool call in `needs`; `show` lists perms
+drover approve <run> <perm> --answer Blue   # a question (AskUserQuestion): one --answer per question, a label or your own text
 drover watch [--run --role --since]   # events as JSON lines: started, text, tool_start, tool_end, needs, reply, done, failed
 drover approve-run <run> · drop-run <run>   # a run a mate asked for, pending
 drover screen <run> · keys <run> <keys…> · stop <run> · attach <run>

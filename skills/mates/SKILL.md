@@ -14,6 +14,7 @@ drover run --parent $DROVER_RUN --repo <repo> --branch <branch> --model <model> 
 drover wait --any --parent $DROVER_RUN        # blocks for the next reply, needs, done or failed of your crew
 drover send <crew> -                          # the next step, on stdin; only while it is idle
 drover approve <crew> <perm> · deny <crew> <perm> --reason <why>   # a crew tool call
+drover approve <crew> <perm> --answer <label>   # a crew question (tool AskUserQuestion), one --answer per question
 drover show <crew>                            # phase, perms, last reply (first and last 300 characters)
 drover reply <crew>                           # the whole last reply
 drover goal set --file goal.json · drover goal node <id> --status … --round … --crew … --review …

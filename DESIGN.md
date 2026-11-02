@@ -137,6 +137,37 @@ The approval flow:
    - Claude actors run in permission mode `auto` (the desk's choice), pane and headless; `drover run --permission-mode <mode>` picks another, and a non-Claude harness refuses it. Auto mode runs harmless calls without asking, so the hook fires only for what it escalates: an `ask` rule from any settings file (tested), and perhaps a classifier denial (not tested, SPIKE.md §8). Without auto (`--permission-mode default`), every call outside the allowlist is a `needs`.
 5. Long waits: if you answer after the hook's timeout, drover returns `deny` with the reason "awaiting approval". When you approve later, drover resumes the session (`--resume`) with the approval in the prompt, so an approval given an hour later from the phone isn't lost.
 
+## Claude features
+
+What of Claude Code (2.1.316) a run reaches through drover's Claude path: the unmodified `claude` with your login, `claude -p` stream-json headless, the TUI in a pane, `--settings` adding drover's hooks. Sources are `claude --help` and code.claude.com/docs: [headless](https://code.claude.com/docs/en/headless.md), [hooks](https://code.claude.com/docs/en/hooks.md), [settings](https://code.claude.com/docs/en/settings.md). Tested with haiku in `/tmp` on 2026-11-01. "live" names a check in `scripts/live-test.sh`; "probe" is a run of `claude -p` by hand, its output quoted.
+
+| Feature | Headless | Pane | How drover exposes it | Evidence |
+|---|---|---|---|---|
+| Model | yes | yes | `run --model`; `send "/model sonnet"` mid-run | unit test; probe: `/model sonnet` replies "Set model to `Sonnet 5.5` for this session only" |
+| Effort | yes | yes | `send "/effort low"`; your `effortLevel` setting. No `run --effort` | probe: "Set effort level to low (this session only)" |
+| Permission modes, plan included | yes | yes | `run --permission-mode` (default `auto`) | live: the plan run, the pane in auto mode |
+| Leaving plan mode (ExitPlanMode) | yes | yes | a `needs` with tool `ExitPlanMode` and the plan as input; `approve` leaves plan mode, `deny --reason` keeps planning | live: `planned.txt` exists after approve |
+| AskUserQuestion | yes | yes | a `needs` with tool `AskUserQuestion`; `approve --answer <label or text>`, one per question in order; plain `approve` is refused | live, headless and pane |
+| Resume | yes | yes | drover resumes its own session: a cold `send`, a restart, `attach` | live: after kill -9, attach |
+| Continue, fork, a session started outside drover | no | in the TUI (`/resume`, `/branch`) | not exposed: `run` always starts a new session | — |
+| Built-in commands (`/compact`, `/context`, `/cost`, `/clear`, `/model`, `/effort`) | yes | yes | `send "/context"`: headless, the output is the reply (`/compact` and `/clear` reply empty; `/clear` moves the run to the new session). In a pane a command the TUI runs itself posts no hook, so the run stays idle | live: `/context` in the pane; probe: each one headless |
+| Custom commands, skills | yes | yes | `send "/name args"`. Claude reads commands when it starts: one added later is "Unknown command" until a new session | live: `/livepong` in both modes |
+| Subagents (Agent tool) | yes | yes | their tool calls are `tool_start`/`tool_end` of the run, not marked as theirs; their text is not streamed (no `--forward-subagent-text`). A background subagent's result comes as a turn Claude starts itself: a `reply` with no `send` | probe: a background subagent's report as a second reply |
+| Background shells and tasks | yes | yes | a headless process with background tasks (`system/background_tasks_changed`) is not idle-killed; the turn Claude starts when one ends is a `reply`. An empty turn for a notification already delivered (`num_turns: 0`) is dropped | live: a 45 s background shell outlives `idle_kill = 30` and replies |
+| Stop mid-tool | yes | yes | `stop`: SIGTERM to the process and its tools; the turn has no result, the next `send` resumes. Pane: `keys esc`. Claude's stream-json `interrupt`, which keeps the process warm, is not used | live: stop takes the tool with it |
+| Compaction | yes | yes | `send "/compact"`, and auto-compaction, run. No event: `compact_boundary` and the `PreCompact`/`PostCompact` hooks are not read | probe: `compact_boundary`, `pre_tokens` 29939 to `post_tokens` 11122 |
+| Usage and cost, subagents included | yes | no | each `reply`'s usage is what the session's `modelUsage` and `total_cost_usd` grew by. A resumed process reports from the session's start, so drover counts from the run's own usage | unit test; live: the turn after the resume costs only itself |
+| MCP servers, plugins, skills, agents, CLAUDE.md from your config | yes | yes | actors read your settings and `~/.claude.json` as they are; a reader has `--restricted` | probe `init`: 22 MCP servers, 7 plugins, 52 skills, 6 agents |
+| Your own hooks (`~/.claude/settings.json`, plugins) | yes | yes | `--settings` adds drover's hooks next to yours: hooks merge across settings levels, and so do `permissions` lists | probe: your `SessionStart` command hook and a plugin's `UserPromptSubmit` ran in the run where drover's `http` hooks fired; SPIKE.md §8 for an `ask` rule from the worktree |
+| Images and files in a prompt | yes | yes | by path in the text (`send "Look at /path/x.png"`): the Read tool reads images. A base64 image block cannot be sent | probe: a red PNG by path, reply `RED` |
+| `--add-dir` | no | `/add-dir` | not exposed; `permissions.additionalDirectories` in a settings file works | — |
+| Output styles | yes | yes | `send "/output-style <name>"`, or your `outputStyle` setting | docs (headless.md) |
+| Workspace trust dialog | n/a: `-p` skips it | yes | a `needs` with `dialog`, answered with `keys` | live |
+| Status line | n/a | yes | yours, on the pane | `drover screen` shows it |
+| Needs a TTY (`/login`, `/config`, pickers such as `/resume` or `/model` without an argument) | no | yes | a pane, or `attach` | headless.md: "Built-in commands that only run in the terminal interface … aren't available" |
+
+How headless Claude gets AskUserQuestion and ExitPlanMode: `-p` offers them only when the run has a permission host, so an actor gets `--permission-prompt-tool stdio`. The `PermissionRequest` hook still answers every call first; Claude then cancels the `control_request` it wrote to stdout, which drover ignores. Both tools run only on an `allow` that carries `updatedInput` (a plain allow falls through to the host), so drover's allow returns their input, with `answers` added for AskUserQuestion. Any other allow is plain: an updated input is checked against the `ask` rules again, and a pane then asks in its own dialog (seen with `Bash(touch *)`).
+
 ## Profiles
 
 | Profile | Tools | cwd | Used by |
@@ -235,4 +266,5 @@ Everything lives in `~/.local/state/drover/`. Config is in `~/.config/drover/con
 - The spike's four questions are answered in SPIKE.md: `-p` fires `PermissionRequest`; no timeout cap was found, and drover answers before it; a deny's reason reaches the turn; session allows do not survive `--resume`, so drover allows a late-approved call itself.
 - Pane runs stream `reply` and tool events, not text deltas: the hooks carry no deltas.
 - Pane runs have no per-run usage yet: hooks carry none (the transcript does).
+- Claude events drover does not read yet: compaction (`compact_boundary`, `PreCompact`), subagent text, `Notification`. Each would be a new event kind.
 - Expired approvals live in memory: a restart of `serve` forgets them.

@@ -47,6 +47,7 @@ drover screen r-1a2b3c       # the pane's terminal
 drover keys r-1a2b3c esc enter
 drover run --repo myrepo --branch fix-y --headless --model haiku --prompt "…"   # no pane; warm for the next send
 drover approve r-1a2b3c p1   # allow the tool call it waits on; deny r-1a2b3c p1 --reason "…"
+drover approve r-1a2b3c p2 --answer Blue   # answer a question it asks (AskUserQuestion), one --answer per question
 drover attach r-1a2b3c       # a headless run reopens in a pane, as yours
 drover run --harness cursor --repo myrepo --branch z --model auto --prompt "…"   # cursor over ACP, headless
 drover send r-1a2b3c "Plan"  # answers the question a cursor run asks (an option's label, or your own words)
