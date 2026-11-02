@@ -125,6 +125,22 @@ async fn watch_loop(
     }
 }
 
+// The service writes its build's sha to the state dir when it starts. A state dir from before this
+// check has no file, which the next restart fixes.
+pub fn check_build(paths: &Paths) -> Result<(), Failure> {
+    let Ok(serve) = std::fs::read_to_string(paths.state.join("serve.sha")) else {
+        return Ok(());
+    };
+    let (serve, this) = (serve.trim(), env!("DROVER_GIT_SHA"));
+    if serve == this {
+        return Ok(());
+    }
+    Err(Failure::new(
+        format!("the service runs build {serve}, this drover is {this}"),
+        "restart the service: systemctl --user restart drover (macOS: launchctl kickstart -k gui/$(id -u)/dev.drover)",
+    ))
+}
+
 pub async fn send(paths: &Paths, request: &Request) -> Result<Value, Failure> {
     let (read, _write) = connect(paths, request).await?;
     let mut reply = String::new();

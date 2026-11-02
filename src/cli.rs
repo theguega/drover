@@ -284,6 +284,7 @@ async fn run(cli: Cli) -> Result<Value, Failure> {
         ),
         _ => None,
     };
+    control::check_build(&paths)?;
     let watch = matches!(cmd, Cmd::Watch { .. });
     let snapshot = matches!(cmd, Cmd::Snapshot { .. });
     let request = Request { from, cmd };

@@ -133,6 +133,8 @@ pub async fn run(paths: &Paths) -> Result<()> {
     std::fs::set_permissions(&paths.state, std::fs::Permissions::from_mode(0o700))?;
     // held until the process ends, so the sockets, drover.db and the watchers have one owner
     let _lock = lock(&paths.state)?;
+    // the CLI refuses to talk to a service built from another commit
+    std::fs::write(paths.state.join("serve.sha"), env!("DROVER_GIT_SHA"))?;
     let db = paths.db();
     let store = Store::open(&db)?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", config.http_port))
