@@ -5,7 +5,7 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{Abort, Answer, Caps, Decision, Harness, Out, Parse, StartSpec};
+use super::{Abort, Caps, Decision, Harness, Out, Parse, StartSpec};
 use crate::{
     herdr::SessionId,
     run::{Profile, Usage},
@@ -30,11 +30,11 @@ impl Harness for Claude {
     fn caps(&self) -> Caps {
         Caps {
             headless: true,
+            pane: true,
             resume: true,
             approvals: true,
             usage: true,
             hooks: true,
-            warm: true,
         }
     }
 
@@ -76,11 +76,11 @@ impl Harness for Claude {
         argv
     }
 
-    fn send(&self, text: &str) -> String {
-        json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()
+    fn send(&self, text: &str, _p: &mut Parse) -> Vec<String> {
+        vec![json!({"type": "user", "message": {"role": "user", "content": text}}).to_string()]
     }
 
-    fn respond(&self, d: &Decision) -> Answer {
+    fn respond(&self, d: &Decision) -> Value {
         let decision = match (d.allow, &d.reason) {
             (true, _) => json!({"behavior": "allow"}),
             (false, reason) => json!({
@@ -88,12 +88,12 @@ impl Harness for Claude {
                 "message": reason.as_deref().unwrap_or("denied by the user"),
             }),
         };
-        Answer::Hook(json!({
+        json!({
             "hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}
-        }))
+        })
     }
 
-    fn abort(&self) -> Abort {
+    fn abort(&self, _p: &mut Parse) -> Abort {
         Abort::Kill
     }
 
@@ -159,6 +159,46 @@ impl Harness for Claude {
         }
     }
 
+    fn hook(&self, body: &Value) -> Vec<Out> {
+        let text = |k: &str| body.get(k).and_then(Value::as_str);
+        let tool = || text("tool_name").unwrap_or_default().to_string();
+        let mut out: Vec<Out> = text("session_id")
+            .and_then(SessionId::parse)
+            .map(Out::Session)
+            .into_iter()
+            .collect();
+        out.extend(match text("hook_event_name").unwrap_or_default() {
+            "UserPromptSubmit" => Some(Out::Prompt),
+            "PreToolUse" => Some(Out::ToolStart { tool: tool() }),
+            "PostToolUse" => Some(Out::ToolEnd {
+                tool: tool(),
+                ok: true,
+            }),
+            "PostToolUseFailure" => Some(Out::ToolEnd {
+                tool: tool(),
+                ok: false,
+            }),
+            "PermissionRequest" => Some(Out::Permission {
+                tool: tool(),
+                input: body.get("tool_input").cloned().unwrap_or_default(),
+                call: Value::Null,
+            }),
+            "Stop" => Some(Out::Reply {
+                text: text("last_assistant_message").unwrap_or_default().into(),
+                usage: None,
+                error: false,
+            }),
+            // /clear starts a new session in the same TUI; its next prompt brings the new id
+            "SessionEnd" if text("reason") == Some("clear") => Some(Out::Rekey),
+            "SessionEnd" => Some(Out::End),
+            _ => None,
+        });
+        out
+    }
+}
+
+impl Claude {
+    // The settings that make claude post its hooks to drover, given with --settings.
     fn hook_settings(&self, spec: &StartSpec) -> Value {
         let hook = |timeout: u64| json!([{"hooks": [{"type": "http", "url": spec.hooks, "timeout": timeout}]}]);
         let mut hooks = serde_json::Map::new();
@@ -184,42 +224,6 @@ impl Harness for Claude {
             s.insert("permissions".into(), json!({ "allow": READER_ALLOW }));
         }
         settings
-    }
-
-    fn hook(&self, body: &Value) -> Vec<Out> {
-        let text = |k: &str| body.get(k).and_then(Value::as_str);
-        let tool = || text("tool_name").unwrap_or_default().to_string();
-        let mut out: Vec<Out> = text("session_id")
-            .and_then(SessionId::parse)
-            .map(Out::Session)
-            .into_iter()
-            .collect();
-        out.extend(match text("hook_event_name").unwrap_or_default() {
-            "UserPromptSubmit" => Some(Out::Prompt),
-            "PreToolUse" => Some(Out::ToolStart { tool: tool() }),
-            "PostToolUse" => Some(Out::ToolEnd {
-                tool: tool(),
-                ok: true,
-            }),
-            "PostToolUseFailure" => Some(Out::ToolEnd {
-                tool: tool(),
-                ok: false,
-            }),
-            "PermissionRequest" => Some(Out::Permission {
-                tool: tool(),
-                input: body.get("tool_input").cloned().unwrap_or_default(),
-            }),
-            "Stop" => Some(Out::Reply {
-                text: text("last_assistant_message").unwrap_or_default().into(),
-                usage: None,
-                error: false,
-            }),
-            // /clear starts a new session in the same TUI; its next prompt brings the new id
-            "SessionEnd" if text("reason") == Some("clear") => Some(Out::Rekey),
-            "SessionEnd" => Some(Out::End),
-            _ => None,
-        });
-        out
     }
 }
 
@@ -295,9 +299,10 @@ mod tests {
             model: Some("haiku"),
             permission_mode: None,
             resume: None,
+            cwd: std::path::Path::new("/w"),
             hooks: "http://127.0.0.1:7341/hooks/r-00000a",
             hook_timeout: 600,
-            drover: "drover",
+            forwarded: &[],
         }
     }
 
@@ -469,7 +474,8 @@ mod tests {
             ),
             Some(Out::Permission {
                 tool: "Bash".into(),
-                input: json!({"command": "touch x"})
+                input: json!({"command": "touch x"}),
+                call: Value::Null,
             })
         );
         assert_eq!(
@@ -492,8 +498,9 @@ mod tests {
             allow: false,
             reason: Some("not now".into()),
         });
-        assert!(
-            matches!(deny, Answer::Hook(v) if v.pointer("/hookSpecificOutput/decision/message") == Some(&json!("not now")))
+        assert_eq!(
+            deny.pointer("/hookSpecificOutput/decision/message"),
+            Some(&json!("not now"))
         );
     }
 }

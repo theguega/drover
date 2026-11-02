@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, path::Path, process::Stdio, time::Duration};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 use crate::{
@@ -13,21 +13,19 @@ use crate::{
     socket::SSH_OPTS,
 };
 
+pub mod acp;
 pub mod claude;
-pub mod cursor;
-pub mod pi;
-pub mod swap;
 
 // What a harness can do, declared and never guessed.
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct Caps {
     pub headless: bool,
+    // a run in a herdr pane, observed by hooks; without, `attach` opens the TUI unobserved
+    pub pane: bool,
     pub resume: bool,
     pub approvals: bool,
     pub usage: bool,
     pub hooks: bool,
-    // one process serves every turn; otherwise each turn is a process, resumed by session
-    pub warm: bool,
 }
 
 pub struct StartSpec<'a> {
@@ -37,12 +35,14 @@ pub struct StartSpec<'a> {
     // Claude's --permission-mode for an actor, when asked for; the others have no such thing
     pub permission_mode: Option<&'a str>,
     pub resume: Option<&'a SessionId>,
+    // the run's cwd, on its machine
+    pub cwd: &'a Path,
     // where the harness posts its hooks: one URL per run
     pub hooks: &'a str,
     // seconds a permission hook may wait for drover's answer
     pub hook_timeout: u64,
-    // this binary, for a harness whose hooks run a command
-    pub drover: &'a str,
+    // names of `Harness::forward` drover sends on the process's stdin, for a remote run
+    pub forwarded: &'a [&'a str],
 }
 
 // A harness's output or hook, as drover reads it.
@@ -58,17 +58,21 @@ pub enum Out {
         tool: String,
         ok: bool,
     },
+    // `call` is what `answer` needs to write the decision to stdin; null for a hook
     Permission {
         tool: String,
         input: Value,
+        call: Value,
     },
     Reply {
         text: String,
         usage: Option<Usage>,
         error: bool,
     },
-    End,   // the session ended
-    Rekey, // the next hook brings a new session, in the same agent
+    Write(String), // a protocol line onto the process's stdin
+    Fail(String),  // the process cannot serve the run
+    End,           // the session ended
+    Rekey,         // the next hook brings a new session, in the same agent
 }
 
 #[derive(Clone, Debug)]
@@ -77,56 +81,56 @@ pub struct Decision {
     pub reason: Option<String>,
 }
 
-// Where an answer to a permission goes: back to the waiting hook, or onto the process's stdin.
-pub enum Answer {
-    Hook(Value),
-    #[expect(dead_code, reason = "a harness that answers on stdin, a later adapter")]
-    Stdin(String),
-}
-
 pub enum Abort {
     Kill,
-    #[expect(
-        dead_code,
-        reason = "a harness with an interrupt message, a later adapter"
-    )]
     Stdin(String),
 }
 
-// What an adapter remembers while it reads one process's output.
+// What an adapter remembers of one process: the reader of its stdout and the writer of prompts
+// share it.
 #[derive(Default)]
 pub struct Parse {
     pub tools: HashMap<String, String>, // tool call id to tool name
-    pub cost: f64,                      // the process's running total
-    pub last: String,                   // the final message of the turn so far
+    pub cost: f64,                      // the process's running cost, at the last turn's end
+    pub acp: acp::Conn,
 }
 
 pub trait Harness: Sync {
     fn caps(&self) -> Caps;
     // The command line, binary first. A pane run starts the TUI with it.
     fn start(&self, spec: &StartSpec) -> Vec<String>;
-    // A prompt as one stdin line of a headless process.
-    fn send(&self, text: &str) -> String;
-    fn respond(&self, d: &Decision) -> Answer;
-    fn abort(&self) -> Abort;
+    // Lines written first, once the process is up.
+    fn open(&self, _spec: &StartSpec, _p: &mut Parse) -> Vec<String> {
+        Vec::new()
+    }
+    // A prompt as stdin lines of a headless process: none while it is not ready for one.
+    fn send(&self, text: &str, p: &mut Parse) -> Vec<String>;
+    fn abort(&self, p: &mut Parse) -> Abort;
     // One stdout line of a headless process.
     fn events(&self, line: &str, p: &mut Parse) -> Vec<Out>;
-    // The settings that make the harness post its hooks to drover: --settings, or the file below.
-    fn hook_settings(&self, spec: &StartSpec) -> Value;
-    // Where a harness reads them from in the run's cwd, relative, instead of from its command line.
-    fn hook_file(&self, _profile: Profile) -> Option<&'static str> {
-        None
+    // The answer to a permission its stdout asked for, as stdin lines.
+    fn answer(&self, _d: &Decision, _call: &Value, _p: &mut Parse) -> Vec<String> {
+        Vec::new()
     }
-    // One hook the harness posted.
-    fn hook(&self, body: &Value) -> Vec<Out>;
+    // One hook the harness posted, and the answer to a permission it asked for.
+    fn hook(&self, _body: &Value) -> Vec<Out> {
+        Vec::new()
+    }
+    fn respond(&self, _d: &Decision) -> Value {
+        json!({})
+    }
+    // Variables of drover's environment a remote process gets, on its stdin: never on a command line.
+    fn forward(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 #[must_use]
 pub fn get(name: HarnessName) -> Option<&'static dyn Harness> {
     match name {
         HarnessName::Claude => Some(&claude::Claude),
-        HarnessName::Pi => Some(&pi::Pi),
-        HarnessName::Cursor => Some(&cursor::Cursor),
+        HarnessName::Cursor => Some(&acp::CURSOR),
+        HarnessName::Pi => Some(&acp::PI),
         _ => None,
     }
 }
@@ -167,11 +171,14 @@ impl Ident {
 }
 
 // Starts a headless process in `cwd`, here or on `ssh`'s machine, where the login shell sets PATH.
+// On ssh, the variables named in `read` come first on stdin, one line each, so their values are
+// on no command line: the caller writes them before anything else.
 pub fn spawn(
     argv: &[String],
     cwd: &Path,
     env: &[(&str, &str)],
     ssh: Option<&str>,
+    read: &[&str],
 ) -> std::io::Result<Spawned> {
     if argv.is_empty() {
         return Err(std::io::Error::other("empty command line"));
@@ -181,6 +188,10 @@ pub fn spawn(
             let exports: String = env
                 .iter()
                 .map(|(k, v)| format!("export {k}={} && ", quote(v)))
+                .chain(
+                    read.iter()
+                        .map(|k| format!("IFS= read -r {k} && export {k} && ")),
+                )
                 .collect();
             let words: Vec<String> = argv.iter().map(|a| quote(a)).collect();
             let script = format!(
@@ -272,7 +283,7 @@ mod tests {
 
     async fn started(argv: &[&str]) -> Result<(Spawned, Ident), Box<dyn std::error::Error>> {
         let argv: Vec<String> = argv.iter().map(|a| a.to_string()).collect();
-        let mut sp = spawn(&argv, Path::new("/"), &[], None)?;
+        let mut sp = spawn(&argv, Path::new("/"), &[], None, &[])?;
         let mut line = String::new();
         BufReader::new(&mut sp.stderr).read_line(&mut line).await?;
         let ident = Ident::parse(&line).ok_or("no ident line")?;

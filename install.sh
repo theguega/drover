@@ -16,9 +16,8 @@ for cmd in git jq herdr ssh; do
 done
 
 ln -sfn "$root/bin/drover-wt" "$bin/drover-wt"
-# pi finds its extensions here; this one does nothing unless drover starts pi
-mkdir -p ~/.pi/agent/extensions
-ln -sfn "$root/harness/pi.ts" ~/.pi/agent/extensions/drover.ts
+# the pi extension earlier versions linked: pi now runs through pi-acp
+if [[ -L ~/.pi/agent/extensions/drover.ts ]]; then rm ~/.pi/agent/extensions/drover.ts; fi
 
 # ask on the terminal, so this also works when the script arrives through curl
 ask() {

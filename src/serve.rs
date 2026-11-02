@@ -28,7 +28,7 @@ use crate::{
     config::{Config, Paths},
     control::{self, Failure},
     goal::{Graph, Update},
-    harness::{self, Abort, Answer, Decision, Harness, Ident, Out, Parse, StartSpec},
+    harness::{self, Abort, Decision, Harness, Ident, Out, Parse, StartSpec},
     herdr::{self, Code, Host, Name, PaneId, Reach, SessionId},
     http, migrate,
     run::{Machine, Mode, Owner, Phase, Profile, Role, Run, RunId, Usage, now},
@@ -57,7 +57,8 @@ const EXPIRED_MAX: usize = 16;
 const CREW: &str = "You are a crewmate. Your mate reads the end of each of your turns. The brief above is your only source of facts: do not assume what it does not say. When blocked or unsure, stop and end your turn with a line starting QUESTION:. When the check in the brief passes, end your turn with DONE: and its output. Do not change the check. Do not end your turn while a check or background job you started still runs: wait for it, or end with a line starting RUNNING: and what runs.";
 // Appended to a mate's first prompt, where the dispatch playbook is the mates skill.
 const MATE: &str = "You are a mate: you dispatch crew and write no code. Follow the `mates` skill. Your run id is $DROVER_RUN.";
-// The reader profile's cwd holds only this.
+// The reader profile's cwd holds only these. pi has no read-only mode: its tools are these.
+const PI_READER: &str = "{\"defaultTools\": [\"read\", \"grep\", \"find\", \"ls\"]}\n";
 const READER_AGENTS: &str = "You are a reader. You can read files and run `brain find`, `brain get`, `brain pages` and `brain code`. You cannot change anything, and you have no network. Answer from what you read.\n";
 
 // A headless process, while it is warm.
@@ -65,6 +66,8 @@ struct Proc {
     id: u64,
     machine: Machine,
     stdin: mpsc::UnboundedSender<String>,
+    // the harness's protocol state, which the reader of its stdout shares
+    parse: Arc<StdMutex<Parse>>,
     busy: bool, // a turn runs
     idle_since: Instant,
     // its pid and start time, from its first stderr line
@@ -90,8 +93,6 @@ pub struct App {
     // exported to local agents, so their drover calls reach this service
     state: PathBuf,
     port: u16,
-    // this binary, which a harness's hook commands run
-    exe: String,
     hook_timeout: u64,
     idle_kill: Duration,
     // the pane set changed: watchers wake
@@ -338,15 +339,6 @@ impl App {
             store,
             state,
             port: config.http_port,
-            // a rebuilt binary reads as "… (deleted)" while this one still runs
-            exe: std::env::current_exe().map_or_else(
-                |_| "drover".into(),
-                |p| {
-                    p.to_string_lossy()
-                        .trim_end_matches(" (deleted)")
-                        .to_owned()
-                },
-            ),
             hook_timeout: config.hook_timeout,
             idle_kill: Duration::from_secs(config.idle_kill),
             wake: Notify::new(),
@@ -365,7 +357,6 @@ impl App {
     // Headless processes end with the service, and their runs wait for the next send, which
     // resumes them. One the service left running (it was killed) is ended now, and before a resume.
     fn orphans(&self) -> Result<()> {
-        self.repair_hooks();
         if !self.store.procs(None)?.is_empty() {
             let me = Weak::clone(&self.me);
             tokio::spawn(async move {
@@ -452,16 +443,9 @@ impl App {
         self.save(r)?;
         self.forget_calls(&r.id);
         let proc = locked(&self.procs).remove(&r.id);
-        match (proc, self.me.upgrade()) {
-            // the file goes back once the process is gone: a call in its grace window is still held
-            (Some(p), Some(me)) => {
-                let id = r.id.clone();
-                tokio::spawn(async move {
-                    me.stop(&id, p).await;
-                    me.restore_hooks(&id);
-                });
-            }
-            _ => self.restore_hooks(&r.id),
+        if let (Some(p), Some(me)) = (proc, self.me.upgrade()) {
+            let id = r.id.clone();
+            tokio::spawn(async move { me.stop(&id, p).await });
         }
         self.wake.notify_waiters();
         Ok(())
@@ -469,6 +453,13 @@ impl App {
 
     // An ended run's calls: a waiting one hears ENDED, and nothing of it stays approvable.
     fn forget_calls(&self, id: &RunId) {
+        self.deny_waiting(id, Some(ENDED));
+        locked(&self.expired).retain(|(run, _), _| run != id);
+        locked(&self.approved).retain(|(run, ..)| run != id);
+    }
+
+    // The run's waiting calls get a deny.
+    fn deny_waiting(&self, id: &RunId, reason: Option<&str>) {
         let waiting: Vec<Waiter> = {
             let mut waiting = locked(&self.waiting);
             let keys: Vec<Key> = waiting
@@ -481,11 +472,9 @@ impl App {
         for w in waiting {
             let _ = w.tx.send(Decision {
                 allow: false,
-                reason: Some(ENDED.into()),
+                reason: reason.map(String::from),
             });
         }
-        locked(&self.expired).retain(|(run, _), _| run != id);
-        locked(&self.approved).retain(|(run, ..)| run != id);
     }
 
     // Keeps a call drover denied approvable, within EXPIRED_FOR and EXPIRED_MAX per run.
@@ -592,16 +581,24 @@ impl App {
             } => self.cmd_wait(from, parent, timeout).await,
             Cmd::Goal { op } => self.cmd_goal(from, op),
             Cmd::Escalate { text } => self.cmd_escalate(from, &text).await,
-            Cmd::Watch { .. } | Cmd::Serve | Cmd::Hook { .. } => bail!("not a request"),
+            Cmd::Watch { .. } | Cmd::Serve => bail!("not a request"),
         }
     }
 
     async fn cmd_run(&self, from: Option<&RunId>, s: Start) -> Result<Value> {
         let h = harness::get(s.harness).ok_or_else(not_implemented)?;
-        // a reader acts on nothing, so it needs no pane to pair in
-        let headless = s.headless || s.profile == Profile::Reader;
+        // a reader acts on nothing, so it needs no pane to pair in; a harness with no pane runs
+        // headless, and `attach` opens its TUI
+        let headless = s.headless || s.profile == Profile::Reader || !h.caps().pane;
         if s.scratch || (headless && !h.caps().headless) {
             return Err(not_implemented());
+        }
+        if s.pane && headless {
+            return Err(Failure::new(
+                format!("{} runs headless", s.harness.as_str()),
+                "drover run without --pane, then drover attach <run> to open it in a pane",
+            )
+            .into());
         }
         if s.permission_mode.is_some() && s.harness != crate::run::HarnessName::Claude {
             return Err(Failure::new(
@@ -788,6 +785,7 @@ impl App {
         asked: &'a Value,
         hooks: &'a str,
         resume: Option<&'a SessionId>,
+        forwarded: &'a [&'a str],
     ) -> StartSpec<'a> {
         StartSpec {
             headless: r.mode == Mode::Headless,
@@ -795,55 +793,10 @@ impl App {
             model: asked.get("model").and_then(Value::as_str),
             permission_mode: asked.get("permission_mode").and_then(Value::as_str),
             resume,
+            cwd: &r.cwd,
             hooks,
             hook_timeout: self.hook_timeout,
-            drover: &self.exe,
-        }
-    }
-
-    // For a harness that reads its hooks from a file in the cwd: ours, until the run ends.
-    fn install_hooks(&self, r: &Run) -> Result<()> {
-        let harness = Self::harness(r)?;
-        let Some(rel) = harness.hook_file(r.profile) else {
-            return Ok(());
-        };
-        if self.host(&r.machine)?.ssh().is_some() {
-            bail!(
-                "{} reads its hooks from a file: not on a remote yet",
-                r.harness.as_str()
-            );
-        }
-        let (asked, hooks) = (self.asked(r)?, self.hook_url(&r.id));
-        let ours = harness.hook_settings(&self.spec(r, &asked, &hooks, None));
-        harness::swap::install(&self.hooks_dir(), r.id.as_str(), &r.cwd, rel, &ours)
-            .map_err(|e| err!("{}: {e}", r.cwd.join(rel).display()))
-    }
-
-    // Where the swaps of a harness's hook files are recorded.
-    fn hooks_dir(&self) -> PathBuf {
-        self.state.join("hooks")
-    }
-
-    // The file back as it was (or as the user changed it), when nothing of the run still runs.
-    fn restore_hooks(&self, id: &RunId) {
-        match harness::swap::restore(&self.hooks_dir(), id.as_str()) {
-            Ok(Some(note)) => eprintln!("run {id}: {note}"),
-            Ok(None) => {}
-            Err(e) => eprintln!("run {id}: hooks not restored: {e}"),
-        }
-    }
-
-    // A crash leaves the swaps of the runs it was running; those that have ended give theirs back.
-    fn repair_hooks(&self) {
-        for run in harness::swap::left(&self.hooks_dir()) {
-            let live = run
-                .parse::<RunId>()
-                .ok()
-                .and_then(|id| self.store.get(&id).ok().flatten())
-                .is_some_and(|r| r.phase.live());
-            if !live && let Ok(id) = run.parse::<RunId>() {
-                self.restore_hooks(&id);
-            }
+            forwarded,
         }
     }
 
@@ -856,10 +809,9 @@ impl App {
         };
         run.cwd = PathBuf::from(&wt.path);
         self.save(run)?;
-        self.install_hooks(run)?;
         self.wake.notify_waiters();
         let (asked, hooks) = (self.asked(run)?, self.hook_url(&run.id));
-        let argv = harness.start(&self.spec(run, &asked, &hooks, None));
+        let argv = harness.start(&self.spec(run, &asked, &hooks, None, &[]));
         let prompt = asked
             .get("prompt")
             .and_then(Value::as_str)
@@ -969,7 +921,12 @@ impl App {
     fn reader_dir(&self) -> Result<PathBuf> {
         let dir = self.state.join("reader");
         std::fs::create_dir_all(&dir)?;
-        for (file, text) in [("AGENTS.md", READER_AGENTS), ("CLAUDE.md", "@AGENTS.md\n")] {
+        std::fs::create_dir_all(dir.join(".pi"))?;
+        for (file, text) in [
+            ("AGENTS.md", READER_AGENTS),
+            ("CLAUDE.md", "@AGENTS.md\n"),
+            (".pi/settings.json", PI_READER),
+        ] {
             let path = dir.join(file);
             if !path.exists() {
                 std::fs::write(path, text)?;
@@ -984,8 +941,7 @@ impl App {
         let harness = Self::harness(r)?;
         match &r.mode {
             Mode::Headless => {
-                // a process that took one prompt and ended may not have been seen to yet
-                let warm = harness.caps().warm && locked(&self.procs).contains_key(&r.id);
+                let warm = locked(&self.procs).contains_key(&r.id);
                 if !warm && r.session.is_some() && !harness.caps().resume {
                     bail!(
                         "{} cannot resume its session: start a new run",
@@ -1005,9 +961,11 @@ impl App {
                 let p = procs
                     .get_mut(&r.id)
                     .ok_or_else(|| err!("{} has no process", r.id))?;
-                p.stdin
-                    .send(harness.send(text))
-                    .map_err(|_| err!("{}: its process is gone", r.id))?;
+                for line in harness.send(text, &mut locked(&p.parse)) {
+                    p.stdin
+                        .send(line)
+                        .map_err(|_| err!("{}: its process is gone", r.id))?;
+                }
                 p.busy = true;
             }
             Mode::Pane { pane: Some(pane) } => {
@@ -1020,19 +978,32 @@ impl App {
     }
 
     fn spawn(&self, r: &Run, resume: Option<&SessionId>) -> Result<()> {
-        // every process, since the file may have changed since the last: no hooks, no process
-        self.install_hooks(r)?;
         let h = self.host(&r.machine)?;
         let harness = Self::harness(r)?;
+        // a local process has drover's environment; a remote one reads these first on its stdin
+        let forwarded: Vec<(&str, String)> = harness
+            .forward()
+            .iter()
+            .filter(|_| h.ssh().is_some())
+            .filter_map(|k| Some((*k, std::env::var(k).ok()?)))
+            .filter(|(_, v)| !v.is_empty() && !v.contains('\n'))
+            .collect();
+        let names: Vec<&str> = forwarded.iter().map(|(k, _)| *k).collect();
         let (asked, hooks) = (self.asked(r)?, self.hook_url(&r.id));
-        let argv = harness.start(&self.spec(r, &asked, &hooks, resume));
+        let spec = self.spec(r, &asked, &hooks, resume, &names);
+        let argv = harness.start(&spec);
         let state = self.state.to_string_lossy();
         let env = self.env(h, &r.id, &state);
-        let sp = harness::spawn(&argv, &r.cwd, &env, h.ssh())
+        let sp = harness::spawn(&argv, &r.cwd, &env, h.ssh(), &names)
             .map_err(|e| err!("{}: {e}", argv.first().map_or("", String::as_str)))?;
         let id = self.next_proc.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(write_lines(sp.stdin, rx, !harness.caps().warm));
+        let parse = Arc::new(StdMutex::new(Parse::default()));
+        let open = harness.open(&spec, &mut locked(&parse));
+        for line in forwarded.into_iter().map(|(_, v)| v).chain(open) {
+            let _ = tx.send(line);
+        }
+        tokio::spawn(write_lines(sp.stdin, rx));
         let (known, ident) = watch::channel(None);
         let me = self
             .me
@@ -1043,7 +1014,7 @@ impl App {
             (r.id.clone(), r.machine.clone()),
             id,
             harness,
-            sp.stdout,
+            (sp.stdout, tx.clone(), Arc::clone(&parse)),
             (sp.stderr, known),
         ));
         locked(&self.procs).insert(
@@ -1053,6 +1024,7 @@ impl App {
                 machine: r.machine.clone(),
                 ident,
                 stdin: tx,
+                parse,
                 busy: false,
                 idle_since: Instant::now(),
                 _child: sp.child,
@@ -1072,6 +1044,8 @@ impl App {
             }
         };
         let Some(p) = gone else { return };
+        // nothing is left to hear an answer
+        self.deny_waiting(id, None);
         let ident = p.ident.borrow().clone();
         if let Some(i) = ident
             && let Err(e) = self.store.forget(id, &i)
@@ -1155,7 +1129,15 @@ impl App {
                 Out::End if r.mode != Mode::Headless => {
                     return self.end(&mut r, Phase::Done, Kind::Done, json!({ "by": "exit" }));
                 }
-                Out::End | Out::Permission { .. } => {}
+                Out::Fail(error) => {
+                    return self.end(
+                        &mut r,
+                        Phase::Failed,
+                        Kind::Failed,
+                        json!({ "error": error }),
+                    );
+                }
+                Out::End | Out::Permission { .. } | Out::Write(_) => {}
             }
         }
         if r != before {
@@ -1196,17 +1178,13 @@ impl App {
         });
         if !self.own_session(&r, session) {
             eprintln!("run {id}: a hook from another session, ignored");
-            let foreign = outs.iter().any(|o| matches!(o, Out::Permission { .. }));
-            return match (
-                foreign,
-                harness.respond(&Decision {
+            if outs.iter().any(|o| matches!(o, Out::Permission { .. })) {
+                return harness.respond(&Decision {
                     allow: false,
                     reason: Some(FOREIGN.into()),
-                }),
-            ) {
-                (true, Answer::Hook(v)) => v,
-                _ => json!({}),
-            };
+                });
+            }
+            return json!({});
         }
         let ask = outs
             .iter()
@@ -1214,12 +1192,9 @@ impl App {
             .map(|i| outs.remove(i));
         self.apply(id, outs).await;
         match ask {
-            Some(Out::Permission { tool, input }) => {
-                let d = self.permission(id, tool, input, arrived).await;
-                match harness.respond(&d) {
-                    Answer::Hook(v) => v,
-                    Answer::Stdin(_) => json!({}),
-                }
+            Some(Out::Permission { tool, input, .. }) => {
+                let d = self.permission(id, tool, input, Some(arrived)).await;
+                harness.respond(&d)
             }
             _ => json!({}),
         }
@@ -1236,14 +1211,15 @@ impl App {
         }
     }
 
-    // A tool call that needs a permission: a `needs` event, then the owner's answer. Without one
-    // shortly before the hook's timeout, drover denies it with AWAITING and keeps it approvable.
+    // A tool call that needs a permission: a `needs` event, then the owner's answer. For a hook,
+    // which `arrived` then, without one shortly before its timeout drover denies it with AWAITING
+    // and keeps it approvable; a call on the process's stdin waits as long as it takes.
     async fn permission(
         &self,
         id: &RunId,
         tool: String,
         input: Value,
-        arrived: Instant,
+        arrived: Option<Instant>,
     ) -> Decision {
         let allow = Decision {
             allow: true,
@@ -1299,6 +1275,9 @@ impl App {
                 return deny(&format!("drover: {e}"));
             }
             key
+        };
+        let Some(arrived) = arrived else {
+            return rx.await.unwrap_or_else(|_| deny(ENDED));
         };
         let margin = 10.min(self.hook_timeout / 2);
         let wait =
@@ -1581,6 +1560,16 @@ impl App {
     }
 
     async fn cmd_send(&self, from: Option<&RunId>, id: &RunId, text: &str) -> Result<Value> {
+        // the question the agent waits on takes your text as its answer
+        let question = locked(&self.waiting)
+            .iter()
+            .find(|((run, _), w)| run == id && w.tool == harness::acp::QUESTION)
+            .map(|((_, perm), _)| perm.clone());
+        if let Some(perm) = question {
+            return self
+                .answer(from, id, &perm, true, Some(text.to_string()))
+                .await;
+        }
         let _turn = self.turns.lock().await;
         let mut r = self.get(id)?;
         Self::owned(&r, from)?;
@@ -1849,8 +1838,7 @@ impl App {
             r.mode = Mode::Pane {
                 pane: Some(wt.pane_id.clone()),
             };
-            let argv = harness.start(&self.spec(&r, &asked, &hooks, Some(&session)));
-            self.install_hooks(&r)?;
+            let argv = harness.start(&self.spec(&r, &asked, &hooks, Some(&session), &[]));
             r.phase = Phase::Idle;
             r.owner = Owner::User;
             self.save(&r)?;
@@ -1892,14 +1880,22 @@ impl App {
         let _turn = self.turns.lock().await;
         let mut r = self.get(id)?;
         Self::owned(&r, from)?;
-        match Self::harness(&r)?.abort() {
+        let harness = Self::harness(&r)?;
+        let abort = locked(&self.procs)
+            .get(id)
+            .map(|p| harness.abort(&mut locked(&p.parse)));
+        match abort {
             // the next send resumes its session
-            Abort::Kill => self.retire(id).await,
-            Abort::Stdin(line) => {
+            Some(Abort::Kill) => self.retire(id).await,
+            // the turn ends with its reply; what it waits on is answered as cancelled
+            Some(Abort::Stdin(line)) => {
                 if let Some(p) = locked(&self.procs).get(id) {
                     let _ = p.stdin.send(line);
                 }
+                self.deny_waiting(id, None);
+                return Ok(self.brief(&r));
             }
+            None => {}
         }
         if matches!(r.phase, Phase::Working | Phase::Needs) {
             r.phase = Phase::Idle;
@@ -2106,24 +2102,28 @@ fn keep_tail(s: &mut String, max: usize) {
     s.drain(..cut);
 }
 
-// `once`: one prompt per process, which reads its stdin to EOF, so the stream closes after it.
-async fn write_lines(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>, once: bool) {
+async fn write_lines(mut stdin: ChildStdin, mut rx: mpsc::UnboundedReceiver<String>) {
     while let Some(mut line) = rx.recv().await {
         line.push('\n');
-        if stdin.write_all(line.as_bytes()).await.is_err() || once {
+        if stdin.write_all(line.as_bytes()).await.is_err() {
             return;
         }
     }
 }
 
 // A headless process's stdout as events. Text deltas go out together, every TEXT_BATCH, and
-// before any other event, so the stream keeps their order.
+// before any other event, so the stream keeps their order. Protocol lines go back on its stdin,
+// and a permission it asks for waits on its owner's answer, with no deadline: the agent waits.
 async fn read_proc(
     app: Arc<App>,
     (id, machine): (RunId, Machine),
     proc: u64,
     harness: &'static dyn Harness,
-    stdout: ChildStdout,
+    (stdout, stdin, parse): (
+        ChildStdout,
+        mpsc::UnboundedSender<String>,
+        Arc<StdMutex<Parse>>,
+    ),
     (stderr, known): (ChildStderr, watch::Sender<Option<Ident>>),
 ) {
     // the first line names the process; the rest, its last 2000 bytes, says why it failed
@@ -2149,7 +2149,6 @@ async fn read_proc(
         tail
     });
     let mut lines = BufReader::new(stdout).lines();
-    let mut p = Parse::default();
     let mut text = String::new();
     let mut due = None;
     loop {
@@ -2163,11 +2162,27 @@ async fn read_proc(
         };
         let Ok(Some(line)) = line else { break };
         let mut outs = Vec::new();
-        for out in harness.events(&line, &mut p) {
+        let read = harness.events(&line, &mut locked(&parse));
+        for out in read {
             match out {
                 Out::Text(t) => {
                     text.push_str(&t);
                     due.get_or_insert_with(|| tokio::time::Instant::now() + TEXT_BATCH);
+                }
+                Out::Write(l) => drop(stdin.send(l)),
+                Out::Permission { tool, input, call } => {
+                    let (app, id, stdin, parse) = (
+                        Arc::clone(&app),
+                        id.clone(),
+                        stdin.clone(),
+                        Arc::clone(&parse),
+                    );
+                    tokio::spawn(async move {
+                        let d = app.permission(&id, tool, input, None).await;
+                        for l in harness.answer(&d, &call, &mut locked(&parse)) {
+                            let _ = stdin.send(l);
+                        }
+                    });
                 }
                 o => {
                     if !text.is_empty() {
@@ -2919,13 +2934,14 @@ pub(crate) mod tests {
 
     // A warm headless process that only takes stdin lines, which the test reads.
     fn warm(app: &App, id: &RunId) -> Result<mpsc::UnboundedReceiver<String>> {
-        let sp = harness::spawn(&["cat".to_string()], Path::new("/"), &[], None)?;
+        let sp = harness::spawn(&["cat".to_string()], Path::new("/"), &[], None, &[])?;
         let (tx, rx) = mpsc::unbounded_channel();
         let ident = watch::channel(None).1;
         let p = Proc {
             id: 0,
             machine: app.local.clone(),
             stdin: tx,
+            parse: Arc::default(),
             busy: true,
             idle_since: Instant::now(),
             ident,
@@ -3223,7 +3239,7 @@ pub(crate) mod tests {
         let app = app()?;
         let left = |run: &str| -> Result<(harness::Spawned, Ident, RunId)> {
             let argv = ["sleep".to_string(), "30".to_string()];
-            let sp = harness::spawn(&argv, Path::new("/"), &[], None)?;
+            let sp = harness::spawn(&argv, Path::new("/"), &[], None, &[])?;
             let ident = Ident {
                 pid: sp.child.id().ok_or("no pid")?,
                 start: String::new(),
