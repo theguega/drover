@@ -577,7 +577,12 @@ impl App {
             Cmd::Ls(l) => self.cmd_ls(&l),
             Cmd::Show { run } => self.cmd_show(&run),
             Cmd::Reply { run } => self.cmd_reply(&run),
-            Cmd::Send { run, text } => self.cmd_send(from, &run, &text).await,
+            Cmd::Send {
+                run,
+                text,
+                wait,
+                key,
+            } => self.cmd_send(from, &run, &text, wait, key.as_deref()).await,
             Cmd::Approve { run, perm, answer } => {
                 self.answer(from, &run, &perm, true, None, answer).await
             }
@@ -606,6 +611,20 @@ impl App {
     }
 
     async fn cmd_run(&self, from: Option<&RunId>, s: Start) -> Result<Value> {
+        let key = s.key.clone();
+        if let Some(k) = &key
+            && let Some((_, first)) = self.store.sent(k)?
+        {
+            return Ok(first);
+        }
+        let run = self.start_run(from, s).await?;
+        if let Some(k) = key {
+            self.store.set_sent(&k, 0, &run)?;
+        }
+        Ok(run)
+    }
+
+    async fn start_run(&self, from: Option<&RunId>, s: Start) -> Result<Value> {
         let h = harness::get(s.harness).ok_or_else(not_implemented)?;
         // a reader acts on nothing, so it needs no pane to pair in; a harness with no pane runs
         // headless, and `attach` opens its TUI
@@ -1732,7 +1751,76 @@ impl App {
         }
     }
 
-    async fn cmd_send(&self, from: Option<&RunId>, id: &RunId, text: &str) -> Result<Value> {
+    async fn cmd_send(
+        &self,
+        from: Option<&RunId>,
+        id: &RunId,
+        text: &str,
+        wait: bool,
+        key: Option<&str>,
+    ) -> Result<Value> {
+        let (cursor, ack) = self.deliver_prompt(from, id, text, key).await?;
+        if !wait {
+            return Ok(ack);
+        }
+        // the turns lock is released by now: hooks and other commands run while the turn does
+        let outcome = self.turn_outcome(id, cursor).await?;
+        let mut v = self.brief(&self.get(id)?);
+        if let Some(m) = v.as_object_mut() {
+            m.insert("outcome".into(), outcome.into());
+        }
+        Ok(v)
+    }
+
+    // The first event of a turn that ends it, read after the cursor the prompt was sent at.
+    async fn turn_outcome(&self, id: &RunId, cursor: i64) -> Result<&'static str> {
+        let mut feed = Feed::new(
+            self,
+            Filter {
+                run: Some(id.clone()),
+                role: None,
+                since: Some(cursor),
+            },
+        )?;
+        loop {
+            for e in feed.next(self).await? {
+                match e.get("kind").and_then(Value::as_str) {
+                    Some("reply") => return Ok("reply"),
+                    Some("needs") => return Ok("needs"),
+                    Some("failed") => return Ok("failed"),
+                    Some("done") => return Ok("done"),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Sends the prompt, or with a key that was sent before, returns that send's cursor and ack.
+    async fn deliver_prompt(
+        &self,
+        from: Option<&RunId>,
+        id: &RunId,
+        text: &str,
+        key: Option<&str>,
+    ) -> Result<(i64, Value)> {
+        if let Some(k) = key
+            && let Some(first) = self.store.sent(k)?
+        {
+            return Ok(first);
+        }
+        let (cursor, ack) = self.deliver_new(from, id, text).await?;
+        if let Some(k) = key {
+            self.store.set_sent(k, cursor, &ack)?;
+        }
+        Ok((cursor, ack))
+    }
+
+    async fn deliver_new(
+        &self,
+        from: Option<&RunId>,
+        id: &RunId,
+        text: &str,
+    ) -> Result<(i64, Value)> {
         // the question the agent waits on takes your text as its answer: cursor's as the reason,
         // Claude's as the answer to its one question
         let harness = Self::harness(&self.get(id)?)?;
@@ -1748,14 +1836,18 @@ impl App {
             );
         match question {
             Some((perm, 0)) => {
-                return self
+                let cursor = self.store.last_event()?;
+                let ack = self
                     .answer(from, id, &perm, true, Some(text.to_string()), Vec::new())
-                    .await;
+                    .await?;
+                return Ok((cursor, ack));
             }
             Some((perm, 1)) => {
-                return self
+                let cursor = self.store.last_event()?;
+                let ack = self
                     .answer(from, id, &perm, true, None, vec![text.to_string()])
-                    .await;
+                    .await?;
+                return Ok((cursor, ack));
             }
             Some((perm, n)) => {
                 return Err(Failure::new(
@@ -1767,6 +1859,7 @@ impl App {
             None => {}
         }
         let _turn = self.turns.lock().await;
+        let cursor = self.store.last_event()?;
         let mut r = self.get(id)?;
         Self::owned(&r, from)?;
         if r.mode != Mode::Headless {
@@ -1802,7 +1895,7 @@ impl App {
             }
         }
         self.deliver(&mut r, text).await?;
-        Ok(self.brief(&r))
+        Ok((cursor, self.brief(&r)))
     }
 
     async fn cmd_approve_run(&self, from: Option<&RunId>, id: &RunId) -> Result<Value> {

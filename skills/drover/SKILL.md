@@ -20,14 +20,14 @@ It prints the runs per phase, the runs that need the user (pending approval, a d
 The binary is the authority for syntax: `drover --help`, `drover <command> --help`. Do not guess flags.
 
 ```bash
-drover run --repo <repo> --branch <branch> --prompt <prompt>   # starts now; - reads the prompt from stdin
+drover run --repo <repo> --branch <branch> --prompt <prompt> [--key <k>]   # starts now; - reads the prompt from stdin; a retry with the same key returns the first run
 drover run … --permission-mode <mode>   # Claude only; default auto: harmless calls run unasked, only what auto mode escalates is a `needs`. `default` asks for every call outside the allowlist
 drover run --role mate --repo <repo> --branch <branch> --headless --prompt <goal>   # a mate, see below
 drover run --harness cursor|pi …   # over ACP, always headless; `attach` opens the agent's own TUI on the session
 drover ls [--role --machine --phase --all]
 drover show <run>                  # phase, owner, last reply (first and last 300 chars), children, a mate's goal graph and question
 drover reply <run>                 # the whole last reply
-drover send <run> <text>           # the next prompt, only while idle; or the answer to a cursor run's question (`needs` with tool AskQuestion)
+drover send <run> <text> [--wait] [--key <k>]   # the next prompt, only while idle; or the answer to a cursor run's question (`needs` with tool AskQuestion). --wait blocks until the turn ends; --key: a retry with the same key sends nothing new and returns the first result
 drover approve <run> <perm> · deny <run> <perm> --reason <why>   # a tool call in `needs`; `show` lists perms
 drover approve <run> <perm> --answer Blue   # a question (AskUserQuestion): one --answer per question, a label or your own text; `send <run> Blue` answers a single one
 drover watch [--run --role --since]   # events as JSON lines: started, text, tool_start, tool_end, needs, reply, done, failed
@@ -39,6 +39,10 @@ drover goal set --file goal.json · goal node <id> [--status --round --crew --re
 drover escalate --text <question>      # a run asks you; - reads it from stdin
 ```
 
+## Undo
+
+A pane run can rewind with Claude's own `/rewind`: `drover send <run> /rewind` opens the picker, then `drover keys <run> Up Enter` picks the prompt, and `drover keys <run> Down Enter` picks an option: 1 restores code and conversation, 2 the conversation, 3 the code. Check the result with `drover screen <run>`. A headless run cannot rewind (`/rewind` is refused), so undo its changes with git in its worktree. A restore does not undo Bash changes, and it puts files back whole, losing later edits by anyone.
+
 ## Who may do what
 
 - A run started by an agent carries `DROVER_RUN` (its own id). drover checks it.
@@ -48,7 +52,7 @@ drover escalate --text <question>      # a run asks you; - reads it from stdin
 
 ## Read the output
 
-Output is TOON: `key: value` lines, lists as `name[count]{fields}:` with one row per record. Errors print `error:` and `help:` with exit 1; exit 2 is a usage error. A change prints the run first, then `help:` with the next commands. `not implemented` marks a command a later version builds (`--scratch`, harnesses other than claude, cursor and pi).
+Output is TOON: `key: value` lines, lists as `name[count]{fields}:` with one row per record. Errors print `error:` and `help:` with exit 1; exit 2 is a usage error. `send --wait` exits 0 on a reply, 1 when the run failed or ended, 3 when it needs you (`outcome:` says which). A change prints the run first, then `help:` with the next commands. `not implemented` marks a command a later version builds (`--scratch`, harnesses other than claude, cursor and pi).
 
 ## Mates
 

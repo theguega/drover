@@ -31,6 +31,7 @@ CREATE INDEX IF NOT EXISTS events_run ON events(run, id);
 CREATE TABLE IF NOT EXISTS goals(run TEXT PRIMARY KEY, graph TEXT NOT NULL, updated_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS waits(run TEXT PRIMARY KEY, since INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS procs(run TEXT PRIMARY KEY, machine TEXT NOT NULL, pid INTEGER NOT NULL, start TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sends(key TEXT PRIMARY KEY, cursor INTEGER NOT NULL, result TEXT NOT NULL, at INTEGER NOT NULL);
 ";
 
 // What happened to a run: the C9 kinds, and `requested`, what a run was asked to do, which is
@@ -330,6 +331,31 @@ impl Store {
         self.db().execute(
             "INSERT OR REPLACE INTO goals(run, graph, updated_at) VALUES (?1, ?2, ?3)",
             params![run.as_str(), graph.to_string(), now()],
+        )?;
+        Ok(())
+    }
+
+    // The first result of a keyed call, and the last event id before it ran.
+    pub fn sent(&self, key: &str) -> Result<Option<(i64, Value)>> {
+        let row: Option<(i64, String)> = self
+            .db()
+            .query_row(
+                "SELECT cursor, result FROM sends WHERE key = ?1",
+                [key],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            Some((cursor, result)) => Some((cursor, serde_json::from_str(&result)?)),
+            None => None,
+        })
+    }
+
+    // A second call with the same key keeps the first result.
+    pub fn set_sent(&self, key: &str, cursor: i64, result: &Value) -> Result<()> {
+        self.db().execute(
+            "INSERT OR IGNORE INTO sends(key, cursor, result, at) VALUES (?1, ?2, ?3, ?4)",
+            params![key, cursor, result.to_string(), now()],
         )?;
         Ok(())
     }

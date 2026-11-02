@@ -44,7 +44,16 @@ pub enum Cmd {
     /// The whole last reply of a run (events carry its first and last 300 characters)
     Reply { run: RunId },
     /// The next prompt to a run you own; - reads it from stdin
-    Send { run: RunId, text: String },
+    Send {
+        run: RunId,
+        text: String,
+        /// Block until the turn ends: exit 0 on a reply, 1 on failed or done, 3 when it needs you
+        #[arg(long)]
+        wait: bool,
+        /// A retry with the same key sends nothing new: it returns the first call's result
+        #[arg(long)]
+        key: Option<String>,
+    },
     /// Allow a tool call a run waits on (its `needs` perm). Late, it resumes the run with the approval
     Approve {
         run: RunId,
@@ -195,6 +204,9 @@ pub struct Start {
     /// task [default], or mate: a dispatcher that follows the mates skill. Only you start a mate
     #[arg(long, value_enum)]
     pub role: Option<Role>,
+    /// A retry with the same key starts nothing new: it returns the first run
+    #[arg(long)]
+    pub key: Option<String>,
     /// The first prompt; - reads it from stdin
     #[arg(long)]
     pub prompt: String,
@@ -234,7 +246,11 @@ pub async fn main(cli: Cli) -> i32 {
         Ok(Value::Null) => 0,
         Ok(v) => {
             print!("{}", toon::encode(&v));
-            0
+            match v.get("outcome").and_then(Value::as_str) {
+                Some("failed" | "done") => 1,
+                Some("needs") => 3,
+                _ => 0,
+            }
         }
         Err(f) => {
             print!(
