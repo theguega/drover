@@ -74,6 +74,9 @@ pub enum Out {
     Cancel,        // what the agent asked is over: the run's waiting calls are answered
     End,           // the session ended
     Rekey,         // the next hook brings a new session, in the same agent
+    // a permission asked on stdin that a hook answers: denied there if it is still open once the
+    // hook's timeout has passed, since nothing else would answer it
+    Backstop(Value),
     // how many background tasks (shells, subagents) the process runs: it stays warm while any do
     Background(usize),
 }
@@ -102,6 +105,8 @@ pub struct Parse {
     // Claude's session totals at the last turn's end: the run's own when the process resumed it
     pub total: Usage,
     pub turn: bool, // the turn's output began
+    // Claude's permission requests on stdin that its hook has not answered yet, by request id
+    pub held: std::collections::HashSet<String>,
     pub acp: acp::Conn,
 }
 
@@ -129,9 +134,10 @@ pub trait Harness: Sync {
     fn respond(&self, _d: &Decision) -> Value {
         json!({})
     }
-    // A tool whose allow needs the owner's answers (approve --answer), not a yes.
-    fn asks(&self, _tool: &str) -> bool {
-        false
+    // How many questions a call asks, for a tool whose allow takes the owner's answers
+    // (approve --answer, one per question) instead of a yes; None for any other tool.
+    fn questions(&self, _tool: &str, _input: &Value) -> Option<usize> {
+        None
     }
     // Variables of drover's environment a remote process gets on its stdin, never on a command
     // line: (drover's name, the name the process has it under).

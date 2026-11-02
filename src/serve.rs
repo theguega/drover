@@ -50,6 +50,9 @@ const AWAITING: &str = "awaiting approval: the user has not answered yet. Do not
 const FOREIGN: &str = "drover: this session is not the run's";
 // What a tool call of a run that has ended hears.
 const ENDED: &str = "the run has ended";
+// The deny of a call whose hook never answered, and how long after the hook's timeout it goes.
+const UNANSWERED: &str = "drover: no answer reached this call (its permission hook failed); it is denied. Do not retry it now.";
+const BACKSTOP_AFTER: Duration = Duration::from_secs(5);
 // A call drover denied stays approvable this long, and a run keeps at most EXPIRED_MAX of them.
 const EXPIRED_FOR: Duration = Duration::from_secs(86_400);
 const EXPIRED_MAX: usize = 16;
@@ -97,6 +100,8 @@ pub struct App {
     port: u16,
     hook_timeout: u64,
     idle_kill: Duration,
+    // the same for a process running background tasks, which may never end
+    background_kill: Duration,
     // the pane set changed: watchers wake
     wake: Notify,
     // one run's change at a time: a hook, a stream line, a command
@@ -346,6 +351,11 @@ impl App {
             port: config.http_port,
             hook_timeout: config.hook_timeout,
             idle_kill: Duration::from_secs(config.idle_kill),
+            background_kill: Duration::from_secs(
+                config
+                    .background_kill
+                    .unwrap_or(config.idle_kill.saturating_mul(10)),
+            ),
             wake: Notify::new(),
             turns: tokio::sync::Mutex::new(()),
             procs: StdMutex::default(),
@@ -1104,21 +1114,52 @@ impl App {
         }
     }
 
-    // Ends a warm process that has had no turn for idle_kill.
+    // Ends a warm process that has had no turn for idle_kill, or for background_kill while it
+    // runs background tasks: a dev server or a `tail -f` would keep it warm for ever.
     async fn kill_idle(&self, id: &RunId, proc: u64) {
-        let idle = {
+        let (p, tasks) = {
             let mut procs = locked(&self.procs);
-            let idle = procs.get(id).is_some_and(|p| {
-                p.id == proc
-                    && !p.busy
-                    && p.background == 0
-                    && p.idle_since.elapsed() >= self.idle_kill
-            });
-            idle.then(|| procs.remove(id)).flatten()
+            let Some(p) = procs.get(id).filter(|p| p.id == proc && !p.busy) else {
+                return;
+            };
+            let (idle, tasks) = (p.idle_since.elapsed(), p.background);
+            let limit = match tasks {
+                0 => self.idle_kill,
+                _ => self.background_kill,
+            };
+            if idle < limit {
+                if tasks > 0 {
+                    self.kill_later(id, proc, limit - idle);
+                }
+                return;
+            }
+            match procs.remove(id) {
+                Some(p) => (p, tasks),
+                None => return,
+            }
         };
-        if let Some(p) = idle {
-            self.stop(id, p).await;
+        self.stop(id, p).await;
+        if tasks > 0
+            && let Ok(r) = self.get(id)
+        {
+            let why = format!(
+                "drover: ended the process after {} s with no turn and {tasks} background task(s) still running (background_kill); the next send resumes the session",
+                self.background_kill.as_secs()
+            );
+            if let Err(e) = self.emit(&r, Kind::Text, json!({ "text": why })) {
+                eprintln!("run {id}: {e}");
+            }
         }
+    }
+
+    fn kill_later(&self, id: &RunId, proc: u64, wait: Duration) {
+        let (me, id) = (Weak::clone(&self.me), id.clone());
+        tokio::spawn(async move {
+            sleep(wait).await;
+            if let Some(me) = me.upgrade() {
+                me.kill_idle(&id, proc).await;
+            }
+        });
     }
 
     // A harness's events, from its stream or its hooks, moving the run along.
@@ -1200,7 +1241,11 @@ impl App {
                         json!({ "error": error }),
                     );
                 }
-                Out::End | Out::Permission { .. } | Out::Write(_) | Out::Cancel => {}
+                Out::End
+                | Out::Permission { .. }
+                | Out::Write(_)
+                | Out::Cancel
+                | Out::Backstop(_) => {}
             }
         }
         if r != before {
@@ -1215,22 +1260,37 @@ impl App {
         let Some(p) = procs.get_mut(id) else { return };
         p.busy = false;
         p.idle_since = Instant::now();
-        let (me, id, proc, wait) = (Weak::clone(&self.me), id.clone(), p.id, self.idle_kill);
-        tokio::spawn(async move {
-            sleep(wait).await;
-            if let Some(me) = me.upgrade() {
-                me.kill_idle(&id, proc).await;
-            }
-        });
+        let proc = p.id;
+        drop(procs);
+        self.kill_later(id, proc, self.idle_kill);
     }
 
     // A hook a harness posted for a run: its events, and for a permission, the answer.
     pub async fn hook(&self, id: &RunId, body: &Value) -> Value {
-        let Ok(Some(r)) = self.store.get(id) else {
-            return json!({});
+        // a permission gets a deny on every way out, never {}: with no decision claude would wait
+        // on its stdin. Claude is the harness that posts hooks, so a run drover cannot read gets its
+        let refuse = |harness: &dyn Harness, why: String| match harness
+            .hook(body)
+            .iter()
+            .any(|o| matches!(o, Out::Permission { .. }))
+        {
+            true => harness.respond(&Decision {
+                allow: false,
+                reason: Some(why),
+                ..Decision::default()
+            }),
+            false => json!({}),
+        };
+        let r = match self.store.get(id) {
+            Ok(Some(r)) => r,
+            Ok(None) => return refuse(&harness::claude::Claude, format!("drover has no run {id}")),
+            Err(e) => return refuse(&harness::claude::Claude, format!("drover: {e}")),
         };
         let Some(harness) = harness::get(r.harness) else {
-            return json!({});
+            return refuse(
+                &harness::claude::Claude,
+                format!("drover: {id} has no harness"),
+            );
         };
         // the harness's own timeout runs from here, not from when the turns lock is ours
         let arrived = Instant::now();
@@ -1241,14 +1301,7 @@ impl App {
         });
         if !self.own_session(&r, session) {
             eprintln!("run {id}: a hook from another session, ignored");
-            if outs.iter().any(|o| matches!(o, Out::Permission { .. })) {
-                return harness.respond(&Decision {
-                    allow: false,
-                    reason: Some(FOREIGN.into()),
-                    ..Decision::default()
-                });
-            }
-            return json!({});
+            return refuse(harness, FOREIGN.into());
         }
         let ask = outs
             .iter()
@@ -1357,8 +1410,24 @@ impl App {
             return rx.try_recv().unwrap_or_else(|_| deny(AWAITING));
         };
         self.expire(key, w.tool, w.input);
-        // the turn goes on with the deny: nothing waits, unless another call does
-        let _turn = self.turns.lock().await;
+        // the deny goes out now, before claude's own timeout; the phase follows under the turns
+        // lock, later when another holds it
+        match self.turns.try_lock() {
+            Ok(_turn) => self.unneed(id),
+            Err(_) => {
+                let (me, id) = (Weak::clone(&self.me), id.clone());
+                tokio::spawn(async move {
+                    let Some(me) = me.upgrade() else { return };
+                    let _turn = me.turns.lock().await;
+                    me.unneed(&id);
+                });
+            }
+        }
+        deny(AWAITING)
+    }
+
+    // The turn goes on with a deny: the run is no longer in needs, unless another call waits.
+    fn unneed(&self, id: &RunId) {
         let others = locked(&self.waiting).keys().any(|(run, _)| run == id);
         if let Ok(Some(mut r)) = self.store.get(id)
             && r.phase == Phase::Needs
@@ -1369,7 +1438,6 @@ impl App {
                 eprintln!("run {id}: {e}");
             }
         }
-        deny(AWAITING)
     }
 
     // approve and deny: the answer goes to the waiting call, or, for one drover already denied,
@@ -1395,20 +1463,26 @@ impl App {
             .into());
         }
         let key = (id.clone(), perm.to_string());
-        let asks = |tool: &str| {
-            if allow && answers.is_empty() && harness.asks(tool) {
-                return Err(Failure::new(
-                    format!("{id} {perm} is a question: {tool} takes answers, not a yes"),
-                    format!(
-                        "drover approve {id} {perm} --answer <label or text> (one per question)"
-                    ),
-                ));
-            }
-            Ok(())
+        // a question takes one answer per question, and nothing else does
+        let asks = |tool: &str, input: &Value| match harness.questions(tool, input) {
+            Some(n) if allow && answers.len() != n => Err(Failure::new(
+                format!(
+                    "{id} {perm} is {tool} with {n} question(s): {} answer(s) given",
+                    answers.len()
+                ),
+                format!(
+                    "drover approve {id} {perm} --answer <label or text> (one per question, in order)"
+                ),
+            )),
+            None if !answers.is_empty() => Err(Failure::new(
+                format!("{id} {perm} is a {tool} call, not a question"),
+                format!("drover approve {id} {perm}"),
+            )),
+            _ => Ok(()),
         };
         let waiter = locked(&self.waiting).remove(&key);
         if let Some(w) = waiter {
-            if let Err(e) = asks(&w.tool) {
+            if let Err(e) = asks(&w.tool, &w.input) {
                 locked(&self.waiting).insert(key, w);
                 return Err(e.into());
             }
@@ -1435,7 +1509,7 @@ impl App {
             )
             .into());
         };
-        if let Err(e) = asks(&tool) {
+        if let Err(e) = asks(&tool, &input) {
             locked(&self.expired).insert(key, (tool, input, at));
             return Err(e.into());
         }
@@ -1458,7 +1532,7 @@ impl App {
                     call(&input)
                 ),
                 a => format!(
-                    "drover: the user answered the {tool} call that was denied with \"awaiting approval\": {}. Their answers, one per question: {}",
+                    "drover: the user answered the {tool} call that was denied with \"awaiting approval\": {}. Their answers, one per question: {}. Do not ask again.",
                     call(&input),
                     a.join(" | ")
                 ),
@@ -1467,8 +1541,11 @@ impl App {
                 locked(&self.expired).insert(key, (tool, input, at));
                 return Err(e);
             }
-            // under the turns lock, so the call it asks for again comes after this
-            locked(&self.approved).push((id.clone(), tool, call(&input)));
+            // under the turns lock, so the call it asks for again comes after this. Not for a
+            // question: the prompt carries the answers, and the same call again would have none
+            if answers.is_empty() {
+                locked(&self.approved).push((id.clone(), tool, call(&input)));
+            }
         }
         Ok(
             json!({ "run": id, "perm": perm, "allowed": allow, "late": true, "help": [format!("drover show {id}")] }),
@@ -1659,19 +1736,38 @@ impl App {
     }
 
     async fn cmd_send(&self, from: Option<&RunId>, id: &RunId, text: &str) -> Result<Value> {
-        // the question the agent waits on takes your text as its answer
-        let asks = Self::harness(&self.get(id)?)?;
+        // the question the agent waits on takes your text as its answer: cursor's as the reason,
+        // Claude's as the answer to its one question
+        let harness = Self::harness(&self.get(id)?)?;
         let question = locked(&self.waiting)
             .iter()
-            .find(|((run, _), w)| {
-                run == id && (w.tool == harness::acp::QUESTION || asks.asks(&w.tool))
-            })
-            .map(|((_, perm), _)| perm.clone());
-        if let Some(perm) = question {
-            let answer = text.to_string();
-            return self
-                .answer(from, id, &perm, true, Some(answer.clone()), vec![answer])
-                .await;
+            .filter(|((run, _), _)| run == id)
+            .find_map(
+                |((_, perm), w)| match harness.questions(&w.tool, &w.input) {
+                    _ if w.tool == harness::acp::QUESTION => Some((perm.clone(), 0)),
+                    Some(n) => Some((perm.clone(), n)),
+                    None => None,
+                },
+            );
+        match question {
+            Some((perm, 0)) => {
+                return self
+                    .answer(from, id, &perm, true, Some(text.to_string()), Vec::new())
+                    .await;
+            }
+            Some((perm, 1)) => {
+                return self
+                    .answer(from, id, &perm, true, None, vec![text.to_string()])
+                    .await;
+            }
+            Some((perm, n)) => {
+                return Err(Failure::new(
+                    format!("{id} waits on {n} questions ({perm}): send answers one"),
+                    format!("drover approve {id} {perm} --answer <first> --answer <second> …"),
+                )
+                .into());
+            }
+            None => {}
         }
         let _turn = self.turns.lock().await;
         let mut r = self.get(id)?;
@@ -2316,6 +2412,30 @@ async fn read_proc(
                     due.get_or_insert_with(|| tokio::time::Instant::now() + TEXT_BATCH);
                 }
                 Out::Write(l) => drop(stdin.send(l)),
+                Out::Backstop(call) => {
+                    let (wait, id, stdin, parse) = (
+                        Duration::from_secs(app.hook_timeout) + BACKSTOP_AFTER,
+                        id.clone(),
+                        stdin.clone(),
+                        Arc::clone(&parse),
+                    );
+                    tokio::spawn(async move {
+                        sleep(wait).await;
+                        let deny = Decision {
+                            allow: false,
+                            reason: Some(UNANSWERED.into()),
+                            ..Decision::default()
+                        };
+                        for o in harness.answer(&deny, &call, &mut locked(&parse)) {
+                            if let Out::Write(l) = o {
+                                eprintln!(
+                                    "run {id}: a permission its hook left unanswered, denied"
+                                );
+                                drop(stdin.send(l));
+                            }
+                        }
+                    });
+                }
                 Out::Permission { tool, input, call } => {
                     // what came before it is stored before its needs
                     if !text.is_empty() {
@@ -3327,6 +3447,174 @@ cat >/dev/null
                 .is_some_and(|m| m.starts_with("awaiting approval"))
         );
         holder.await?;
+        Ok(())
+    }
+
+    // A permission hook gets a deny on every way out: with no decision, claude -p would wait on
+    // its stdin for good. Other hooks get {}.
+    #[tokio::test]
+    async fn a_permission_hook_drover_cannot_place_is_denied() -> Result<()> {
+        let app = app()?;
+        let unknown: RunId = "r-ffffff".parse()?;
+        let answer = app.hook(&unknown, &touch("x")).await;
+        assert_eq!(at(&answer, "/hookSpecificOutput/decision/behavior"), "deny");
+        assert_eq!(
+            at(&answer, "/hookSpecificOutput/decision/message"),
+            "drover has no run r-ffffff"
+        );
+        assert_eq!(
+            app.hook(&unknown, &hook_body("Stop", json!({}))).await,
+            json!({})
+        );
+        Ok(())
+    }
+
+    // The deny at the deadline goes out while another holds the turns lock: claude's own timeout
+    // would fire first, and with --permission-prompt-tool stdio the call would wait on stdin.
+    #[tokio::test]
+    async fn the_deadline_deny_does_not_wait_for_the_turns_lock() -> Result<()> {
+        let app = app_with("hook_timeout = 4")?;
+        let mut r = run("r-0000b1", Role::Task)?;
+        r.mode = Mode::Headless;
+        r.phase = Phase::Working;
+        app.store.save(&r)?;
+        let _stdin = warm(&app, &r.id)?;
+        let asker = Arc::clone(&app);
+        let id = r.id.clone();
+        let t = Instant::now();
+        let hook = tokio::spawn(async move { asker.hook(&id, &touch("y")).await });
+        needs(&app, &r.id).await?;
+        let turn = app.turns.lock().await;
+        let answer = hook.await?;
+        assert!(
+            t.elapsed() < Duration::from_millis(2800),
+            "{:?}",
+            t.elapsed()
+        );
+        assert_eq!(at(&answer, "/hookSpecificOutput/decision/behavior"), "deny");
+        assert_eq!(phase(&app, "r-0000b1"), Some(Phase::Needs));
+        drop(turn);
+        for _ in 0..100 {
+            if phase(&app, "r-0000b1") == Some(Phase::Working) {
+                return Ok(());
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        bail!("the run stayed in needs after the lock was free")
+    }
+
+    fn ask(questions: &[&str]) -> Value {
+        let qs: Vec<Value> = questions
+            .iter()
+            .map(|q| json!({"question": q, "header": "h", "options": [{"label": "Red"}, {"label": "Blue"}], "multiSelect": false}))
+            .collect();
+        hook_body(
+            "PermissionRequest",
+            json!({"tool_name": "AskUserQuestion", "tool_input": {"questions": qs}}),
+        )
+    }
+
+    // A question takes one answer per question: approve without them, with too few, or a send
+    // to two questions is refused, and the allow carries them keyed by question.
+    #[tokio::test]
+    async fn a_question_takes_one_answer_per_question() -> Result<()> {
+        let app = app()?;
+        let mut r = run("r-0000b2", Role::Task)?;
+        r.phase = Phase::Working;
+        app.store.save(&r)?;
+        let asker = Arc::clone(&app);
+        let id = r.id.clone();
+        let hook = tokio::spawn(async move {
+            asker
+                .hook(&id, &ask(&["Which color?", "Which shade?"]))
+                .await
+        });
+        needs(&app, &r.id).await?;
+        for line in [
+            "approve r-0000b2 p1",
+            "approve r-0000b2 p1 --answer Red",
+            "send r-0000b2 Red",
+        ] {
+            assert!(failure(request(&app, None, line).await).is_some(), "{line}");
+        }
+        request(&app, None, "approve r-0000b2 p1 --answer Red --answer Blue").await?;
+        assert_eq!(
+            at(
+                &hook.await?,
+                "/hookSpecificOutput/decision/updatedInput/answers"
+            ),
+            &json!({"Which color?": "Red", "Which shade?": "Blue"})
+        );
+        // one question: send is its answer
+        let asker = Arc::clone(&app);
+        let id = r.id.clone();
+        let hook = tokio::spawn(async move { asker.hook(&id, &ask(&["Which color?"])).await });
+        needs(&app, &r.id).await?;
+        assert!(failure(request(&app, None, "approve r-0000b2 p2").await).is_some());
+        request(&app, None, "send r-0000b2 Blue").await?;
+        assert_eq!(
+            at(
+                &hook.await?,
+                "/hookSpecificOutput/decision/updatedInput/answers"
+            ),
+            &json!({"Which color?": "Blue"})
+        );
+        Ok(())
+    }
+
+    // Answered late, a question's answers are the next prompt; the same question asked again is
+    // not allowed with no answers.
+    #[tokio::test]
+    async fn a_late_answer_is_a_prompt_and_no_allowance() -> Result<()> {
+        let app = app_with("hook_timeout = 2")?;
+        let mut r = run("r-0000b3", Role::Task)?;
+        r.mode = Mode::Headless;
+        r.phase = Phase::Working;
+        app.store.save(&r)?;
+        let mut stdin = warm(&app, &r.id)?;
+        let answer = app.hook(&r.id, &ask(&["Which color?"])).await;
+        assert_eq!(at(&answer, "/hookSpecificOutput/decision/behavior"), "deny");
+        let mut r = app.get(&r.id)?;
+        r.phase = Phase::Idle;
+        app.store.save(&r)?;
+        request(&app, None, "approve r-0000b3 p1 --answer Blue").await?;
+        assert_eq!(approved(&app, &r.id), 0);
+        let prompt = stdin.recv().await.unwrap_or_default();
+        assert!(
+            prompt.contains("Blue") && prompt.contains("AskUserQuestion"),
+            "{prompt}"
+        );
+        Ok(())
+    }
+
+    // A process idle with background tasks lives past idle_kill, up to background_kill, and the
+    // run says why it ended.
+    #[tokio::test]
+    async fn background_tasks_keep_a_process_up_to_background_kill() -> Result<()> {
+        let app = app_with("idle_kill = 1\nbackground_kill = 3")?;
+        let mut r = run("r-0000b4", Role::Task)?;
+        r.mode = Mode::Headless;
+        app.store.save(&r)?;
+        let _stdin = warm(&app, &r.id)?;
+        let since = |s: u64| Instant::now().checked_sub(Duration::from_secs(s));
+        if let Some(p) = locked(&app.procs).get_mut(&r.id) {
+            p.busy = false;
+            p.background = 1;
+            p.idle_since = since(2).unwrap_or_else(Instant::now);
+        }
+        app.kill_idle(&r.id, 0).await;
+        assert!(locked(&app.procs).contains_key(&r.id));
+        if let Some(p) = locked(&app.procs).get_mut(&r.id) {
+            p.idle_since = since(4).unwrap_or_else(Instant::now);
+        }
+        app.kill_idle(&r.id, 0).await;
+        assert!(!locked(&app.procs).contains_key(&r.id));
+        let why = app.store.last(&r.id, Kind::Text)?.unwrap_or_default();
+        assert!(
+            at(&why, "/text")
+                .as_str()
+                .is_some_and(|t| t.contains("background_kill"))
+        );
         Ok(())
     }
 

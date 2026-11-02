@@ -107,8 +107,29 @@ impl Harness for Claude {
         })
     }
 
-    fn asks(&self, tool: &str) -> bool {
-        tool == "AskUserQuestion"
+    fn questions(&self, tool: &str, input: &Value) -> Option<usize> {
+        let questions = input.get("questions").and_then(Value::as_array);
+        (tool == "AskUserQuestion").then(|| questions.map_or(0, Vec::len))
+    }
+
+    // Only the backstop's deny comes here: the hook answers every call that reaches drover.
+    fn answer(&self, d: &Decision, call: &Value, p: &mut Parse) -> Vec<Out> {
+        let Some(id) = call.get("request_id").and_then(Value::as_str) else {
+            return Vec::new();
+        };
+        if !p.held.remove(id) {
+            return Vec::new();
+        }
+        let decision = match d.allow {
+            true => json!({"behavior": "allow", "updatedInput": call.get("input")}),
+            false => {
+                json!({"behavior": "deny", "message": d.reason.as_deref().unwrap_or("denied")})
+            }
+        };
+        vec![Out::Write(
+            json!({"type": "control_response", "response": {"subtype": "success", "request_id": id, "response": decision}})
+                .to_string(),
+        )]
     }
 
     fn abort(&self, _p: &mut Parse) -> Abort {
@@ -137,6 +158,23 @@ impl Harness for Claude {
                 .collect(),
             "system" if l.subtype.as_deref() == Some("background_tasks_changed") => {
                 vec![Out::Background(l.tasks.map_or(0, |t| t.len()))]
+            }
+            // written with each PermissionRequest hook, and cancelled once the hook answers; one a
+            // hook leaves undecided (drover unreachable, no decision) would hang the turn
+            "control_request"
+                if l.request.as_ref().and_then(|r| r.get("subtype")?.as_str())
+                    == Some("can_use_tool") =>
+            {
+                let id = l.request_id.unwrap_or_default();
+                p.held.insert(id.clone());
+                let input = l.request.as_ref().and_then(|r| r.get("input")).cloned();
+                vec![Out::Backstop(json!({"request_id": id, "input": input}))]
+            }
+            "control_cancel_request" => {
+                if let Some(id) = &l.request_id {
+                    p.held.remove(id);
+                }
+                Vec::new()
             }
             "stream_event" => {
                 let delta = l.event.as_ref().and_then(|e| e.get("delta"));
@@ -250,6 +288,14 @@ impl Harness for Claude {
                 usage: None,
                 error: false,
             }),
+            // /compact is a turn with no prompt or Stop hook; it replies empty, as headless does.
+            // An automatic one runs inside a turn, which goes on.
+            "PreCompact" if text("trigger") == Some("manual") => Some(Out::Prompt),
+            "PostCompact" if text("trigger") == Some("manual") => Some(Out::Reply {
+                text: String::new(),
+                usage: None,
+                error: false,
+            }),
             // /clear starts a new session in the same TUI; its next prompt brings the new id
             "SessionEnd" if text("reason") == Some("clear") => Some(Out::Rekey),
             "SessionEnd" => Some(Out::End),
@@ -274,6 +320,8 @@ impl Claude {
                 "PostToolUse",
                 "PostToolUseFailure",
                 "Stop",
+                "PreCompact",
+                "PostCompact",
                 "SessionEnd",
             ] {
                 hooks.insert(name.into(), hook(REPORT_TIMEOUT));
@@ -306,6 +354,8 @@ struct Line {
     model_usage: Option<std::collections::HashMap<String, ModelTokens>>,
     tasks: Option<Vec<serde::de::IgnoredAny>>,
     parent_tool_use_id: Option<String>,
+    request_id: Option<String>,
+    request: Option<Value>,
     num_turns: Option<u64>,
     origin: Option<Value>,
 }
@@ -582,6 +632,19 @@ mod tests {
             Claude.hook(&b).into_iter().last()
         };
         assert_eq!(hook("UserPromptSubmit", json!({})), Some(Out::Prompt));
+        // a /compact in a pane is a turn of its own; an automatic one is inside a turn
+        assert_eq!(
+            hook("PreCompact", json!({"trigger": "manual"})),
+            Some(Out::Prompt)
+        );
+        assert!(matches!(
+            hook("PostCompact", json!({"trigger": "manual"})),
+            Some(Out::Reply { .. })
+        ));
+        assert!(matches!(
+            hook("PreCompact", json!({"trigger": "auto"})),
+            Some(Out::Session(_))
+        ));
         assert_eq!(
             hook(
                 "PermissionRequest",
@@ -645,7 +708,8 @@ mod tests {
                 .and_then(|i| i.get("answers").cloned()),
             Some(json!({"Which color?": "Blue", "Which size?": "a big one"}))
         );
-        assert!(Claude.asks("AskUserQuestion") && !Claude.asks("Bash"));
+        assert_eq!(Claude.questions("AskUserQuestion", &ask), Some(2));
+        assert_eq!(Claude.questions("Bash", &json!({"command": "ls"})), None);
     }
 
     // After its turn, a background subagent's lines are no turn of the run's; the turn Claude starts
@@ -683,6 +747,47 @@ mod tests {
             ),
             []
         );
+    }
+
+    // Claude writes each permission onto stdout too, and cancels it once the hook answers. One
+    // still open after the hook's timeout is denied there; a cancelled one is not answered.
+    #[test]
+    fn a_permission_no_hook_answered_is_denied_on_stdin() {
+        let mut p = Parse::default();
+        let req = |id: &str| {
+            format!(
+                r#"{{"type":"control_request","request_id":"{id}","request":{{"subtype":"can_use_tool","tool_name":"Bash","input":{{"command":"touch x"}}}}}}"#
+            )
+        };
+        let call = |id: &str| json!({"request_id": id, "input": {"command": "touch x"}});
+        assert_eq!(Claude.events(&req("a"), &mut p), [Out::Backstop(call("a"))]);
+        Claude.events(&req("b"), &mut p);
+        Claude.events(
+            r#"{"type":"control_cancel_request","request_id":"b"}"#,
+            &mut p,
+        );
+        let deny = Decision {
+            allow: false,
+            reason: Some("no answer".into()),
+            ..Decision::default()
+        };
+        assert_eq!(Claude.answer(&deny, &call("b"), &mut p), []);
+        let written: Vec<Value> = Claude
+            .answer(&deny, &call("a"), &mut p)
+            .into_iter()
+            .filter_map(|o| match o {
+                Out::Write(l) => serde_json::from_str(&l).ok(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            written,
+            [
+                json!({"type": "control_response", "response": {"subtype": "success", "request_id": "a", "response": {"behavior": "deny", "message": "no answer"}}})
+            ]
+        );
+        // once only
+        assert_eq!(Claude.answer(&deny, &call("a"), &mut p), []);
     }
 
     // A resumed process reports the session's totals from its start, subagents included: a turn is

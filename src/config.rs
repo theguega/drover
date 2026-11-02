@@ -9,6 +9,7 @@
 //   http_port = 7341                 # hooks, events and approvals, on 127.0.0.1 only
 //   hook_timeout = 600               # seconds a tool call waits for your approve or deny
 //   idle_kill = 900                  # seconds a headless process stays warm after its last turn
+//   background_kill = 9000           # the same while it runs background tasks (default 10 × idle_kill)
 //
 // Only that flat subset of TOML is read: `key = "string"`, `key = ["a", "b"]` and `key = 7`.
 
@@ -58,6 +59,7 @@ pub struct Config {
     pub http_port: u16,
     pub hook_timeout: u64,
     pub idle_kill: u64,
+    pub background_kill: Option<u64>,
 }
 
 impl Config {
@@ -80,6 +82,7 @@ impl Config {
             http_port: 7341,
             hook_timeout: 600,
             idle_kill: 900,
+            background_kill: None,
         };
         for (n, line) in text.lines().enumerate() {
             let line = line.split_once('#').map_or(line, |(l, _)| l).trim();
@@ -124,6 +127,7 @@ impl Config {
                 "http_port" => c.http_port = value.parse().map_err(|_| bad())?,
                 "hook_timeout" => c.hook_timeout = value.parse().map_err(|_| bad())?,
                 "idle_kill" => c.idle_kill = value.parse().map_err(|_| bad())?,
+                "background_kill" => c.background_kill = Some(value.parse().map_err(|_| bad())?),
                 k => bail!("line {}: unknown key {k}", n + 1),
             }
         }
