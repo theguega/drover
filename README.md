@@ -88,7 +88,7 @@ Run it again to update. To add a remote, run this on the host:
 drover machine add gpu
 ```
 
-It saves `gpu` in herdr, copies `drover-wt` and the client (`bin/drover-ssh`, as `drover`) to it over ssh, adds it to `remotes` and restarts the service. Nothing is cloned on the remote. On the remote, set `DROVER_HOST` to the host's ssh name in your shell (`export DROVER_HOST=devbox`). Without a host, `bootstrap.sh --remote` clones the repo and copies the same files. On macOS, `drover doctor` prints the one-time Cursor login command (see [Harnesses](#harnesses)).
+It saves `gpu` in herdr, copies `drover-wt` and the client (`bin/drover-ssh`, as `drover`) to it over ssh, adds it to `remotes` and restarts the service. Nothing is cloned on the remote. The copied `drover` already names the host, so nothing is set on the remote; `DROVER_HOST` overrides it. Without a host, `bootstrap.sh --remote` clones the repo and copies the same files. On macOS, `drover doctor` prints the one-time Cursor login command (see [Harnesses](#harnesses)).
 
 The service runs `zsh -lc`, and ssh runs commands through your remote shell without a terminal. So the `PATH` that finds `herdr`, `jq`, `drover-wt` and the agent CLIs must be set in a file a non-interactive shell reads (`~/.zshenv` or `~/.zprofile`), not only in `~/.zshrc`. The same goes for `~/.local/bin` on the host, where the client runs `drover`. If a tool is missing, the service does not start.
 

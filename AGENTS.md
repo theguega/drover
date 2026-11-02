@@ -124,7 +124,7 @@ Sessions are throwaway. drover holds no knowledge: the agents write their own no
 
 The service runs on one host, named by `host` in the config. Each name in `remotes` is an ssh name whose herdr server is already running; drover never starts one. Match it to the saved herdr machine label so the desk and drover agree. One service at a time: it owns `drover.db`.
 
-Every other machine is a client: `drover machine add` copies `drover-wt` and `bin/drover-ssh` there as `drover`, and `DROVER_HOST` names the host. `drover-ssh` passes `DROVER_RUN` along, so a remote run speaks as itself.
+Every other machine is a client: `drover machine add` copies `drover-wt` and `bin/drover-ssh` there as `drover`, with the host's name in it (`DROVER_HOST` overrides). `drover-ssh` passes `DROVER_RUN` along, so a remote run speaks as itself.
 
 ## Rules the code follows
 

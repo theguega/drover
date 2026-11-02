@@ -41,7 +41,7 @@ pub fn run(paths: &Paths, op: Op) -> Result<Value, Failure> {
         Op::Ls => Ok(json!({ "machines": remotes })),
         Op::Add { ssh } => {
             herdr_add(&ssh)?;
-            install(&ssh)?;
+            install(&ssh, &config.host)?;
             if !remotes.contains(&ssh.as_str()) {
                 remotes.push(ssh.as_str());
             }
@@ -50,7 +50,6 @@ pub fn run(paths: &Paths, op: Op) -> Result<Value, Failure> {
             Ok(json!({
                 "machine": ssh.as_str(),
                 "remotes": remotes,
-                "note": format!("on {ssh}, set DROVER_HOST={} in its shell", config.host.as_str()),
                 "help": "drover doctor",
             }))
         }
@@ -110,9 +109,13 @@ fn herdr_add(ssh: &Machine) -> Result<(), Failure> {
 const DROVER_WT: &str = include_str!("../bin/drover-wt");
 const DROVER_SSH: &str = include_str!("../bin/drover-ssh");
 
-fn install(ssh: &Machine) -> Result<(), Failure> {
+fn install(ssh: &Machine, host: &Machine) -> Result<(), Failure> {
     ship(ssh, "~/.local/bin/drover-wt", DROVER_WT)?;
-    ship(ssh, "~/.local/bin/drover", DROVER_SSH)?;
+    ship(
+        ssh,
+        "~/.local/bin/drover",
+        &DROVER_SSH.replace("__DROVER_HOST__", host.as_str()),
+    )?;
     ship(
         ssh,
         "~/.local/bin/drover-wt.build",
