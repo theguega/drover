@@ -1,6 +1,6 @@
 [package]
 name = "drover"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2024"
 rust-version = "1.91"
 description = "Agent runtime for coding agents: runs Claude Code, Cursor and pi in git worktrees, in herdr panes or headless, and carries their approvals"
