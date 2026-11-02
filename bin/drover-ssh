@@ -4,7 +4,8 @@
 set -euo pipefail
 
 host=${DROVER_HOST:-__DROVER_HOST__} # machine add writes the host here
-[[ $host == __DROVER_HOST__ ]] && { echo "set DROVER_HOST to the ssh name of the drover host" >&2; exit 1; }
+# not the placeholder itself: machine add replaces it on this line too
+[[ $host == *_HOST__ ]] && { echo "set DROVER_HOST to the ssh name of the drover host" >&2; exit 1; }
 # one service per desk: it owns drover.db and the herdr watchers
 [[ "${1:-}" == serve ]] && { echo "serve runs on $host, not here" >&2; exit 1; }
 
