@@ -94,18 +94,23 @@ async fn handle(app: &App, stream: TcpStream, port: u16) -> Result<()> {
             struct Answer {
                 allow: bool,
                 reason: Option<String>,
+                #[serde(default)]
+                answers: Vec<String>,
             }
             match (
                 run.parse::<RunId>(),
                 serde_json::from_slice::<Answer>(&req.body),
             ) {
-                (Ok(run), Ok(a)) => match app.answer(None, &run, perm, a.allow, a.reason).await {
+                (Ok(run), Ok(a)) => match app
+                    .answer(None, &run, perm, a.allow, a.reason, a.answers)
+                    .await
+                {
                     Ok(v) => ("200 OK", v),
                     Err(e) => ("409 Conflict", json!(Failure::from(e))),
                 },
                 _ => (
                     "400 Bad Request",
-                    json!({"error": r#"{"allow": true|false, "reason": "…"}"#}),
+                    json!({"error": r#"{"allow": true|false, "reason": "…", "answers": ["…"]}"#}),
                 ),
             }
         }

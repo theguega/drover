@@ -69,6 +69,8 @@ struct Proc {
     // the harness's protocol state, which the reader of its stdout shares
     parse: Arc<StdMutex<Parse>>,
     busy: bool, // a turn runs
+    // background tasks it runs: a turn may follow when one ends, so it is not idle
+    background: usize,
     idle_since: Instant,
     // its pid and start time, from its first stderr line
     ident: watch::Receiver<Option<Ident>>,
@@ -477,6 +479,7 @@ impl App {
             let _ = w.tx.send(Decision {
                 allow: false,
                 reason: reason.map(String::from),
+                ..Decision::default()
             });
         }
     }
@@ -567,8 +570,13 @@ impl App {
             Cmd::Show { run } => self.cmd_show(&run),
             Cmd::Reply { run } => self.cmd_reply(&run),
             Cmd::Send { run, text } => self.cmd_send(from, &run, &text).await,
-            Cmd::Approve { run, perm } => self.answer(from, &run, &perm, true, None).await,
-            Cmd::Deny { run, perm, reason } => self.answer(from, &run, &perm, false, reason).await,
+            Cmd::Approve { run, perm, answer } => {
+                self.answer(from, &run, &perm, true, None, answer).await
+            }
+            Cmd::Deny { run, perm, reason } => {
+                self.answer(from, &run, &perm, false, reason, Vec::new())
+                    .await
+            }
             Cmd::ApproveRun { run } => self.cmd_approve_run(from, &run).await,
             Cmd::DropRun { run } => self.cmd_drop_run(from, &run).await,
             Cmd::Attach { run } => self.cmd_attach(from, &run).await,
@@ -1007,7 +1015,11 @@ impl App {
         let env = self.env(h, &r.id, &state);
         let sp = harness::spawn(&argv, &r.cwd, &env, h.ssh(), &names)
             .map_err(|e| err!("{}: {e}", argv.first().map_or("", String::as_str)))?;
-        let mut parse = Parse::default();
+        // a resumed session reports its totals from its start, which the run already counted
+        let mut parse = Parse {
+            total: resume.map(|_| r.usage.clone()).unwrap_or_default(),
+            ..Parse::default()
+        };
         let first = forwarded.into_iter().map(|(_, v)| v);
         let first = first.chain(harness.open(&spec, &mut parse)).collect();
         self.serve_proc(r, harness, sp, first, parse)
@@ -1051,6 +1063,7 @@ impl App {
                 stdin: tx,
                 parse,
                 busy: false,
+                background: 0,
                 idle_since: Instant::now(),
                 _child: sp.child,
             },
@@ -1096,7 +1109,10 @@ impl App {
         let idle = {
             let mut procs = locked(&self.procs);
             let idle = procs.get(id).is_some_and(|p| {
-                p.id == proc && !p.busy && p.idle_since.elapsed() >= self.idle_kill
+                p.id == proc
+                    && !p.busy
+                    && p.background == 0
+                    && p.idle_since.elapsed() >= self.idle_kill
             });
             idle.then(|| procs.remove(id)).flatten()
         };
@@ -1125,7 +1141,22 @@ impl App {
             match out {
                 Out::Session(s) => r.session = Some(s),
                 Out::Rekey => drop(locked(&self.rekey).insert(r.id.clone())),
-                Out::Prompt => r.phase = Phase::Working,
+                Out::Prompt => {
+                    r.phase = Phase::Working;
+                    if let Some(p) = locked(&self.procs).get_mut(&r.id) {
+                        p.busy = true;
+                    }
+                }
+                Out::Background(n) => {
+                    let quiet = locked(&self.procs).get_mut(&r.id).is_some_and(|p| {
+                        p.background = n;
+                        n == 0 && !p.busy
+                    });
+                    // idle_kill counts from the last task's end
+                    if quiet {
+                        self.idle(&r.id);
+                    }
+                }
                 Out::Text(text) => self.emit(&r, Kind::Text, json!({ "text": text }))?,
                 Out::ToolStart { tool } => {
                     self.emit(&r, Kind::ToolStart, json!({ "tool": tool }))?
@@ -1214,6 +1245,7 @@ impl App {
                 return harness.respond(&Decision {
                     allow: false,
                     reason: Some(FOREIGN.into()),
+                    ..Decision::default()
                 });
             }
             return json!({});
@@ -1255,11 +1287,13 @@ impl App {
     ) -> Decision {
         let allow = Decision {
             allow: true,
-            reason: None,
+            call: Some((tool.clone(), input.clone())),
+            ..Decision::default()
         };
         let deny = |why: &str| Decision {
             allow: false,
             reason: Some(why.into()),
+            ..Decision::default()
         };
         let (tx, mut rx) = oneshot::channel();
         let key = {
@@ -1347,10 +1381,12 @@ impl App {
         perm: &str,
         allow: bool,
         reason: Option<String>,
+        answers: Vec<String>,
     ) -> Result<Value> {
         let _turn = self.turns.lock().await;
         let mut r = self.get(id)?;
         Self::owned(&r, from)?;
+        let harness = Self::harness(&r)?;
         if !r.phase.live() {
             return Err(Failure::new(
                 format!("{id} is {}: it takes no approvals", r.phase.as_str()),
@@ -1359,14 +1395,34 @@ impl App {
             .into());
         }
         let key = (id.clone(), perm.to_string());
+        let asks = |tool: &str| {
+            if allow && answers.is_empty() && harness.asks(tool) {
+                return Err(Failure::new(
+                    format!("{id} {perm} is a question: {tool} takes answers, not a yes"),
+                    format!(
+                        "drover approve {id} {perm} --answer <label or text> (one per question)"
+                    ),
+                ));
+            }
+            Ok(())
+        };
         let waiter = locked(&self.waiting).remove(&key);
         if let Some(w) = waiter {
+            if let Err(e) = asks(&w.tool) {
+                locked(&self.waiting).insert(key, w);
+                return Err(e.into());
+            }
             let others = locked(&self.waiting).keys().any(|(run, _)| run == id);
             if r.phase == Phase::Needs && !others {
                 r.phase = Phase::Working;
                 self.save(&r)?;
             }
-            let _ = w.tx.send(Decision { allow, reason });
+            let _ = w.tx.send(Decision {
+                allow,
+                reason,
+                call: Some((w.tool, w.input)),
+                answers,
+            });
             return Ok(
                 json!({ "run": id, "perm": perm, "allowed": allow, "help": [format!("drover show {id}")] }),
             );
@@ -1379,6 +1435,10 @@ impl App {
             )
             .into());
         };
+        if let Err(e) = asks(&tool) {
+            locked(&self.expired).insert(key, (tool, input, at));
+            return Err(e.into());
+        }
         if allow {
             // like send: a prompt typed into a running turn would be queued behind it
             if r.phase != Phase::Idle {
@@ -1392,10 +1452,17 @@ impl App {
                 )
                 .into());
             }
-            let text = format!(
-                "drover: the user approved the {tool} call that was denied with \"awaiting approval\": {}. Make that call again now.",
-                call(&input)
-            );
+            let text = match answers.as_slice() {
+                [] => format!(
+                    "drover: the user approved the {tool} call that was denied with \"awaiting approval\": {}. Make that call again now.",
+                    call(&input)
+                ),
+                a => format!(
+                    "drover: the user answered the {tool} call that was denied with \"awaiting approval\": {}. Their answers, one per question: {}",
+                    call(&input),
+                    a.join(" | ")
+                ),
+            };
             if let Err(e) = self.deliver(&mut r, &text).await {
                 locked(&self.expired).insert(key, (tool, input, at));
                 return Err(e);
@@ -1593,13 +1660,17 @@ impl App {
 
     async fn cmd_send(&self, from: Option<&RunId>, id: &RunId, text: &str) -> Result<Value> {
         // the question the agent waits on takes your text as its answer
+        let asks = Self::harness(&self.get(id)?)?;
         let question = locked(&self.waiting)
             .iter()
-            .find(|((run, _), w)| run == id && w.tool == harness::acp::QUESTION)
+            .find(|((run, _), w)| {
+                run == id && (w.tool == harness::acp::QUESTION || asks.asks(&w.tool))
+            })
             .map(|((_, perm), _)| perm.clone());
         if let Some(perm) = question {
+            let answer = text.to_string();
             return self
-                .answer(from, id, &perm, true, Some(text.to_string()))
+                .answer(from, id, &perm, true, Some(answer.clone()), vec![answer])
                 .await;
         }
         let _turn = self.turns.lock().await;
@@ -3210,6 +3281,7 @@ cat >/dev/null
             stdin: tx,
             parse: Arc::default(),
             busy: true,
+            background: 0,
             idle_since: Instant::now(),
             ident,
             _child: sp.child,

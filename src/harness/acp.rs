@@ -795,6 +795,7 @@ mod tests {
         Decision {
             allow,
             reason: reason.map(String::from),
+            ..Decision::default()
         }
     }
 

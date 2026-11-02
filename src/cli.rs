@@ -46,7 +46,14 @@ pub enum Cmd {
     /// The next prompt to a run you own; - reads it from stdin
     Send { run: RunId, text: String },
     /// Allow a tool call a run waits on (its `needs` perm). Late, it resumes the run with the approval
-    Approve { run: RunId, perm: String },
+    Approve {
+        run: RunId,
+        perm: String,
+        /// An answer to a question the agent asks (Claude's AskUserQuestion), one per question in
+        /// order: an option's label, or your own text
+        #[arg(long)]
+        answer: Vec<String>,
+    },
     /// Deny a tool call a run waits on; the agent reads the reason
     Deny {
         run: RunId,

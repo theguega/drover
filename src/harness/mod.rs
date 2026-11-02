@@ -74,12 +74,18 @@ pub enum Out {
     Cancel,        // what the agent asked is over: the run's waiting calls are answered
     End,           // the session ended
     Rekey,         // the next hook brings a new session, in the same agent
+    // how many background tasks (shells, subagents) the process runs: it stays warm while any do
+    Background(usize),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Decision {
     pub allow: bool,
     pub reason: Option<String>,
+    // the call, tool and input, for a harness whose allow must repeat it
+    pub call: Option<(String, Value)>,
+    // the owner's answers to a question tool, in order
+    pub answers: Vec<String>,
 }
 
 pub enum Abort {
@@ -93,6 +99,9 @@ pub enum Abort {
 pub struct Parse {
     pub tools: HashMap<String, String>, // tool call id to tool name
     pub cost: f64,                      // the process's running cost, at the last turn's end
+    // Claude's session totals at the last turn's end: the run's own when the process resumed it
+    pub total: Usage,
+    pub turn: bool, // the turn's output began
     pub acp: acp::Conn,
 }
 
@@ -119,6 +128,10 @@ pub trait Harness: Sync {
     }
     fn respond(&self, _d: &Decision) -> Value {
         json!({})
+    }
+    // A tool whose allow needs the owner's answers (approve --answer), not a yes.
+    fn asks(&self, _tool: &str) -> bool {
+        false
     }
     // Variables of drover's environment a remote process gets on its stdin, never on a command
     // line: (drover's name, the name the process has it under).
